@@ -1,0 +1,12 @@
+# Wasl — وصل
+
+**A standalone MCP server for agent-to-agent connection** — lets AI coding-agent CLIs (Claude Code,
+Codex, Gemini, …) **consult**, **command**, **message**, and **transfer data** with each other, within a
+host and **across hosts**, with a **human-in-the-loop gate before every send**.
+
+Usable by anyone, with or without [Marsad](https://github.com/mewais/Marsad). See
+[`ARCHITECTURE.md`](./ARCHITECTURE.md) for the block map, the three-tier gate design, and the
+per-host daemon mesh. Built in Rust (official `rmcp` MCP SDK), test-first, 100%-coverage per block.
+
+## Status
+Greenfield. Standing up the block-decomposed core (M1) test-first.

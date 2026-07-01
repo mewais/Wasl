@@ -1,0 +1,15 @@
+[package]
+name = "wasl-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl wire + domain types: MCP tool params/results, agent cards, envelopes, gate + elicitation shapes"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
