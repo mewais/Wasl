@@ -12,6 +12,7 @@ members = [
     "crates/wasl-daemon",
     "crates/wasl-e2e",
     "crates/wasl-mcp",
+    "crates/wasl-mesh",
 ]
 
 [workspace.package]
