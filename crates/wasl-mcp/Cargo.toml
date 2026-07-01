@@ -1,0 +1,29 @@
+[package]
+name = "wasl-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl MCP server: exposes consult/command/message/transfer as MCP tools, gating each via elicitation and dispatching over the tested Wasl cores"
+
+[[bin]]
+name = "wasl-mcpd"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasl-proto = { workspace = true }
+wasl-gate = { workspace = true }
+wasl-audit = { workspace = true }
+wasl-registry = { workspace = true }
+wasl-mailbox = { workspace = true }
+wasl-transfer = { workspace = true }
+wasl-server = { workspace = true }
+wasl-daemon = { workspace = true }
+rmcp = { version = "0.9", features = ["server", "transport-io"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync"] }
+
+[dev-dependencies]

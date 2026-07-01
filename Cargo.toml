@@ -11,6 +11,7 @@ members = [
     "crates/wasl-server",
     "crates/wasl-daemon",
     "crates/wasl-e2e",
+    "crates/wasl-mcp",
 ]
 
 [workspace.package]
