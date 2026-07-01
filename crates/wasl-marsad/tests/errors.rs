@@ -200,7 +200,7 @@ fn e3_failed_emit_leaves_prior_cached_obs_intact() {
     let good = observation(1, ObsKind::Message, "alice", &["bob"], "healthy obs");
     healthy.observe(good.clone()).expect("observe ok");
     assert_eq!(healthy.len(), 1);
-    assert_eq!(healthy.feed(), &[good.clone()]);
+    assert_eq!(healthy.feed(), std::slice::from_ref(&good));
 
     let mut broken = Connector::new(FakeLink::failing_emit());
     let bad = observation(2, ObsKind::Message, "carol", &["dave"], "broken obs");

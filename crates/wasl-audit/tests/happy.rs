@@ -75,7 +75,7 @@ fn a1_record_appends_to_sink_and_caches_in_order() {
     assert_eq!(log.record(e1.clone()), Ok(()));
     assert!(!log.is_empty());
     assert_eq!(log.len(), 1);
-    assert_eq!(log.entries(), &[e1.clone()]);
+    assert_eq!(log.entries(), std::slice::from_ref(&e1));
 
     assert_eq!(log.record(e2.clone()), Ok(()));
     assert_eq!(log.len(), 2);

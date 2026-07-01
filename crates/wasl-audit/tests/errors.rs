@@ -90,7 +90,7 @@ fn e1_record_partial_failure_only_uncaches_the_failing_entry() {
     let e1 = entry(1, "alice", "bob", "first entry, sink is healthy");
     assert_eq!(log.record(e1.clone()), Ok(()));
     assert_eq!(log.len(), 1);
-    assert_eq!(log.entries(), &[e1.clone()]);
+    assert_eq!(log.entries(), std::slice::from_ref(&e1));
 
     // Now flip a *fresh* always-failing log to verify no partial caching
     // occurs on the failing call itself (the crate must not implement
