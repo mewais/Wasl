@@ -1,0 +1,16 @@
+[package]
+name = "wasl-gate"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl three-tier gate: mode selection (elicitation/prepare-commit/marsad) + pending-approval ledger"
+
+[dependencies]
+serde = { workspace = true }
+wasl-proto = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
