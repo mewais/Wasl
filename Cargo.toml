@@ -10,6 +10,7 @@ members = [
     "crates/wasl-marsad",
     "crates/wasl-server",
     "crates/wasl-daemon",
+    "crates/wasl-e2e",
 ]
 
 [workspace.package]
@@ -27,6 +28,9 @@ wasl-audit = { path = "crates/wasl-audit" }
 wasl-registry = { path = "crates/wasl-registry" }
 wasl-mailbox = { path = "crates/wasl-mailbox" }
 wasl-transfer = { path = "crates/wasl-transfer" }
+wasl-marsad = { path = "crates/wasl-marsad" }
+wasl-server = { path = "crates/wasl-server" }
+wasl-daemon = { path = "crates/wasl-daemon" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
