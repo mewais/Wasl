@@ -1,0 +1,18 @@
+[package]
+name = "wasl-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl server gate+audit spine: run the three-tier permission gate and record decisions to the audit log (Surfacer trait)"
+
+[dependencies]
+serde = { workspace = true }
+wasl-proto = { workspace = true }
+wasl-gate = { workspace = true }
+wasl-audit = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
