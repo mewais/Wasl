@@ -1,5 +1,10 @@
 //! Shared test fakes for the `wasl_server` black-box suite.
 //!
+// Rust compiles this shared helper into each integration-test binary separately,
+// so a fake used by only one binary reads as dead in the other — expected for a
+// common test module. Allow it rather than fragmenting the fakes per-file.
+#![allow(dead_code)]
+//!
 //! A scriptable fake `Surfacer` (captures the `GateMode` it was called with and
 //! returns a preloaded `GateOutcome`, or asserts it was NOT called) and a fake
 //! `Sink` (records appended entries and can be scripted to fail on `append`).
