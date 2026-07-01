@@ -9,9 +9,7 @@ use serde_json::json;
 
 use wasl_a2a_server::{ExecError, TaskExecutor};
 use wasl_a2a_types::Part;
-use wasl_adapter::{
-    delivery_from_message, AdapterError, AdapterExecutor, Delivery, DeliveryKind,
-};
+use wasl_adapter::{delivery_from_message, AdapterError, AdapterExecutor, Delivery, DeliveryKind};
 
 use common::{msg, wasl_meta, FakeAdapter};
 
@@ -23,7 +21,9 @@ fn a1_delivery_from_message_extracts_kind_from_text_and_data() {
         Some(wasl_meta("consult", "A")),
         vec![
             Part::Text { text: "hi".into() },
-            Part::Data { data: json!({ "x": 1 }) },
+            Part::Data {
+                data: json!({ "x": 1 }),
+            },
         ],
     );
 
@@ -89,7 +89,9 @@ fn a2_no_text_part_yields_empty_text() {
     // Valid metadata, but the parts carry no Text (only a DataPart).
     let message = msg(
         Some(wasl_meta("consult", "A")),
-        vec![Part::Data { data: json!({ "k": "v" }) }],
+        vec![Part::Data {
+            data: json!({ "k": "v" }),
+        }],
     );
 
     let delivery = delivery_from_message("ctx-4".to_string(), &message);
@@ -145,7 +147,9 @@ async fn a4_execute_success_wraps_reply_and_passes_exact_delivery() {
         Some(wasl_meta("consult", "B")),
         vec![
             Part::Text { text: "hi".into() },
-            Part::Data { data: json!({ "x": 1 }) },
+            Part::Data {
+                data: json!({ "x": 1 }),
+            },
         ],
     );
 
