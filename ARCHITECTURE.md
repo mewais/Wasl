@@ -29,22 +29,37 @@ tool-level `prepare`/`commit` fallback) and remains fully functional.
 
 ## Block map (crates = blocks). Tiers: L0 pure · L1 trait-mocked · L2 integration-bound.
 
-| # | Crate | Tier | Purpose |
-|---|---|---|---|
-| WP | `wasl-proto` | L0 | Wire + domain types: agent cards, the 4 tool params/results (multicast peers), reply envelopes, gate request/decision/token, `elicitation/create` shapes. |
-| WG | `wasl-gate` | L1 | Three-tier gate state machine: pick mode per client capability, track pending approvals + `prepare`/`commit` tokens. `Surfacer` trait (elicitation / prepare-commit / marsad impl it). |
-| WR | `wasl-registry` | L1 | Peer registry + agent cards + mesh routing table (who's on which host, how to reach). `MeshTransport` trait. |
-| WM | `wasl-mailbox` | L0 | Message routing: inbox/outbox, multicast fan-out + reply fan-in, correlation. Pure. |
-| WX | `wasl-transfer` | L1 | Transfer tool: pure `scp -3`/`rsync` argv builder (direct A→B, A→many) + `Runner` trait. |
-| WA | `wasl-audit` | L1 | Durable, human-auditable interaction+decision log. `Backend` trait (mirrors marsad-store). |
-| WS | `wasl-server` | L2 | MCP server facade: tools → gate → registry/mailbox/transfer → audit; stdio + HTTP transports. |
-| WD | `wasl-daemon` | L2 | Per-host daemon binary + mesh networking (daemon↔daemon). |
-| WC | `wasl-marsad` | L1 | Optional Tier-3 Marsad connector: surface gates + observation feed to Marsad. |
+Status: ✅ implemented + tested (100% line+region where a coverage unit; green otherwise); 🔩 IO shell
+(verified by compile + loopback/smoke, logic delegated to the tested cores below it).
+
+| # | Crate | Tier | Status | Purpose |
+|---|---|---|---|---|
+| WP | `wasl-proto` | L0 | ✅ | Wire + domain types: agent cards, the 4 tool params/results (multicast peers), reply envelopes, gate request/decision/token, `elicitation/create` shapes. |
+| WG | `wasl-gate` | L1 | ✅ | Three-tier gate: pick mode per client capability (`choose_mode`), build the secret-free request/elicitation, map outcome→decision, track `prepare`/`commit` tokens (`GateLedger`). |
+| WR | `wasl-registry` | L1 | ✅ | Peer registry + agent cards + resolution (`resolve`/`resolve_many` → local vs remote `Resolved`). |
+| WM | `wasl-mailbox` | L0 | ✅ | Message routing: multicast `fan_out` (`base:i` ids) + reply fan-in `Correlation` + per-owner `Mailbox`. Pure. |
+| WX | `wasl-transfer` | L1 | ✅ | Transfer tool: pure `scp -3`/`rsync` argv builder (direct A→B, A→many) + `Runner` trait + `execute`. |
+| WA | `wasl-audit` | L1 | ✅ | Durable, human-auditable interaction+decision log over an append-only `Sink` (durability-first). |
+| WC | `wasl-marsad` | L1 | ✅ | Optional Tier-3 Marsad connector: surface gates → decision, notify auto-approved, observation feed, over a `MarsadLink` seam. |
+| WS | `wasl-server` | L2 | ✅ | Gate+audit **spine**: `Gatekeeper` runs the three-tier gate (Tier-1 elicitation / Tier-3 marsad synchronous via `Surfacer`; Tier-2 prepare→commit via the ledger) wired to the audit log. Routing deferred to WD. |
+| WD | `wasl-daemon` | L2 | ✅ | Routing **core**: resolve peers + fan-out envelopes + dispatch consult/command/message over a `Mesh` seam (partial multicast) + transfer delegate. Socket IO is WMESH. |
+| E2E | `wasl-e2e` | — | ✅ | Cross-crate scenario suite: gate(server) → dispatch(daemon) → audit → marsad, composed with fakes; proves seam agreement. |
+| MCP | `wasl-mcp` (`wasl-mcpd`) | L2 | 🔩 | **The MCP server.** Exposes the 4 tools over rmcp 0.9/stdio; gates each via `elicitation/create`, dispatches over WD, audits — sync `resolve_and_dispatch` core unit-tested, async rmcp/stdio shell + client smoke test. |
+| WMESH | `wasl-mesh` | L2 | 🔩 | Concrete `std::net` `Mesh`: `TcpMesh` client (deliver envelope→reply) + `serve`/`Handler` side; framing/addr unit-tested, socket roundtrip loopback-tested. |
 
 **Dependency DAG (acyclic):** `proto ← gate, registry, mailbox, transfer, audit`;
-`proto,gate,registry,mailbox,transfer,audit ← server`; `server ← daemon`; `gate ← marsad`.
+`proto,gate,audit ← server`; `proto,registry,mailbox,transfer ← daemon`; `gate ← marsad`;
+`server,daemon,audit,… ← mcp`; `daemon,registry ← mesh`; all ← `e2e`.
 
 **Milestones:**
-- **M1 — standalone core:** WP → WG · WR · WM · WX · WA → WS (Tier-1 elicitation + Tier-2 prepare/commit).
-- **M2 — mesh:** WD (per-host daemon peering; cross-host + broadcast over the network).
-- **M3 — Marsad integration:** WC (Tier-3 connector; observation feed) — pairs with Marsad's Phase-3 work.
+- **M1 — standalone core:** ✅ WP → WG · WR · WM · WX · WA · WC → WS → WD → E2E, and the runnable `wasl-mcpd`
+  MCP server (Tier-1 elicitation + Tier-2 prepare/commit; Tier-3 marsad connector present).
+- **M2 — mesh:** WMESH ✅ provides the socket transport (`TcpMesh` + `serve`); the per-host daemon **binary**
+  that runs `serve` + peers daemons and wires `TcpMesh` into `wasl-mcpd` for cross-host delivery is the
+  remaining runtime wiring (composes only ✅ pieces).
+- **M3 — Marsad integration:** WC ✅ (Tier-3 connector; observation feed) — the live wiring pairs with
+  Marsad's Phase-3 work.
+
+**Remaining (runtime/integration, gated on real systems — not unit-buildable in a headless sandbox):** the
+per-host daemon binary + daemon↔daemon peering loop over WMESH; Tier-2/Tier-3 surfacing wired end-to-end
+through `wasl-mcpd` (prepare/commit token round-trips + the Marsad connector as a live `Surfacer`).
