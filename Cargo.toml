@@ -16,6 +16,7 @@ members = [
     "crates/wasl-a2a-types",
     "crates/wasl-a2a-server",
     "crates/wasl-a2a-client",
+    "crates/wasl-adapter",
 ]
 
 [workspace.package]
@@ -36,6 +37,7 @@ wasl-transfer = { path = "crates/wasl-transfer" }
 wasl-a2a-types = { path = "crates/wasl-a2a-types" }
 wasl-a2a-server = { path = "crates/wasl-a2a-server" }
 wasl-a2a-client = { path = "crates/wasl-a2a-client" }
+wasl-adapter = { path = "crates/wasl-adapter" }
 wasl-marsad = { path = "crates/wasl-marsad" }
 wasl-server = { path = "crates/wasl-server" }
 wasl-daemon = { path = "crates/wasl-daemon" }

@@ -1,0 +1,19 @@
+[package]
+name = "wasl-adapter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl adapter: the last-inch AgentAdapter seam (deliver an A2A message to a live agent) + AdapterExecutor bridging it into the A2A server"
+
+[dependencies]
+wasl-a2a-types = { workspace = true }
+wasl-a2a-server = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
