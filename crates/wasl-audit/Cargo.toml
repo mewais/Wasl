@@ -1,0 +1,16 @@
+[package]
+name = "wasl-audit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl audit log: durable, human-auditable interaction + decision record (Sink trait)"
+
+[dependencies]
+serde = { workspace = true }
+wasl-proto = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

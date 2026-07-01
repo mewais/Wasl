@@ -6,6 +6,7 @@ members = [
     "crates/wasl-registry",
     "crates/wasl-mailbox",
     "crates/wasl-transfer",
+    "crates/wasl-audit",
 ]
 
 [workspace.package]
