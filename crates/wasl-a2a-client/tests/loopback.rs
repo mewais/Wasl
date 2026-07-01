@@ -105,7 +105,10 @@ async fn cl4_fetch_agent_card_matches_served_card() {
     let addr = spawn_server(Arc::new(PongExecutor)).await;
     let client = A2aClient::new(format!("http://{addr}/"));
 
-    let card = client.fetch_agent_card().await.expect("fetch_agent_card ok");
+    let card = client
+        .fetch_agent_card()
+        .await
+        .expect("fetch_agent_card ok");
     let expected = sample_card();
 
     assert_eq!(card.name, expected.name);
@@ -200,10 +203,7 @@ async fn cl7_transport_failure_is_http_error() {
 // ── CL8: ClientError Display/Error + malformed body → Decode ───────────────
 
 async fn spawn_garbage_server() -> SocketAddr {
-    let app = Router::new().route(
-        "/",
-        post(|| async { (StatusCode::OK, "{not json rpc}") }),
-    );
+    let app = Router::new().route("/", post(|| async { (StatusCode::OK, "{not json rpc}") }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
