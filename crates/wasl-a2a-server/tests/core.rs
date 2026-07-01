@@ -27,9 +27,7 @@ async fn c1_send_success_assigns_default_context_and_task_ids() {
     let exec = Arc::new(FakeExecutor::ok(two_parts()));
     let server = server_with(exec.clone());
 
-    let task = server
-        .handle_send(params_no_context("hi", "m1"))
-        .await;
+    let task = server.handle_send(params_no_context("hi", "m1")).await;
 
     // Fresh deterministic ids from CounterIds.
     assert_eq!(task.id, "task-1");
@@ -74,9 +72,7 @@ async fn c2_send_executor_error_is_failed_and_stored() {
     let exec = Arc::new(FakeExecutor::err("kaboom failure"));
     let server = server_with(exec);
 
-    let task = server
-        .handle_send(params_no_context("hi", "m1"))
-        .await;
+    let task = server.handle_send(params_no_context("hi", "m1")).await;
 
     assert_eq!(task.status.state, TaskState::Failed);
 
@@ -161,9 +157,7 @@ async fn c5_stream_success_emits_working_artifact_completed() {
     let exec = Arc::new(FakeExecutor::ok(two_parts()));
     let server = server_with(exec);
 
-    let events = server
-        .stream_events(params_no_context("hi", "m1"))
-        .await;
+    let events = server.stream_events(params_no_context("hi", "m1")).await;
 
     assert_eq!(events.len(), 3, "success stream has exactly 3 events");
 
@@ -203,9 +197,7 @@ async fn c5_stream_error_emits_working_then_failed() {
     let exec = Arc::new(FakeExecutor::err("stream boom"));
     let server = server_with(exec);
 
-    let events = server
-        .stream_events(params_no_context("hi", "m1"))
-        .await;
+    let events = server.stream_events(params_no_context("hi", "m1")).await;
 
     assert_eq!(events.len(), 2, "error stream has exactly 2 events");
 

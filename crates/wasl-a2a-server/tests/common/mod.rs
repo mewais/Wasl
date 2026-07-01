@@ -7,9 +7,7 @@
 
 use std::sync::Mutex;
 
-use wasl_a2a_types::{
-    AgentCapabilities, AgentCard, AgentSkill, Message, MessageSendParams, Part,
-};
+use wasl_a2a_types::{AgentCapabilities, AgentCard, AgentSkill, Message, MessageSendParams, Part};
 
 use wasl_a2a_server::{ExecError, TaskExecutor};
 
@@ -100,15 +98,8 @@ impl FakeExecutor {
 
 #[async_trait::async_trait]
 impl TaskExecutor for FakeExecutor {
-    async fn execute(
-        &self,
-        context_id: String,
-        message: Message,
-    ) -> Result<Vec<Part>, ExecError> {
-        self.seen
-            .lock()
-            .unwrap()
-            .push((context_id, message));
+    async fn execute(&self, context_id: String, message: Message) -> Result<Vec<Part>, ExecError> {
+        self.seen.lock().unwrap().push((context_id, message));
         self.result.clone()
     }
 }

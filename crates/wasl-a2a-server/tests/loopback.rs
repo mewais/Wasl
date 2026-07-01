@@ -18,7 +18,7 @@ use std::time::Duration;
 use common::{sample_card, two_parts, FakeExecutor};
 
 use wasl_a2a_server::{A2aServer, CounterIds};
-use wasl_a2a_types::{MessageSendParams, Message};
+use wasl_a2a_types::{Message, MessageSendParams};
 
 use serde_json::{json, Value};
 
@@ -244,7 +244,10 @@ async fn c6_unknown_method_and_bad_params_over_http() {
         .json()
         .await
         .expect("unknown json");
-    assert!(unknown.get("result").is_none(), "expected error, got {unknown:?}");
+    assert!(
+        unknown.get("result").is_none(),
+        "expected error, got {unknown:?}"
+    );
     assert_eq!(unknown["error"]["code"], -32601);
 
     // Params that don't deserialize into MessageSendParams → InvalidParams (-32602).
