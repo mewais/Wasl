@@ -14,6 +14,7 @@ members = [
     "crates/wasl-mcp",
     "crates/wasl-mesh",
     "crates/wasl-a2a-types",
+    "crates/wasl-a2a-server",
 ]
 
 [workspace.package]
@@ -32,9 +33,15 @@ wasl-registry = { path = "crates/wasl-registry" }
 wasl-mailbox = { path = "crates/wasl-mailbox" }
 wasl-transfer = { path = "crates/wasl-transfer" }
 wasl-a2a-types = { path = "crates/wasl-a2a-types" }
+wasl-a2a-server = { path = "crates/wasl-a2a-server" }
 wasl-marsad = { path = "crates/wasl-marsad" }
 wasl-server = { path = "crates/wasl-server" }
 wasl-daemon = { path = "crates/wasl-daemon" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync", "net", "time"] }
+axum = "0.7"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+async-trait = "0.1"
+futures = "0.3"
