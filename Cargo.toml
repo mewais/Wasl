@@ -13,6 +13,7 @@ members = [
     "crates/wasl-e2e",
     "crates/wasl-mcp",
     "crates/wasl-mesh",
+    "crates/wasl-a2a-types",
 ]
 
 [workspace.package]
@@ -30,6 +31,7 @@ wasl-audit = { path = "crates/wasl-audit" }
 wasl-registry = { path = "crates/wasl-registry" }
 wasl-mailbox = { path = "crates/wasl-mailbox" }
 wasl-transfer = { path = "crates/wasl-transfer" }
+wasl-a2a-types = { path = "crates/wasl-a2a-types" }
 wasl-marsad = { path = "crates/wasl-marsad" }
 wasl-server = { path = "crates/wasl-server" }
 wasl-daemon = { path = "crates/wasl-daemon" }
