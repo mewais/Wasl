@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/wasl-proto",
     "crates/wasl-gate",
+    "crates/wasl-registry",
 ]
 
 [workspace.package]
