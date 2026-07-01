@@ -1,0 +1,19 @@
+[package]
+name = "wasl-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl daemon routing core: resolve peers and dispatch consult/command/message/transfer over a Mesh seam (local + cross-host multicast)"
+
+[dependencies]
+serde = { workspace = true }
+wasl-proto = { workspace = true }
+wasl-registry = { workspace = true }
+wasl-mailbox = { workspace = true }
+wasl-transfer = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
