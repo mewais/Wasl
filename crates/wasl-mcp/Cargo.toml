@@ -23,7 +23,10 @@ wasl-mailbox = { workspace = true }
 wasl-transfer = { workspace = true }
 wasl-server = { workspace = true }
 wasl-daemon = { workspace = true }
-rmcp = { version = "0.9", features = ["server", "transport-io"] }
+rmcp = { version = "0.9", features = ["server", "transport-io", "elicitation"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync"] }
 
 [dev-dependencies]
+# Client + async-rw transport, dev-only, so the smoke test can drive the server
+# over an in-memory duplex pipe and list its tools. Same version as the main dep.
+rmcp = { version = "0.9", features = ["client", "server", "transport-async-rw"] }
