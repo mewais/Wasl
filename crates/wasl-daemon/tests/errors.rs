@@ -24,8 +24,8 @@ fn e1_transfer_no_destinations() {
 
     let mut runner = FakeRunner::new();
 
-    let err = transfer(Tool::Scp, &params, &mut runner)
-        .expect_err("empty dst_hosts must be an error");
+    let err =
+        transfer(Tool::Scp, &params, &mut runner).expect_err("empty dst_hosts must be an error");
     assert_eq!(err, TransferError::NoDestinations);
 
     // The runner was never invoked.

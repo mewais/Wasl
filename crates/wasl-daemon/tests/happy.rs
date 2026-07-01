@@ -220,11 +220,17 @@ fn d5_multicast_ordering() {
     // Delivered + replies follow the target order exactly.
     assert_eq!(out.delivered, vec![agent("p2"), agent("p0"), agent("p1")]);
     assert_eq!(
-        out.replies.iter().map(|r| r.from.clone()).collect::<Vec<AgentId>>(),
+        out.replies
+            .iter()
+            .map(|r| r.from.clone())
+            .collect::<Vec<AgentId>>(),
         vec![agent("p2"), agent("p0"), agent("p1")]
     );
     assert_eq!(
-        out.replies.iter().map(|r| r.body.clone()).collect::<Vec<String>>(),
+        out.replies
+            .iter()
+            .map(|r| r.body.clone())
+            .collect::<Vec<String>>(),
         vec!["r2".to_string(), "r0".to_string(), "r1".to_string()]
     );
 
@@ -253,9 +259,7 @@ fn d6_unknown_peer_partitions() {
     let from = agent("caller");
     let targets = vec![agent("a"), agent("b"), agent("c")];
 
-    let mut mesh = FakeMesh::new()
-        .with_reply("a", "ra")
-        .with_reply("c", "rc");
+    let mut mesh = FakeMesh::new().with_reply("a", "ra").with_reply("c", "rc");
 
     let out = dispatch(
         &reg,

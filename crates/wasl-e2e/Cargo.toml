@@ -1,0 +1,25 @@
+[package]
+name = "wasl-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl cross-crate end-to-end scenario suite: gate -> dispatch -> audit -> Marsad, composed with fakes"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasl-proto = { workspace = true }
+wasl-gate = { workspace = true }
+wasl-registry = { workspace = true }
+wasl-mailbox = { workspace = true }
+wasl-transfer = { workspace = true }
+wasl-audit = { workspace = true }
+wasl-marsad = { workspace = true }
+wasl-server = { workspace = true }
+wasl-daemon = { workspace = true }
