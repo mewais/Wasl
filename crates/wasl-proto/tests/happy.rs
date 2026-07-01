@@ -6,10 +6,10 @@
 //! spec in `crates/wasl-proto/src/**` — that is the expected state.
 
 use wasl_proto::{
-    AgentCard, AgentId, ApprovalToken, CommandParams, CommandResult, ConsultParams,
+    is_multicast, AgentCard, AgentId, ApprovalToken, CommandParams, CommandResult, ConsultParams,
     ConsultResult, ElicitationAction, ElicitationCreate, ElicitationResponse, Envelope,
     EnvelopeKind, GateDecision, GateKind, HostId, MessageParams, MessageResult, Reply,
-    TransferParams, TransferResult, is_multicast,
+    TransferParams, TransferResult,
 };
 
 // ---------------------------------------------------------------------

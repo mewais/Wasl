@@ -7,9 +7,7 @@
 
 use std::error::Error;
 
-use wasl_proto::{
-    ProtoError, parse_command, parse_consult, parse_message, parse_transfer,
-};
+use wasl_proto::{parse_command, parse_consult, parse_message, parse_transfer, ProtoError};
 
 // ---------------------------------------------------------------------
 // E1 — parse_consult on valid JSON -> Ok with fields; on malformed JSON ->

@@ -10,6 +10,4 @@ description = "Wasl wire + domain types: MCP tool params/results, agent cards, e
 
 [dependencies]
 serde = { workspace = true }
-
-[dev-dependencies]
 serde_json = { workspace = true }
