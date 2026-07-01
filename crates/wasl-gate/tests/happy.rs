@@ -69,7 +69,10 @@ fn g1_gate_mode_serde_snake_case_round_trip() {
 fn g2_client_caps_serde_round_trip_all_combos() {
     for elicitation in [true, false] {
         for marsad in [true, false] {
-            let caps = ClientCaps { elicitation, marsad };
+            let caps = ClientCaps {
+                elicitation,
+                marsad,
+            };
             let json = serde_json::to_string(&caps).expect("serialize ClientCaps");
             let back: ClientCaps = serde_json::from_str(&json).expect("deserialize ClientCaps");
             assert_eq!(back, caps, "round-trip for {caps:?}");
@@ -380,7 +383,11 @@ fn g8_ledger_reprepare_same_token_overwrites() {
 
     ledger.prepare(token.clone(), req_v2.clone());
     assert_eq!(ledger.pending_count(), 1, "overwrite must not add an entry");
-    assert_eq!(ledger.peek(&token), Some(&req_v2), "peek must show the new request");
+    assert_eq!(
+        ledger.peek(&token),
+        Some(&req_v2),
+        "peek must show the new request"
+    );
     assert!(ledger.is_pending(&token));
 }
 
@@ -419,7 +426,10 @@ fn g9_ledger_two_distinct_tokens_independent() {
     let result = ledger.commit(&token_a, GateDecision::Approve);
     assert_eq!(result, Ok((req_a, GateDecision::Approve)));
 
-    assert!(!ledger.is_pending(&token_a), "committed token no longer pending");
+    assert!(
+        !ledger.is_pending(&token_a),
+        "committed token no longer pending"
+    );
     assert!(ledger.is_pending(&token_b), "other token remains pending");
     assert_eq!(ledger.pending_count(), 1);
     assert_eq!(ledger.peek(&token_b), Some(&req_b));

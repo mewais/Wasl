@@ -84,7 +84,10 @@ fn e3_commit_deny_returns_request_and_deny_and_clears_pending() {
     let result = ledger.commit(&token, decision.clone());
 
     assert_eq!(result, Ok((req, decision)));
-    assert!(!ledger.is_pending(&token), "denied gate must clear from pending");
+    assert!(
+        !ledger.is_pending(&token),
+        "denied gate must clear from pending"
+    );
     assert_eq!(ledger.pending_count(), 0);
     assert_eq!(ledger.peek(&token), None);
 }
@@ -98,7 +101,10 @@ fn e4_gate_error_display_non_empty_and_distinct() {
     let unknown_display = GateError::UnknownToken.to_string();
     let resolved_display = GateError::AlreadyResolved.to_string();
 
-    assert!(!unknown_display.is_empty(), "UnknownToken Display must be non-empty");
+    assert!(
+        !unknown_display.is_empty(),
+        "UnknownToken Display must be non-empty"
+    );
     assert!(
         !resolved_display.is_empty(),
         "AlreadyResolved Display must be non-empty"
