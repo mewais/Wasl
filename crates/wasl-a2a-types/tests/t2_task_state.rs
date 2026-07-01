@@ -6,7 +6,10 @@ use wasl_a2a_types::TaskState;
 
 #[test]
 fn input_required_is_exactly_kebab_case() {
-    assert_eq!(to_value(TaskState::InputRequired).unwrap(), json!("input-required"));
+    assert_eq!(
+        to_value(TaskState::InputRequired).unwrap(),
+        json!("input-required")
+    );
 }
 
 #[test]

@@ -18,7 +18,7 @@ fn status_update_event_kind_final_and_camelcase() {
     let ev: TaskStatusUpdateEvent = from_value(canonical).unwrap();
     assert_eq!(ev.task_id, "t1");
     assert_eq!(ev.context_id, "c1");
-    assert_eq!(ev.final_, true);
+    assert!(ev.final_);
     assert_eq!(ev.status.state, TaskState::Working);
 
     let v = to_value(&ev).unwrap();
@@ -53,8 +53,8 @@ fn artifact_update_event_kind_and_camelcase() {
     assert_eq!(ev.task_id, "t2");
     assert_eq!(ev.context_id, "c2");
     assert_eq!(ev.artifact.artifact_id, "a1");
-    assert_eq!(ev.append, false);
-    assert_eq!(ev.last_chunk, true);
+    assert!(!ev.append);
+    assert!(ev.last_chunk);
 
     let v = to_value(&ev).unwrap();
     assert_eq!(v["kind"], "artifact-update");
