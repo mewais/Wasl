@@ -29,7 +29,11 @@ fn caps(elicitation: bool, marsad: bool) -> ClientCaps {
 fn e1_tier1_audit_failure() {
     let sink = FakeSink::failing();
     let sink_log = sink.log();
-    let mut gk = Gatekeeper::new(caps(true, false), FakeSurfacer::new(GateOutcome::Approved), sink);
+    let mut gk = Gatekeeper::new(
+        caps(true, false),
+        FakeSurfacer::new(GateOutcome::Approved),
+        sink,
+    );
 
     let err = gk
         .authorize(
@@ -68,11 +72,18 @@ fn e2_commit_unknown_token() {
     );
 
     let err = gk
-        .commit(&ApprovalToken("never-prepared".to_string()), GateDecision::Approve, 1)
+        .commit(
+            &ApprovalToken("never-prepared".to_string()),
+            GateDecision::Approve,
+            1,
+        )
         .expect_err("unknown token must error");
 
     assert_eq!(err, ServerError::Gate(GateError::UnknownToken));
-    assert!(gk.audit_entries().is_empty(), "no decision recorded on error");
+    assert!(
+        gk.audit_entries().is_empty(),
+        "no decision recorded on error"
+    );
 }
 
 /// E3 — Tier-2 commit already-resolved: commit once (ok), then commit the same token again →
@@ -107,7 +118,11 @@ fn e3_commit_already_resolved() {
     assert_eq!(err, ServerError::Gate(GateError::AlreadyResolved));
 
     // Only the first (successful) commit was recorded.
-    assert_eq!(gk.audit_entries().len(), 1, "the re-commit must not record again");
+    assert_eq!(
+        gk.audit_entries().len(),
+        1,
+        "the re-commit must not record again"
+    );
 }
 
 /// E4 — Tier-2 commit audit failure: prepare ok, sink fails on commit → `Err(ServerError::Audit(_))`.
@@ -116,7 +131,11 @@ fn e4_commit_audit_failure() {
     let token = ApprovalToken("tok-e4".to_string());
     let sink = FakeSink::failing();
     let sink_log = sink.log();
-    let mut gk = Gatekeeper::new(caps(false, false), FakeSurfacer::new(GateOutcome::Approved), sink);
+    let mut gk = Gatekeeper::new(
+        caps(false, false),
+        FakeSurfacer::new(GateOutcome::Approved),
+        sink,
+    );
 
     gk.authorize(
         "req-e4".to_string(),

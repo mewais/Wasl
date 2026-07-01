@@ -2,7 +2,7 @@
 //! §Test plan (C1-C6).
 
 use wasl_gate::GateOutcome;
-use wasl_marsad::{ConnError, Connector, MarsadLink, ObsKind, Observation, decision_to_outcome};
+use wasl_marsad::{decision_to_outcome, ConnError, Connector, MarsadLink, ObsKind, Observation};
 use wasl_proto::{AgentId, GateDecision, GateKind, GateRequest};
 
 // ---------------------------------------------------------------------
@@ -41,10 +41,7 @@ impl MarsadLink for FakeLink {
         if self.fail_decision {
             return Err(ConnError::Transport("fake decision failure".to_string()));
         }
-        Ok(self
-            .scripted
-            .clone()
-            .unwrap_or(GateDecision::Approve))
+        Ok(self.scripted.clone().unwrap_or(GateDecision::Approve))
     }
 
     fn emit(&mut self, obs: &Observation) -> Result<(), ConnError> {

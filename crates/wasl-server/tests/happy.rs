@@ -273,7 +273,11 @@ fn s7_tier2_commit_approve() {
     assert_eq!(gk.pending_count(), 0);
 
     let entries = gk.audit_entries();
-    assert_eq!(entries.len(), 1, "commit records exactly one Decision entry");
+    assert_eq!(
+        entries.len(),
+        1,
+        "commit records exactly one Decision entry"
+    );
     let entry = &entries[0];
     assert_eq!(entry.kind, EntryKind::Decision);
     assert_eq!(entry.actor, from_agent(), "original from preserved");

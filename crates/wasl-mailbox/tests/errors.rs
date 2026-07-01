@@ -21,7 +21,10 @@ fn e1_record_from_unexpected_peer_is_rejected_and_state_unchanged() {
 
     let result = corr.record(stranger.clone(), "hi".to_string());
 
-    assert_eq!(result, Err(CorrelationError::UnexpectedReplier(stranger.clone())));
+    assert_eq!(
+        result,
+        Err(CorrelationError::UnexpectedReplier(stranger.clone()))
+    );
 
     // State unchanged: nothing recorded, still incomplete, pending untouched.
     assert!(!corr.is_complete());
@@ -39,7 +42,8 @@ fn e2_duplicate_reply_from_same_peer_is_rejected_only_first_stored() {
     let b = aid("b");
     let mut corr = Correlation::new(&[a.clone(), b.clone()]);
 
-    corr.record(a.clone(), "first".to_string()).expect("first reply from a is expected");
+    corr.record(a.clone(), "first".to_string())
+        .expect("first reply from a is expected");
 
     let second = corr.record(a.clone(), "second".to_string());
 
@@ -72,7 +76,10 @@ fn e3_correlation_error_display_is_nonempty_distinct_and_carries_id() {
 
     assert!(!unexpected_msg.is_empty());
     assert!(!duplicate_msg.is_empty());
-    assert_ne!(unexpected_msg, duplicate_msg, "Display must differ per variant");
+    assert_ne!(
+        unexpected_msg, duplicate_msg,
+        "Display must differ per variant"
+    );
 
     assert!(
         unexpected_msg.contains("peer-x"),

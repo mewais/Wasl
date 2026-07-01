@@ -114,8 +114,20 @@ fn a2_by_actor_filters_matching_only_in_record_order() {
 
     let a1 = entry(1, EntryKind::Consult, "alice", &["bob"], "alice consult 1");
     let b1 = entry(2, EntryKind::Message, "bob", &["alice"], "bob message 1");
-    let a2 = entry(3, EntryKind::Command, "alice", &["carol"], "alice command 1");
-    let c1 = entry(4, EntryKind::Transfer, "carol", &["alice"], "carol transfer 1");
+    let a2 = entry(
+        3,
+        EntryKind::Command,
+        "alice",
+        &["carol"],
+        "alice command 1",
+    );
+    let c1 = entry(
+        4,
+        EntryKind::Transfer,
+        "carol",
+        &["alice"],
+        "carol transfer 1",
+    );
 
     for e in [a1.clone(), b1.clone(), a2.clone(), c1.clone()] {
         log.record(e).expect("record ok");
@@ -194,7 +206,13 @@ fn a4_decisions_filters_only_some_decision_entries() {
 
     let no_decision = entry(1, EntryKind::Message, "alice", &["bob"], "just a message");
 
-    let mut approved = entry(2, EntryKind::Decision, "alice", &["bob"], "approved request");
+    let mut approved = entry(
+        2,
+        EntryKind::Decision,
+        "alice",
+        &["bob"],
+        "approved request",
+    );
     approved.decision = Some(GateDecision::Approve);
 
     let mut denied = entry(3, EntryKind::Decision, "alice", &["bob"], "denied request");
@@ -202,7 +220,13 @@ fn a4_decisions_filters_only_some_decision_entries() {
         reason: "not authorized".to_string(),
     });
 
-    let another_no_decision = entry(4, EntryKind::Consult, "alice", &["bob"], "another non-decision");
+    let another_no_decision = entry(
+        4,
+        EntryKind::Consult,
+        "alice",
+        &["bob"],
+        "another non-decision",
+    );
 
     for e in [
         no_decision,
@@ -250,7 +274,13 @@ fn a5_entry_kind_lowercase_serde_round_trip() {
 
 #[test]
 fn a5_audit_entry_serde_round_trip_decision_none() {
-    let e = entry(7, EntryKind::Message, "alice", &["bob", "carol"], "hi there");
+    let e = entry(
+        7,
+        EntryKind::Message,
+        "alice",
+        &["bob", "carol"],
+        "hi there",
+    );
     assert_eq!(e.decision, None);
 
     let json = serde_json::to_string(&e).expect("serialize AuditEntry");

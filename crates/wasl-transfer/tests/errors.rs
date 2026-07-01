@@ -18,7 +18,9 @@ struct FakeRunner {
 
 impl FakeRunner {
     fn new() -> Self {
-        FakeRunner { received: Vec::new() }
+        FakeRunner {
+            received: Vec::new(),
+        }
     }
 }
 
@@ -35,13 +37,20 @@ impl Runner for FakeRunner {
 
 #[test]
 fn e1_execute_with_empty_destinations_errs_no_destinations_runner_never_called() {
-    let params = TransferParams { src_host: hid("src"), dst_hosts: vec![], path: "/tmp/x".to_string() };
+    let params = TransferParams {
+        src_host: hid("src"),
+        dst_hosts: vec![],
+        path: "/tmp/x".to_string(),
+    };
     let mut runner = FakeRunner::new();
 
     let result = execute(Tool::Scp, &params, &mut runner);
 
     assert_eq!(result, Err(TransferError::NoDestinations));
-    assert!(runner.received.is_empty(), "runner must never be called when there are no destinations");
+    assert!(
+        runner.received.is_empty(),
+        "runner must never be called when there are no destinations"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -51,7 +60,10 @@ fn e1_execute_with_empty_destinations_errs_no_destinations_runner_never_called()
 #[test]
 fn e2_transfer_error_display_is_nonempty_distinct_and_failed_carries_fields() {
     let no_dst = TransferError::NoDestinations;
-    let failed = TransferError::Failed { dst_host: hid("hostX"), detail: "timed out".to_string() };
+    let failed = TransferError::Failed {
+        dst_host: hid("hostX"),
+        detail: "timed out".to_string(),
+    };
 
     let no_dst_msg = no_dst.to_string();
     let failed_msg = failed.to_string();

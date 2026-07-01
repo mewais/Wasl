@@ -3,7 +3,9 @@
 //! X5 (execute partial failure), X6 (TransferJob serde round-trip).
 
 use wasl_proto::{HostId, TransferParams, TransferResult};
-use wasl_transfer::{argv_for, execute, plan, rsync_argv, scp_argv, Runner, Tool, TransferError, TransferJob};
+use wasl_transfer::{
+    argv_for, execute, plan, rsync_argv, scp_argv, Runner, Tool, TransferError, TransferJob,
+};
 
 fn hid(s: &str) -> HostId {
     HostId(s.to_string())
@@ -22,13 +24,19 @@ struct FakeRunner {
 
 impl FakeRunner {
     fn new() -> Self {
-        FakeRunner { received: Vec::new(), fail_at: Vec::new() }
+        FakeRunner {
+            received: Vec::new(),
+            fail_at: Vec::new(),
+        }
     }
 
     fn failing_at(indices_and_details: &[(usize, &str)]) -> Self {
         FakeRunner {
             received: Vec::new(),
-            fail_at: indices_and_details.iter().map(|(i, d)| (*i, d.to_string())).collect(),
+            fail_at: indices_and_details
+                .iter()
+                .map(|(i, d)| (*i, d.to_string()))
+                .collect(),
         }
     }
 }
@@ -150,7 +158,11 @@ fn x3_plan_three_destinations_yields_three_jobs_in_order() {
 
 #[test]
 fn x3_plan_empty_destinations_yields_empty_vec() {
-    let params = TransferParams { src_host: hid("src"), dst_hosts: vec![], path: "/tmp/x".to_string() };
+    let params = TransferParams {
+        src_host: hid("src"),
+        dst_hosts: vec![],
+        path: "/tmp/x".to_string(),
+    };
 
     let jobs = plan(Tool::Rsync, &params);
 
@@ -170,7 +182,10 @@ fn x3_plan_single_destination_yields_one_job() {
 
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].dst_host, hid("solo"));
-    assert_eq!(jobs[0].argv, rsync_argv(&hid("src"), &hid("solo"), "/tmp/only"));
+    assert_eq!(
+        jobs[0].argv,
+        rsync_argv(&hid("src"), &hid("solo"), "/tmp/only")
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -189,7 +204,12 @@ fn x4_execute_all_success_delivers_all_in_order_no_failures() {
     let result = execute(Tool::Scp, &params, &mut runner).expect("all-success execute must be Ok");
     let (transfer_result, failures) = result;
 
-    assert_eq!(transfer_result, TransferResult { delivered: vec![hid("d0"), hid("d1"), hid("d2")] });
+    assert_eq!(
+        transfer_result,
+        TransferResult {
+            delivered: vec![hid("d0"), hid("d1"), hid("d2")]
+        }
+    );
     assert!(failures.is_empty());
     assert_eq!(failures, Vec::<TransferError>::new());
 
@@ -213,20 +233,37 @@ fn x5_execute_partial_failure_second_of_three_delivered_skips_it_others_continue
     };
     let mut runner = FakeRunner::failing_at(&[(1, "connection refused")]);
 
-    let (transfer_result, failures) =
-        execute(Tool::Rsync, &params, &mut runner).expect("partial failure is still an Ok(..) execute");
+    let (transfer_result, failures) = execute(Tool::Rsync, &params, &mut runner)
+        .expect("partial failure is still an Ok(..) execute");
 
-    assert_eq!(transfer_result, TransferResult { delivered: vec![hid("d0"), hid("d2")] });
+    assert_eq!(
+        transfer_result,
+        TransferResult {
+            delivered: vec![hid("d0"), hid("d2")]
+        }
+    );
     assert_eq!(
         failures,
-        vec![TransferError::Failed { dst_host: hid("d1"), detail: "connection refused".to_string() }]
+        vec![TransferError::Failed {
+            dst_host: hid("d1"),
+            detail: "connection refused".to_string()
+        }]
     );
 
     // The runner ran on all 3 destinations, in order, despite the mid failure.
     assert_eq!(runner.received.len(), 3);
-    assert_eq!(runner.received[0], rsync_argv(&hid("src"), &hid("d0"), "/tmp/payload"));
-    assert_eq!(runner.received[1], rsync_argv(&hid("src"), &hid("d1"), "/tmp/payload"));
-    assert_eq!(runner.received[2], rsync_argv(&hid("src"), &hid("d2"), "/tmp/payload"));
+    assert_eq!(
+        runner.received[0],
+        rsync_argv(&hid("src"), &hid("d0"), "/tmp/payload")
+    );
+    assert_eq!(
+        runner.received[1],
+        rsync_argv(&hid("src"), &hid("d1"), "/tmp/payload")
+    );
+    assert_eq!(
+        runner.received[2],
+        rsync_argv(&hid("src"), &hid("d2"), "/tmp/payload")
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -237,11 +274,17 @@ fn x5_execute_partial_failure_second_of_three_delivered_skips_it_others_continue
 fn x6_transfer_job_serde_round_trip() {
     let job = TransferJob {
         dst_host: hid("hostB"),
-        argv: vec!["scp".to_string(), "-3".to_string(), "hostA:/x".to_string(), "hostB:/x".to_string()],
+        argv: vec![
+            "scp".to_string(),
+            "-3".to_string(),
+            "hostA:/x".to_string(),
+            "hostB:/x".to_string(),
+        ],
     };
 
     let json = serde_json::to_string(&job).expect("TransferJob must serialize");
-    let round_tripped: TransferJob = serde_json::from_str(&json).expect("TransferJob must deserialize");
+    let round_tripped: TransferJob =
+        serde_json::from_str(&json).expect("TransferJob must deserialize");
 
     assert_eq!(round_tripped, job);
 }

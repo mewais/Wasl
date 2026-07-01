@@ -41,10 +41,7 @@ fn e1_resolve_unknown_target_on_empty_registry_errors() {
 
     let result = registry.resolve(&host_id("host-1"), &agent_id("nobody"));
 
-    assert_eq!(
-        result,
-        Err(RegistryError::UnknownPeer(agent_id("nobody")))
-    );
+    assert_eq!(result, Err(RegistryError::UnknownPeer(agent_id("nobody"))));
 }
 
 // ---------------------------------------------------------------------
@@ -71,7 +68,8 @@ fn e2_registry_error_implements_std_error() {
 
     // Exercise the trait object path too, confirming source()/Display are usable
     // through `dyn std::error::Error` as real call sites would use it.
-    let boxed: Box<dyn std::error::Error> = Box::new(RegistryError::UnknownPeer(agent_id("boxed-peer")));
+    let boxed: Box<dyn std::error::Error> =
+        Box::new(RegistryError::UnknownPeer(agent_id("boxed-peer")));
     let boxed_text = boxed.to_string();
     assert!(!boxed_text.is_empty());
     assert!(boxed_text.contains("boxed-peer"));

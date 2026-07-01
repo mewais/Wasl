@@ -17,7 +17,13 @@ fn m1_fan_out_many_recipients_builds_one_envelope_each() {
     let from = aid("orchestrator");
     let recipients = vec![aid("r0"), aid("r1"), aid("r2")];
 
-    let envelopes = fan_out("base", &from, EnvelopeKind::Command, "do the thing", &recipients);
+    let envelopes = fan_out(
+        "base",
+        &from,
+        EnvelopeKind::Command,
+        "do the thing",
+        &recipients,
+    );
 
     assert_eq!(envelopes.len(), 3);
 
@@ -26,7 +32,11 @@ fn m1_fan_out_many_recipients_builds_one_envelope_each() {
     assert_eq!(envelopes[2].id, "base:2");
 
     for (i, env) in envelopes.iter().enumerate() {
-        assert_eq!(env.to, vec![recipients[i].clone()], "envelope {i} must address only its recipient");
+        assert_eq!(
+            env.to,
+            vec![recipients[i].clone()],
+            "envelope {i} must address only its recipient"
+        );
         assert_eq!(env.from, from, "envelope {i} shares from");
         assert_eq!(env.kind, EnvelopeKind::Command, "envelope {i} shares kind");
         assert_eq!(env.body, "do the thing", "envelope {i} shares body");
@@ -49,7 +59,13 @@ fn m1_fan_out_single_recipient_yields_one_envelope_indexed_zero() {
     let from = aid("orchestrator");
     let recipients = vec![aid("solo")];
 
-    let envelopes = fan_out("base", &from, EnvelopeKind::Consult, "question?", &recipients);
+    let envelopes = fan_out(
+        "base",
+        &from,
+        EnvelopeKind::Consult,
+        "question?",
+        &recipients,
+    );
 
     assert_eq!(envelopes.len(), 1);
     assert_eq!(envelopes[0].id, "base:0");
@@ -121,22 +137,33 @@ fn m3_correlation_completes_and_tracks_pending_and_replies_in_order() {
     assert_eq!(corr.pending(), vec![a.clone(), b.clone()]);
     assert_eq!(corr.replies(), Vec::<Reply>::new());
 
-    corr.record(a.clone(), "reply-a".to_string()).expect("a is expected");
+    corr.record(a.clone(), "reply-a".to_string())
+        .expect("a is expected");
     assert!(!corr.is_complete());
     assert_eq!(corr.pending(), vec![b.clone()]);
     assert_eq!(
         corr.replies(),
-        vec![Reply { from: a.clone(), body: "reply-a".to_string() }]
+        vec![Reply {
+            from: a.clone(),
+            body: "reply-a".to_string()
+        }]
     );
 
-    corr.record(b.clone(), "reply-b".to_string()).expect("b is expected");
+    corr.record(b.clone(), "reply-b".to_string())
+        .expect("b is expected");
     assert!(corr.is_complete());
     assert_eq!(corr.pending(), Vec::<AgentId>::new());
     assert_eq!(
         corr.replies(),
         vec![
-            Reply { from: a.clone(), body: "reply-a".to_string() },
-            Reply { from: b.clone(), body: "reply-b".to_string() },
+            Reply {
+                from: a.clone(),
+                body: "reply-a".to_string()
+            },
+            Reply {
+                from: b.clone(),
+                body: "reply-b".to_string()
+            },
         ]
     );
 }
@@ -153,17 +180,22 @@ fn m4_correlation_new_dedups_expected_preserving_first_appearance_order() {
 
     assert_eq!(corr.pending(), vec![a.clone(), b.clone()]);
 
-    corr.record(a.clone(), "once".to_string()).expect("a is expected");
+    corr.record(a.clone(), "once".to_string())
+        .expect("a is expected");
 
     // Recording 'a' once fully satisfies the deduped expectation for a.
     assert_eq!(corr.pending(), vec![b.clone()]);
     assert!(!corr.is_complete());
     assert_eq!(
         corr.replies(),
-        vec![Reply { from: a.clone(), body: "once".to_string() }]
+        vec![Reply {
+            from: a.clone(),
+            body: "once".to_string()
+        }]
     );
 
-    corr.record(b.clone(), "second".to_string()).expect("b is expected");
+    corr.record(b.clone(), "second".to_string())
+        .expect("b is expected");
     assert!(corr.is_complete());
     assert_eq!(corr.pending(), Vec::<AgentId>::new());
 }
@@ -180,11 +212,15 @@ fn m5_fan_out_envelope_and_reply_serde_round_trip() {
 
     for env in &envelopes {
         let json = serde_json::to_string(env).expect("envelope must serialize");
-        let round_tripped: Envelope = serde_json::from_str(&json).expect("envelope must deserialize");
+        let round_tripped: Envelope =
+            serde_json::from_str(&json).expect("envelope must deserialize");
         assert_eq!(&round_tripped, env);
     }
 
-    let reply = Reply { from: aid("r0"), body: "ack".to_string() };
+    let reply = Reply {
+        from: aid("r0"),
+        body: "ack".to_string(),
+    };
     let json = serde_json::to_string(&reply).expect("reply must serialize");
     let round_tripped: Reply = serde_json::from_str(&json).expect("reply must deserialize");
     assert_eq!(round_tripped, reply);

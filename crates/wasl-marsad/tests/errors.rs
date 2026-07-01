@@ -237,7 +237,8 @@ fn e4_conn_error_implements_std_error() {
     assert_std_error(&err);
 
     // Exercise the trait-object path too, as real call sites would.
-    let boxed: Box<dyn std::error::Error> = Box::new(ConnError::Transport("boxed boom".to_string()));
+    let boxed: Box<dyn std::error::Error> =
+        Box::new(ConnError::Transport("boxed boom".to_string()));
     let boxed_display = boxed.to_string();
     assert!(!boxed_display.is_empty());
     assert!(boxed_display.contains("boxed boom"));
