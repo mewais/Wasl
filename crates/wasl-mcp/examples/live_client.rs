@@ -244,10 +244,7 @@ async fn main() -> ExitCode {
         "elicit" => run_elicit(mcpd_bin, config, peer, question).await,
         "bare-consult" => run_bare_consult(mcpd_bin, config, peer, question).await,
         "prepare-commit" => {
-            let poll_secs: u64 = args
-                .get(6)
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(30);
+            let poll_secs: u64 = args.get(6).and_then(|s| s.parse().ok()).unwrap_or(30);
             run_prepare_commit(
                 mcpd_bin,
                 config,
