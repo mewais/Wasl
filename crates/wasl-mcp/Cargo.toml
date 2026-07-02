@@ -42,6 +42,10 @@ wasl-adapter-claude = { workspace = true }
 wasl-node = { workspace = true }
 rmcp = { version = "0.9", features = ["server", "transport-io", "elicitation"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync", "net"] }
+# Node config file parsing (W2, src/config.rs). NOT a workspace dependency: the
+# root Cargo.toml [workspace.dependencies] table is owned by a concurrently
+# landing crate, so this dep is direct here rather than workspace-hoisted.
+toml = "0.8"
 
 [dev-dependencies]
 # Client + async-rw transport, dev-only, so the smoke test can drive the server
@@ -55,3 +59,9 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "syn
 wasl-a2a-server = { workspace = true }
 wasl-a2a-types = { workspace = true }
 wasl-adapter = { workspace = true }
+wasl-transfer = { workspace = true }
+# `config_resolve.rs` / `config_wiring.rs` / `config_bin.rs` (W2, tests/**
+# only): tempdirs/tempfiles for path-resolution + spawned-binary tests, and an
+# executable stub-CLI file for the adapter-factory custom-bin test. Never used
+# to mutate real process env (see docs/specs/node-config.md).
+tempfile = "3"

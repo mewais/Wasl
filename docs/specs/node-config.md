@@ -222,16 +222,16 @@ pub fn register(&mut self, card: AgentCard)               // insert/overwrite ke
 pub fn get(&self, id: &AgentId) -> Option<&AgentCard>
 // wasl-proto/src/lib.rs
 pub struct AgentCard {
+    // W0 (2026-07-02): the consumer-vocabulary `driver`/`workstream` fields are REMOVED from
+    // wasl_proto::AgentCard before this block lands (generalization mandate).
     pub id: AgentId,
     pub host: HostId,
-    pub driver: Option<String>,       // set to None
-    pub workstream: Option<String>,   // set to None
     pub endpoint: Option<String>,     // set to Some(peer.url)
 }
 ```
 
-i.e. `registry.register(AgentCard { id: AgentId(p.agent_id), host: HostId(p.host_id), driver: None,
-workstream: None, endpoint: Some(p.url) })`. `endpoint` is what dispatch routes by
+i.e. `registry.register(AgentCard { id: AgentId(p.agent_id), host: HostId(p.host_id),
+endpoint: Some(p.url) })`. `endpoint` is what dispatch routes by
 (`registry.get(peer).and_then(|card| card.endpoint.clone())` — `crates/wasl-dispatch/src/lib.rs:53`);
 `host` feeds `PeerRegistry::resolve`/`by_host`. Duplicates cannot occur here (rejected at load).
 
@@ -337,7 +337,7 @@ All via `Config::from_toml_str`:
 ### `tests/config_wiring.rs` — registry population + adapter factory (the point of the block)
 - **registry_from_peers:** from the two-peer example → `len() == 2`; `get(&AgentId("reviewer"))` →
   `Some(card)` with `card.host == HostId("hostB")`, `card.endpoint == Some("http://10.0.0.7:4242/")`,
-  `card.driver == None`, `card.workstream == None`; empty peers → `is_empty()`.
+  `card.endpoint == Some(url)` and post-W0 card shape; empty peers → `is_empty()`.
 - **config-declared peer is actually dispatchable (loopback):** reuse `tests/handle.rs`'s harness — spin a
   real `wasl_a2a_server::A2aServer` over a fake recording `AgentAdapter` on `127.0.0.1:0`; build the config
   FROM TOML text whose single peer's `url` is the bound address; `registry_from_peers` → drive
