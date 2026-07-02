@@ -3,16 +3,22 @@
 //! and returns its reply.
 //!
 //! ⚠️ Testability: there is NO `claude` binary in the build environment. The pure
-//! core (`compose_prompt`/`build_argv`/`parse_reply`), the `deliver` wiring (via a
-//! fake `CliInvoker`), and `ProcessCliInvoker`'s process plumbing (via stand-in
-//! commands) are all tested. The REAL Claude-CLI CONTRACT (flag names, prompt on
-//! stdin, JSON reply schema, `--session-id` persistence) is an ASSUMPTION encoded
-//! in `build_argv`/`parse_reply` and is UNTESTED HERE — verify it against a real
-//! `claude` binary. See `docs/specs/adapter-claude.md`.
+//! core (`compose_prompt`/`session_uuid`/`build_argv`/`parse_reply`), the
+//! `deliver` wiring (via a fake `CliInvoker`, including the symmetric one-retry
+//! fallback), and `ProcessCliInvoker`'s process plumbing (via stand-in commands)
+//! are all tested. The REAL Claude-CLI CONTRACT (flag names, prompt on stdin,
+//! JSON reply schema, `--session-id`/`--resume` semantics, the two fallback
+//! error substrings) was VERIFIED against a real `claude` binary (2.1.198,
+//! 2026-07-02) — see `docs/specs/adapter-claude.md` (v2) for the verification
+//! table. It is still exercised end-to-end only by `tests/live.rs`, gated
+//! behind `--features live-cli` (not part of default CI runs).
 
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::process::Stdio;
+use std::sync::Mutex;
 
+use uuid::{uuid, Uuid};
 use wasl_adapter::{AdapterError, AgentAdapter, Delivery, DeliveryKind};
 
 /// Single named error helper used at EVERY error site (a named `fn`, NOT per-site
@@ -50,16 +56,44 @@ pub fn compose_prompt(d: &Delivery) -> String {
     out
 }
 
-/// Build the Claude CLI argv for a session. `bin` is the program (default
-/// "claude").
-pub fn build_argv(bin: &str, session_id: &str) -> Vec<String> {
+/// The fixed UUIDv5 namespace used to derive claude session ids from A2A
+/// context ids. Fixed forever: changing it would sever every existing A2A
+/// `contextId` from the claude session it currently maps to.
+pub const WASL_SESSION_NS: Uuid = uuid!("2441e851-1801-440d-a8e9-214d1df08e6e");
+
+/// Derive the deterministic claude session UUID for an A2A `context_id`. The
+/// same `context_id` always yields the same UUID (across adapter restarts),
+/// and distinct `context_id`s yield distinct UUIDs (with overwhelming
+/// probability).
+pub fn session_uuid(context_id: &str) -> Uuid {
+    Uuid::new_v5(&WASL_SESSION_NS, context_id.as_bytes())
+}
+
+/// How a turn binds to the claude session: `First` starts a brand-new claude
+/// session with the derived uuid; `Continuation` resumes a previously-started
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Turn {
+    /// Start a new claude session with `--session-id <uuid>`.
+    First,
+    /// Resume a previously-started claude session with `--resume <uuid>`.
+    Continuation,
+}
+
+/// Build the Claude CLI argv for a session turn. `bin` is the program
+/// (default "claude").
+pub fn build_argv(bin: &str, session_uuid: &Uuid, turn: Turn) -> Vec<String> {
+    let flag = match turn {
+        Turn::First => "--session-id",
+        Turn::Continuation => "--resume",
+    };
     vec![
         bin.to_string(),
         "-p".to_string(),
         "--output-format".to_string(),
         "json".to_string(),
-        "--session-id".to_string(),
-        session_id.to_string(),
+        flag.to_string(),
+        session_uuid.to_string(),
     ]
 }
 
@@ -141,6 +175,9 @@ impl CliInvoker for ProcessCliInvoker {
 pub struct ClaudeAdapter<I: CliInvoker> {
     invoker: I,
     bin: String,
+    /// Context ids for which a claude session has been successfully started
+    /// (i.e. the next turn should `--resume` rather than `--session-id`).
+    started: Mutex<HashSet<String>>,
 }
 
 impl<I: CliInvoker> ClaudeAdapter<I> {
@@ -149,6 +186,7 @@ impl<I: CliInvoker> ClaudeAdapter<I> {
         Self {
             invoker,
             bin: "claude".to_string(),
+            started: Mutex::new(HashSet::new()),
         }
     }
 
@@ -157,7 +195,16 @@ impl<I: CliInvoker> ClaudeAdapter<I> {
         Self {
             invoker,
             bin: bin.into(),
+            started: Mutex::new(HashSet::new()),
         }
+    }
+
+    fn has_started(&self, context_id: &str) -> bool {
+        self.started.lock().unwrap().contains(context_id)
+    }
+
+    fn mark_started(&self, context_id: &str) {
+        self.started.lock().unwrap().insert(context_id.to_string());
     }
 }
 
@@ -165,8 +212,42 @@ impl<I: CliInvoker> ClaudeAdapter<I> {
 impl<I: CliInvoker> AgentAdapter for ClaudeAdapter<I> {
     async fn deliver(&self, d: &Delivery) -> Result<String, AdapterError> {
         let prompt = compose_prompt(d);
-        let argv = build_argv(&self.bin, &d.context_id);
-        let stdout = self.invoker.invoke(&argv, &prompt).await?;
+        let su = session_uuid(&d.context_id);
+        let turn = if self.has_started(&d.context_id) {
+            Turn::Continuation
+        } else {
+            Turn::First
+        };
+
+        let result = self
+            .invoker
+            .invoke(&build_argv(&self.bin, &su, turn), &prompt)
+            .await;
+
+        let stdout = match result {
+            Ok(stdout) => stdout,
+            Err(e) => {
+                let retry_turn = match turn {
+                    Turn::First if e.message.contains("is already in use") => {
+                        Some(Turn::Continuation)
+                    }
+                    Turn::Continuation if e.message.contains("No conversation found") => {
+                        Some(Turn::First)
+                    }
+                    _ => None,
+                };
+                match retry_turn {
+                    Some(retry_turn) => {
+                        self.invoker
+                            .invoke(&build_argv(&self.bin, &su, retry_turn), &prompt)
+                            .await?
+                    }
+                    None => return Err(e),
+                }
+            }
+        };
+
+        self.mark_started(&d.context_id);
         parse_reply(&stdout)
     }
 }
