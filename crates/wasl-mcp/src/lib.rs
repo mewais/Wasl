@@ -24,7 +24,7 @@ use wasl_procrunner::ProcessRunner;
 
 pub use config::{
     build_adapter, registry_from_peers, A2aConfig, AdapterConfig, AdapterKind, AuditConfig, Config,
-    ConfigError, EnvOverrides, GateConfig, IdentityConfig, OperatorConfig, PeerEntry,
+    ConfigError, EnvOverrides, GateConfig, IdentityConfig, NodeAdapter, OperatorConfig, PeerEntry,
 };
 pub use gating::{detect_caps, ledger_decision_of, proto_action, select_mode, GateAuthority};
 pub use handle::{resolve_and_dispatch, HandleError, ToolCall, ToolCtx, ToolReply};
@@ -173,10 +173,12 @@ pub fn run() {
         // ── A2A RECEIVE wiring — IO SHELL, UNTESTED HERE ──────────────────────
         //
         // This composes only already-tested pieces (`wasl_node::receiver` →
-        // `A2aServer` over a real `AdapterExecutor` wrapping `ClaudeAdapter`), but
-        // the LIVE serve loop and driving a REAL `claude` CLI are NOT exercised by
-        // any test in this crate (there is no `claude` binary in the build env and
-        // the socket serve loop is never entered under test). Compile-only shell.
+        // `A2aServer` over a real `AdapterExecutor` wrapping the config-selected
+        // `NodeAdapter` — `ClaudeAdapter` or, since W7, `CodexAdapter`), but the
+        // LIVE serve loop and driving a REAL `claude`/`codex` CLI are NOT
+        // exercised by any test in this crate (neither binary is in the build
+        // env and the socket serve loop is never entered under test).
+        // Compile-only shell.
         if let Some(bind) = cfg.a2a.bind.clone() {
             match bind.parse::<std::net::SocketAddr>() {
                 Ok(addr) => {

@@ -50,7 +50,13 @@ wasl-a2a-server = { workspace = true }
 wasl-a2a-types = { workspace = true }
 wasl-adapter = { workspace = true }
 wasl-adapter-claude = { workspace = true }
+# W7b (`docs/specs/adapter-codex.md`): the receive-side codex-backed
+# NodeAdapter variant (`build_adapter` in src/config.rs).
+wasl-adapter-codex = { workspace = true }
 wasl-node = { workspace = true }
+# NodeAdapter's `impl AgentAdapter` (src/config.rs) delegates via
+# `#[async_trait::async_trait]`, same macro the trait itself is defined with.
+async-trait = { workspace = true }
 rmcp = { version = "0.9", features = ["server", "transport-io", "elicitation"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync", "net"] }
 # Node config file parsing (W2, src/config.rs). NOT a workspace dependency: the

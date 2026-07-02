@@ -191,16 +191,24 @@ fn unknown_top_level_section_is_toml_error() {
 
 #[test]
 fn unknown_adapter_kind_is_rejected() {
-    let err = Config::from_toml_str("[adapter]\nkind = \"codex\"\n")
-        .expect_err("codex is not a known kind in this block");
+    // W7 (`docs/specs/adapter-codex.md`) makes "codex" a KNOWN kind, so this
+    // pinned test (originally written against "codex" before W7 landed, per
+    // node-config.md's own W2-era test plan) now uses a kind that remains
+    // unknown even after W7 — same precedent as the two frozen-file edits
+    // `docs/specs/mcp-gating.md` §9 authorized for W4. See
+    // `crates/wasl-mcp/AGENTS.md` for the note; `tests/config_codex.rs`
+    // covers "codex" itself (now a valid kind) plus a fresh
+    // still-unknown-kind probe for the W7 world.
+    let err =
+        Config::from_toml_str("[adapter]\nkind = \"gpt\"\n").expect_err("gpt is not a known kind");
     let display = err.to_string();
     assert!(
-        display.contains("unknown adapter kind: codex"),
+        display.contains("unknown adapter kind: gpt"),
         "display was: {display}"
     );
     match err {
         ConfigError::UnknownAdapterKind(k) => {
-            assert_eq!(k, "codex", "offending kind preserved verbatim")
+            assert_eq!(k, "gpt", "offending kind preserved verbatim")
         }
         other => panic!("expected ConfigError::UnknownAdapterKind, got {other:?}"),
     }

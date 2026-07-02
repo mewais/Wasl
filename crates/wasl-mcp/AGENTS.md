@@ -79,17 +79,50 @@ in one pinned arm by W4 §7), `../../docs/specs/node-config.md` (W2 — node con
     behavioral, necessity). `crates/wasl-mcp/Cargo.toml` gained a crate-wide
     `clippy::field_reassign_with_default = "allow"` (alongside the existing `doc_lazy_continuation` one) for
     the frozen `tests/gating_unit.rs`'s `ClientInfo::default(); info.capabilities = …` idiom.
+- **W7b (`src/config.rs`, `Cargo.toml`, `docs/specs/adapter-codex.md`'s "Node-config integration" delta on
+  top of `docs/specs/node-config.md`):** the codex adapter is now selectable in `wasl-mcpd`'s node config.
+  - `AdapterKind` gains `Codex` (`adapter.kind = "codex"`, exact case-sensitive match, same second-pass
+    validation as `"claude"`; anything else, incl. `"Codex"`, is still `UnknownAdapterKind`).
+  - `build_adapter`'s return type is no longer the bare `ClaudeAdapter<ProcessCliInvoker>` — it is now
+    `NodeAdapter`, an exhaustive-match delegating enum (`Claude(ClaudeAdapter<ProcessCliInvoker>)` /
+    `Codex(CodexAdapter<ProcessCliInvoker>)`) implementing `AgentAdapter` by delegation, re-exported from the
+    crate root. An enum, not `Box<dyn AgentAdapter>`, so adding a THIRD kind later still forces a match-arm
+    decision at compile time (the same forcing function W2 wanted for the original single-arm match).
+    `adapter.bin`'s meaning is unchanged for both arms: absent → the adapter's own default bin
+    (`"claude"`/`"codex"`), present → `with_bin`.
+  - `Cargo.toml` gains `wasl-adapter-codex` (already workspace-hoisted) plus a direct `async-trait` dependency
+    in `[dependencies]` (previously only a dev-dependency) — `NodeAdapter`'s `impl AgentAdapter` needs the same
+    `#[async_trait::async_trait]` macro the trait itself is defined with.
+  - `src/lib.rs`'s `run()` A2A-receive doc comment is updated to say "the config-selected `NodeAdapter`" rather
+    than naming `ClaudeAdapter` specifically; `run()`'s actual wiring (`build_adapter(&cfg.adapter)` →
+    `wasl_node::receiver(card, adapter)`) is UNCHANGED — it already worked generically against
+    `impl AgentAdapter`.
+  - **Frozen-suite deviation (the one edit this block makes to a previously-existing test file):**
+    `tests/config_pure.rs`'s `unknown_adapter_kind_is_rejected` originally asserted `kind = "codex"` was
+    unknown (written against the pre-W7 world, per `node-config.md`'s own W2-era test plan). Now that W7
+    makes `"codex"` a real kind, that assertion is no longer true; the test was updated in place to probe a
+    kind that is STILL unknown (`"gpt"`), same string substituted throughout (Display assertion + preserved-
+    verbatim assertion) — same precedent `docs/specs/mcp-gating.md` §9 already established for two other
+    frozen-file edits in this crate. No other previously-existing test file was touched. New coverage of
+    `"codex"` itself (now valid, incl. a `bin` override) plus a fresh still-unknown-kind probe and the
+    `NodeAdapter`/`build_adapter` behavior lives in the new `tests/config_codex.rs`, including a real loopback
+    A2A proof: a `NodeAdapter::Codex` (built via `build_adapter` from a config pointing at a stub `codex`
+    binary that emits the spec's captured JSONL fixture) wired as the RECEIVE side of a real `A2aServer`, with
+    the SEND side driven through `Config::from_toml_str` → `registry_from_peers` → `resolve_and_dispatch`,
+    proving the whole config → registry → receive chain composes for the codex arm exactly as it already did
+    for claude.
 - **code-agent:** ONLY `src/**` + `Cargo.toml`. **test-agent:** ONLY `tests/**`.
 - Done: `cargo build -p wasl-mcp` + the `wasl-mcpd` bin compile; the async `handle`/`resolve_and_dispatch`
   heart is integration-tested green over **loopback A2A** (real a2a-server + real AdapterExecutor + fake
   adapter — NOT fakes-only); the config module (`from_toml_str`/`apply_env`/`resolve_path`/`load_with`/`load`/
-  `registry_from_peers`/`build_adapter`, now incl. `[gate]`) is black-box tested
-  (`tests/config_{pure,resolve,wiring,bin}.rs`); the real three-tier gate (`gating.rs`'s pure seams +
-  operator-decided/mirrored-elicitation/prepare-commit end to end over real loopback HTTP+SSE + rmcp duplex)
-  is tested in `tests/gating_{unit,loopback}.rs`; `cargo test -p wasl-mcp` is 86 tests green (52 pre-W4 +
-  34 W4: 20 `gating_unit` + 14 `gating_loopback`); `clippy -p wasl-mcp --all-targets -D warnings` + fmt
-  clean; `cargo test --workspace` green; no unsafe; no leftover `unimplemented!`/`todo!`; the gate is never
-  bypassed (non-Approved never dispatches, and Tier-2 audits nothing until `commit`).
+  `registry_from_peers`/`build_adapter`, now incl. `[gate]` and, since W7b, `AdapterKind::Codex`/`NodeAdapter`)
+  is black-box tested (`tests/config_{pure,resolve,wiring,bin,codex}.rs`); the real three-tier gate
+  (`gating.rs`'s pure seams + operator-decided/mirrored-elicitation/prepare-commit end to end over real
+  loopback HTTP+SSE + rmcp duplex) is tested in `tests/gating_{unit,loopback}.rs`; `cargo test -p wasl-mcp` is
+  93 tests green (52 pre-W4 + 34 W4: 20 `gating_unit` + 14 `gating_loopback`, + 7 W7b `config_codex`); `clippy
+  -p wasl-mcp --all-targets -D warnings` + fmt clean; `cargo test --workspace` green; no unsafe; no leftover
+  `unimplemented!`/`todo!`; the gate is never bypassed (non-Approved never dispatches, and Tier-2 audits
+  nothing until `commit`).
 - **Testability honesty:** ✅ the async send heart end-to-end over loopback A2A (gate→audit→A2A→receive→reply)
   + block/deny/dismiss + audit-failure abort + transfer; ✅ (W2) the config module's parse/validate/precedence/
   path-resolution semantics, registry population from a config file all the way through a real loopback A2A
@@ -120,7 +153,7 @@ in one pinned arm by W4 §7), `../../docs/specs/node-config.md` (W2 — node con
   `select_mode`, `proto_action`, `ledger_decision_of`) — and `src/config.rs`'s `[gate]` additions are
   genuinely **100%** LINE/FUNCTION/REGION together:
   `cargo llvm-cov -p wasl-mcp --ignore-filename-regex 'lib\.rs|server\.rs|handle\.rs|main\.rs' --fail-under-lines 100 --fail-under-regions 100`
-  exits 0 (304/304 regions, 25/25 functions, 252/252 lines across the two files). The ONE permitted
+  exits 0 (304/304 regions, 25/25 functions, 252/252 lines across the two files, pre-W7b). The ONE permitted
   verified-unreachable region in the tier logic outside that gate is `server.rs`'s
   `classify_not_pending`'s `Ok(_)` arm (`unreachable!(..)`): it is only ever called when
   `ledger.is_pending(token) == false`, and `wasl_gate::GateLedger::commit` only ever returns `Ok` when the
@@ -147,3 +180,15 @@ in one pinned arm by W4 §7), `../../docs/specs/node-config.md` (W2 — node con
     unchanged); W4 substantially narrows the gap (51% -> 86%) rather than closing it, and does not attempt to
     newly test the rmcp stdio loop / live A2A or operator receive loops / a real Claude CLI to force the raw
     command to pass.
+- **Coverage honesty (verified, W7b):** `src/config.rs`'s `AdapterKind::Codex` arm, the new `NodeAdapter` enum
+  (both match arms of its `AgentAdapter::deliver` delegation), and `build_adapter`'s new `Codex` match arm are
+  genuinely **100%** LINE/FUNCTION/REGION, together with the unchanged `gating.rs`:
+  `cargo llvm-cov -p wasl-mcp --ignore-filename-regex 'lib\.rs|server\.rs|handle\.rs|main\.rs' --fail-under-lines 100 --fail-under-regions 100`
+  still exits 0, now 312/312 regions, 26/26 functions, 264/264 lines across the two files (up from 304/25/252
+  pre-W7b — the delta is exactly the new `NodeAdapter` type + its `Codex` arms, exercised by
+  `tests/config_codex.rs`'s `build_adapter_selects_the_codex_variant_for_adapter_kind_codex` and the real
+  loopback receive test, which drives `NodeAdapter::Codex`'s `deliver` delegation through a real child
+  process). No new dead code, no `#[allow]`-for-coverage. Whole-package total (`--summary-only`) ticks up
+  correspondingly to **86.57% lines** / 82.98% regions (from 86.37%/82.86%) — `lib.rs`'s residual 20.33%
+  region / 19.64% line untested-IO-shell status is unchanged (the doc-comment edit there carries no new
+  executable code), and no other file's numbers moved.

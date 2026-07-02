@@ -78,11 +78,12 @@ pub struct AdapterConfig {
     pub bin: Option<String>,
 }
 
-/// The adapter selector. Exactly one variant in this block; W7 (codex) adds
-/// more.
+/// The adapter selector. W7 (`docs/specs/adapter-codex.md`) adds `Codex`
+/// alongside the original `Claude`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterKind {
     Claude,
+    Codex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -315,6 +316,7 @@ impl Config {
 
         let kind = match raw.adapter.kind.as_str() {
             "claude" => AdapterKind::Claude,
+            "codex" => AdapterKind::Codex,
             other => return Err(ConfigError::UnknownAdapterKind(other.to_string())),
         };
 
@@ -495,19 +497,51 @@ pub fn registry_from_peers(peers: &[PeerEntry]) -> wasl_registry::PeerRegistry {
     registry
 }
 
+/// The receive-side adapter selected by config: an exhaustive-match
+/// delegating enum, NOT `Box<dyn AgentAdapter>` — a trait object would erase
+/// the compile-time forcing function that made adding `Codex` here require
+/// touching this match. See `docs/specs/adapter-codex.md`'s "Node-config
+/// integration" section (the authoritative shape for this type).
+pub enum NodeAdapter {
+    Claude(wasl_adapter_claude::ClaudeAdapter<wasl_adapter_claude::ProcessCliInvoker>),
+    Codex(wasl_adapter_codex::CodexAdapter<wasl_adapter_codex::ProcessCliInvoker>),
+}
+
+#[async_trait::async_trait]
+impl wasl_adapter::AgentAdapter for NodeAdapter {
+    async fn deliver(
+        &self,
+        d: &wasl_adapter::Delivery,
+    ) -> Result<String, wasl_adapter::AdapterError> {
+        match self {
+            NodeAdapter::Claude(inner) => wasl_adapter::AgentAdapter::deliver(inner, d).await,
+            NodeAdapter::Codex(inner) => wasl_adapter::AgentAdapter::deliver(inner, d).await,
+        }
+    }
+}
+
 /// Construct the receive-side adapter selected by the config. Written as an
 /// exhaustive match on `AdapterKind` so adding a kind (W7 codex) forces a
 /// decision here.
-pub fn build_adapter(
-    cfg: &AdapterConfig,
-) -> wasl_adapter_claude::ClaudeAdapter<wasl_adapter_claude::ProcessCliInvoker> {
+pub fn build_adapter(cfg: &AdapterConfig) -> NodeAdapter {
     match cfg.kind {
         AdapterKind::Claude => match &cfg.bin {
-            None => wasl_adapter_claude::ClaudeAdapter::new(wasl_adapter_claude::ProcessCliInvoker),
-            Some(bin) => wasl_adapter_claude::ClaudeAdapter::with_bin(
+            None => NodeAdapter::Claude(wasl_adapter_claude::ClaudeAdapter::new(
+                wasl_adapter_claude::ProcessCliInvoker,
+            )),
+            Some(bin) => NodeAdapter::Claude(wasl_adapter_claude::ClaudeAdapter::with_bin(
                 wasl_adapter_claude::ProcessCliInvoker,
                 bin.clone(),
-            ),
+            )),
+        },
+        AdapterKind::Codex => match &cfg.bin {
+            None => NodeAdapter::Codex(wasl_adapter_codex::CodexAdapter::new(
+                wasl_adapter_codex::ProcessCliInvoker,
+            )),
+            Some(bin) => NodeAdapter::Codex(wasl_adapter_codex::CodexAdapter::with_bin(
+                wasl_adapter_codex::ProcessCliInvoker,
+                bin.clone(),
+            )),
         },
     }
 }
