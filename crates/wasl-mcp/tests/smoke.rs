@@ -8,13 +8,24 @@ use rmcp::ServiceExt;
 use tokio::io::duplex;
 
 use wasl_audit::AuditLog;
-use wasl_mcp::{LocalMesh, MemSink, NoopRunner, WaslMcp, WaslState};
+use wasl_mcp::{MemSink, WaslMcp, WaslState};
 use wasl_proto::{AgentId, HostId};
 use wasl_registry::PeerRegistry;
+use wasl_transfer::Runner;
 
-fn handler() -> WaslMcp<MemSink, LocalMesh, NoopRunner> {
+/// A tiny inline transfer runner (the crate no longer ships a `NoopRunner`); the
+/// smoke test only lists tools, so it never actually runs a transfer.
+struct OkRunner;
+
+impl Runner for OkRunner {
+    fn run(&mut self, _argv: &[String]) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+fn handler() -> WaslMcp<MemSink, OkRunner> {
     let audit = AuditLog::new(MemSink::new());
-    let state = WaslState::new(audit, LocalMesh, NoopRunner);
+    let state = WaslState::new(audit, reqwest::Client::new(), OkRunner);
     WaslMcp::new(
         AgentId("me".to_string()),
         HostId("h1".to_string()),
