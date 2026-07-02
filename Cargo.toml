@@ -17,6 +17,7 @@ members = [
     "crates/wasl-a2a-client",
     "crates/wasl-adapter",
     "crates/wasl-dispatch",
+    "crates/wasl-node",
 ]
 
 [workspace.package]
@@ -39,6 +40,7 @@ wasl-a2a-server = { path = "crates/wasl-a2a-server" }
 wasl-a2a-client = { path = "crates/wasl-a2a-client" }
 wasl-adapter = { path = "crates/wasl-adapter" }
 wasl-dispatch = { path = "crates/wasl-dispatch" }
+wasl-node = { path = "crates/wasl-node" }
 wasl-server = { path = "crates/wasl-server" }
 wasl-daemon = { path = "crates/wasl-daemon" }
 serde = { version = "1", features = ["derive"] }

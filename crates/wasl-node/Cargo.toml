@@ -1,0 +1,25 @@
+[package]
+name = "wasl-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl node: composes the gate (server) + send-side dispatch + A2A receive server — the per-host send/receive unit"
+
+[dependencies]
+wasl-proto = { workspace = true }
+wasl-server = { workspace = true }
+wasl-audit = { workspace = true }
+wasl-registry = { workspace = true }
+wasl-dispatch = { workspace = true }
+wasl-a2a-types = { workspace = true }
+wasl-a2a-server = { workspace = true }
+wasl-adapter = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+axum = { workspace = true }
