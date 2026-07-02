@@ -1,0 +1,17 @@
+[package]
+name = "wasl-filesink"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl durable audit Sink: append-JSONL file persistence for wasl-audit"
+
+[dependencies]
+wasl-audit = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+wasl-proto = { workspace = true }
+tempfile = "3"
