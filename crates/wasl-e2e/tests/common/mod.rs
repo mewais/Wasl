@@ -1,24 +1,45 @@
 #![allow(dead_code)]
-//! Shared fakes for the `wasl-e2e` cross-crate scenario suite.
+//! Shared fakes/fixtures for the `wasl-e2e` cross-crate scenario suite.
 //!
 //! This module is compiled independently into each test binary, hence the
 //! crate-wide `allow(dead_code)` (a given test binary uses only a subset).
 //!
-//! The fakes wire the real trait seams of the Wasl stack:
+//! The GATE side wires the real trait seams of `wasl-server`:
 //! * [`ScriptSurfacer`] — a scriptable [`wasl_server::Surfacer`] whose outcome is
 //!   fixed per construction (Tier-1 Elicitation / Tier-3 External path — any
 //!   external authority implements the same `Surfacer` seam).
 //! * [`FakeSink`] — a recording [`wasl_audit::Sink`], scriptable to fail append.
-//! * [`FakeMesh`] — a recording, per-peer scriptable [`wasl_daemon::Mesh`]; its
-//!   `calls` prove whether the daemon was ever invoked.
-//! * [`FakeRunner`] — a per-dst scriptable [`wasl_transfer::Runner`].
+//!
+//! The DISPATCH side (post-W9) is the LIVE A2A path, mirroring
+//! `wasl-dispatch/tests/common` and `wasl-node/tests/common`: a REAL
+//! `wasl_a2a_server::A2aServer` (axum) on an ephemeral `127.0.0.1` port, driven
+//! by a REAL `wasl_adapter::AdapterExecutor` wrapping a FAKE innermost
+//! [`wasl_adapter::AgentAdapter`] (the ONLY fake in that half of the path):
+//! * [`Peer`] — a running loopback receiver: its A2A base URL, the `Delivery`s
+//!   its fake adapter observed, and a serve task aborted on drop.
+//! * [`spawn_echo`]/[`spawn_failing`] — spin a healthy/erroring `Peer`.
+//! * [`dead_url`] — an ephemeral port bound then immediately dropped, modelling
+//!   a transport-level failure (peer registered but unreachable).
+//! * [`register`]/[`card`] — register an `AgentCard` (with an A2A `endpoint`) in
+//!   a `wasl_registry::PeerRegistry`, the way `wasl_dispatch` resolves peers.
+//!
+//! Transfer (X5) does not go through `wasl-dispatch` (it is host-addressed, not
+//! peer-addressed) — it calls `wasl_transfer::execute` directly over a
+//! [`FakeRunner`], exactly what the retired `wasl_daemon::transfer` used to do
+//! internally (it was a one-line passthrough).
 
-use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use async_trait::async_trait;
+
+use wasl_a2a_server::A2aServer;
+use wasl_a2a_types::{AgentCapabilities, AgentCard as A2aCard};
+use wasl_adapter::{AdapterError, AdapterExecutor, AgentAdapter, Delivery};
 use wasl_audit::{AuditEntry, AuditError, Sink};
 use wasl_gate::{GateMode, GateOutcome};
-use wasl_proto::{AgentCard, AgentId, Envelope, GateRequest, HostId};
-use wasl_registry::Resolved;
+use wasl_proto::{AgentCard, AgentId, GateRequest, HostId};
+use wasl_registry::PeerRegistry;
 use wasl_server::Surfacer;
 use wasl_transfer::Runner;
 
@@ -34,19 +55,55 @@ pub fn host(id: &str) -> HostId {
     HostId(id.to_string())
 }
 
-/// An `AgentCard` for `id` living on `host_id`.
-pub fn card(id: &str, host_id: &str) -> AgentCard {
+/// The A2A discovery card each loopback peer advertises. Content is irrelevant
+/// to dispatch (which routes via the Wasl `PeerRegistry`), but the server needs
+/// one.
+fn a2a_card() -> A2aCard {
+    A2aCard {
+        name: "loopback-peer".to_string(),
+        description: "wasl-e2e loopback peer".to_string(),
+        url: "http://127.0.0.1/".to_string(),
+        version: "0.1.0".to_string(),
+        capabilities: AgentCapabilities {
+            streaming: false,
+            push_notifications: false,
+        },
+        default_input_modes: vec!["text/plain".to_string()],
+        default_output_modes: vec!["text/plain".to_string()],
+        skills: vec![],
+    }
+}
+
+/// A Wasl `AgentCard` for peer `id`, reachable at A2A base URL `endpoint` (the
+/// field `wasl_dispatch` resolves on). `host` is a display label only —
+/// dispatch routes by `endpoint`, not `host`.
+pub fn card(id: &str, host_id: &str, endpoint: Option<String>) -> AgentCard {
     AgentCard {
         id: agent(id),
         host: host(host_id),
         driver: None,
         workstream: None,
-        endpoint: None,
+        endpoint,
     }
 }
 
+/// Register `id` in `reg` at loopback `url` (host label `"host-a"` — irrelevant
+/// to routing, which is by `endpoint`).
+pub fn register(reg: &mut PeerRegistry, id: &str, url: &str) {
+    reg.register(card(id, "host-a", Some(url.to_string())));
+}
+
+/// A short-timeout `reqwest::Client`, shared across all peers in a test so a
+/// dead port fails fast rather than hanging the suite.
+pub fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("build reqwest client")
+}
+
 // ---------------------------------------------------------------------
-// ScriptSurfacer — a plain scriptable Surfacer (Tier-1 / synchronous)
+// ScriptSurfacer — a plain scriptable Surfacer (Tier-1/Tier-3 synchronous)
 // ---------------------------------------------------------------------
 
 /// A `Surfacer` whose outcome is fixed at construction and which records the
@@ -127,73 +184,111 @@ impl Sink for FakeSink {
 }
 
 // ---------------------------------------------------------------------
-// FakeMesh — recording + per-peer scriptable Mesh
+// FakeAdapter + Peer — the LIVE A2A loopback receive side (post-W9)
 // ---------------------------------------------------------------------
 
-/// One recorded delivery: the resolved route + the exact envelope handed over.
-#[derive(Debug, Clone)]
-pub struct DeliverCall {
-    pub resolved: Resolved,
-    pub env: Envelope,
+/// The recording, scriptable innermost `AgentAdapter` — the ONLY fake on the
+/// dispatch half of the suite. Every [`Delivery`] it receives is pushed onto
+/// `recorded` (so a test can assert exactly what crossed the wire: verb +
+/// sender + body). When `fail` is `Some(msg)` it returns an [`AdapterError`]
+/// (→ the real `AdapterExecutor` yields an `ExecError` → the A2A Task ends
+/// `Failed`); otherwise it echoes `"reply:{delivery.text}"`.
+struct FakeAdapter {
+    recorded: Arc<Mutex<Vec<Delivery>>>,
+    fail: Option<String>,
 }
 
-/// A recording `Mesh` fake, scriptable per peer:
-/// * `replies`: peer-id -> reply body on success.
-/// * `fail`: peer-id -> error string (takes precedence).
-/// * `calls`: every delivery attempt, in order — proves whether the daemon ran.
-pub struct FakeMesh {
-    replies: HashMap<String, String>,
-    fail: HashMap<String, String>,
-    pub calls: Vec<DeliverCall>,
-}
-
-impl FakeMesh {
-    pub fn new() -> Self {
-        Self {
-            replies: HashMap::new(),
-            fail: HashMap::new(),
-            calls: Vec::new(),
+#[async_trait]
+impl AgentAdapter for FakeAdapter {
+    async fn deliver(&self, d: &Delivery) -> Result<String, AdapterError> {
+        self.recorded.lock().expect("recorded lock").push(d.clone());
+        match &self.fail {
+            Some(message) => Err(AdapterError {
+                message: message.clone(),
+            }),
+            None => Ok(format!("reply:{}", d.text)),
         }
     }
+}
 
-    /// Script a successful reply body for `peer`.
-    pub fn with_reply(mut self, peer: &str, body: &str) -> Self {
-        self.replies.insert(peer.to_string(), body.to_string());
-        self
-    }
+/// A running loopback peer: its A2A base URL, a handle to the deliveries its
+/// fake adapter observed, and the serve task (aborted on drop so tests never
+/// hang).
+pub struct Peer {
+    pub url: String,
+    recorded: Arc<Mutex<Vec<Delivery>>>,
+    handle: tokio::task::JoinHandle<()>,
+}
 
-    /// Script a delivery failure (error string) for `peer`.
-    pub fn with_failure(mut self, peer: &str, detail: &str) -> Self {
-        self.fail.insert(peer.to_string(), detail.to_string());
-        self
+impl Peer {
+    /// Snapshot of every [`Delivery`] this peer's adapter has received, in
+    /// order — proves whether (and what) the live A2A path actually delivered.
+    pub fn deliveries(&self) -> Vec<Delivery> {
+        self.recorded.lock().expect("recorded lock").clone()
     }
 }
 
-impl Default for FakeMesh {
-    fn default() -> Self {
-        Self::new()
+impl Drop for Peer {
+    fn drop(&mut self) {
+        self.handle.abort();
     }
 }
 
-impl wasl_daemon::Mesh for FakeMesh {
-    fn deliver(&mut self, resolved: &Resolved, env: &Envelope) -> Result<String, String> {
-        self.calls.push(DeliverCall {
-            resolved: resolved.clone(),
-            env: env.clone(),
-        });
-        let peer = env.to[0].as_str().to_string();
-        if let Some(detail) = self.fail.get(&peer) {
-            return Err(detail.clone());
-        }
-        match self.replies.get(&peer) {
-            Some(body) => Ok(body.clone()),
-            None => Ok(format!("ack:{peer}")),
-        }
+/// Spin a REAL `A2aServer` over a REAL `AdapterExecutor` wrapping a
+/// `FakeAdapter` scripted with `fail`. Binds the listener BEFORE spawning
+/// `axum::serve` (no readiness race).
+async fn spawn(fail: Option<String>) -> Peer {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let adapter = FakeAdapter {
+        recorded: recorded.clone(),
+        fail,
+    };
+    let executor = Arc::new(AdapterExecutor::new(adapter));
+    let server = Arc::new(A2aServer::new(a2a_card(), executor));
+    let app = server.router();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    Peer {
+        url: format!("http://127.0.0.1:{port}/"),
+        recorded,
+        handle,
     }
+}
+
+/// A healthy peer whose adapter echoes `"reply:{text}"`.
+pub async fn spawn_echo() -> Peer {
+    spawn(None).await
+}
+
+/// A peer whose adapter always returns an `AdapterError` (→ a `Failed` Task).
+pub async fn spawn_failing(message: &str) -> Peer {
+    spawn(Some(message.to_string())).await
+}
+
+/// Bind an ephemeral loopback port, then immediately drop the listener so the
+/// address is closed — a peer registered at this URL models a transport-level
+/// delivery failure (the peer is unreachable).
+pub async fn dead_url() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}/")
 }
 
 // ---------------------------------------------------------------------
-// FakeRunner — per-dst scriptable transfer Runner
+// FakeRunner — per-dst scriptable transfer Runner (unchanged; transfer is
+// host-addressed and never went through the daemon's Mesh/dispatch's A2A —
+// `wasl_daemon::transfer` was a one-line passthrough to `wasl_transfer::execute`,
+// which X5 now calls directly).
 // ---------------------------------------------------------------------
 
 /// A recording `Runner` fake that fails any job whose final argv token

@@ -1,7 +1,7 @@
 # WR — `wasl-registry` — working contract
 
-**Purpose:** peer registry + agent cards + mesh route resolution (Local vs Remote). Pure; mesh IO is the
-daemon block. **Tier:** L0/L1 (no IO, no `unsafe`).
+**Purpose:** peer registry + agent cards + peer route resolution (Local vs Remote). Pure; peer delivery
+IO is the dispatch block (over A2A). **Tier:** L0/L1 (no IO, no `unsafe`).
 **Spec:** `../../docs/specs/registry.md`
 
 ## What you may edit

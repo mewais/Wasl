@@ -17,8 +17,14 @@ serde_json = { workspace = true }
 wasl-proto = { workspace = true }
 wasl-gate = { workspace = true }
 wasl-registry = { workspace = true }
-wasl-mailbox = { workspace = true }
 wasl-transfer = { workspace = true }
 wasl-audit = { workspace = true }
 wasl-server = { workspace = true }
-wasl-daemon = { workspace = true }
+wasl-a2a-types = { workspace = true }
+wasl-a2a-server = { workspace = true }
+wasl-adapter = { workspace = true }
+wasl-dispatch = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+reqwest = { workspace = true }
+async-trait = { workspace = true }

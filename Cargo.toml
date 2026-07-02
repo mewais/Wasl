@@ -4,11 +4,9 @@ members = [
     "crates/wasl-proto",
     "crates/wasl-gate",
     "crates/wasl-registry",
-    "crates/wasl-mailbox",
     "crates/wasl-transfer",
     "crates/wasl-audit",
     "crates/wasl-server",
-    "crates/wasl-daemon",
     "crates/wasl-e2e",
     "crates/wasl-mcp",
     "crates/wasl-a2a-types",
@@ -35,7 +33,6 @@ wasl-proto = { path = "crates/wasl-proto" }
 wasl-gate = { path = "crates/wasl-gate" }
 wasl-audit = { path = "crates/wasl-audit" }
 wasl-registry = { path = "crates/wasl-registry" }
-wasl-mailbox = { path = "crates/wasl-mailbox" }
 wasl-transfer = { path = "crates/wasl-transfer" }
 wasl-a2a-types = { path = "crates/wasl-a2a-types" }
 wasl-a2a-server = { path = "crates/wasl-a2a-server" }
@@ -47,7 +44,6 @@ wasl-filesink = { path = "crates/wasl-filesink" }
 wasl-procrunner = { path = "crates/wasl-procrunner" }
 wasl-adapter-claude = { path = "crates/wasl-adapter-claude" }
 wasl-server = { path = "crates/wasl-server" }
-wasl-daemon = { path = "crates/wasl-daemon" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"

@@ -2,22 +2,31 @@
 //!
 //! Each test embodies the "server loop": build a `Gatekeeper` (wasl-server) over
 //! a `Surfacer` + audit `Sink`, call `authorize(...)` (or `commit(...)` for
-//! Tier-2), and ONLY on `Verdict::Proceed` dispatch through the daemon
-//! (`consult`/`command`/`message`/`transfer`). Every test asserts BOTH halves of
-//! the seam — the recorded gate decision AND the dispatch outcome — with concrete
-//! values, so the two agree with the verdict. Tier-3 (external authority) records
-//! its decision into the generic audit log — the observation feed IS the audit log.
+//! Tier-2), and ONLY on `Verdict::Proceed` dispatch over the LIVE A2A path
+//! (`wasl_dispatch::{consult,command,message}` against a REAL loopback
+//! `wasl_a2a_server`, driven by a REAL `AdapterExecutor` over a FAKE innermost
+//! `AgentAdapter`). Every test asserts BOTH halves of the seam — the recorded
+//! gate decision AND the dispatch outcome — with concrete values, so the two
+//! agree with the verdict. Tier-3 (external authority) records its decision
+//! into the generic audit log — the observation feed IS the audit log.
+//!
+//! See `AGENTS.md` for the old (legacy `wasl-daemon`+`FakeMesh`) -> new (live
+//! A2A) scenario mapping.
 
 mod common;
 
-use common::{agent, card, host, FakeMesh, FakeRunner, FakeSink, ScriptSurfacer};
+use common::{
+    agent, dead_url, host, http_client, register, spawn_echo, FakeRunner, FakeSink, ScriptSurfacer,
+};
 
 use wasl_audit::EntryKind;
+use wasl_dispatch::{command, consult, message};
 use wasl_gate::{ClientCaps, GateMode};
 use wasl_proto::{
     AgentId, ApprovalToken, CommandParams, ConsultParams, GateDecision, GateKind, HostId,
     MessageParams, TransferParams,
 };
+use wasl_registry::PeerRegistry;
 use wasl_server::{Gatekeeper, ServerError, Verdict};
 use wasl_transfer::Tool;
 
@@ -59,8 +68,8 @@ fn caps_prepare_commit() -> ClientCaps {
 // X1 — approved consult, end to end
 // ---------------------------------------------------------------------
 
-#[test]
-fn x1_approved_consult_gated_then_dispatched() {
+#[tokio::test]
+async fn x1_approved_consult_gated_then_dispatched() {
     // --- gate side: caps elicitation, surfacer approves ---
     let mut gk = Gatekeeper::new(
         caps_elicitation(),
@@ -91,49 +100,42 @@ fn x1_approved_consult_gated_then_dispatched() {
     assert_eq!(entries[0].targets, targets);
     assert_eq!(entries[0].decision, Some(GateDecision::Approve));
 
-    // --- dispatch side: 2 local peers over a Mesh returning replies ---
-    let mut registry = wasl_registry::PeerRegistry::new();
-    registry.register(card("p1", "host-a"));
-    registry.register(card("p2", "host-a"));
+    // --- dispatch side: 2 REAL loopback peers over the live A2A path ---
+    let peer1 = spawn_echo().await;
+    let peer2 = spawn_echo().await;
 
-    let mut mesh = FakeMesh::new()
-        .with_reply("p1", "yes from p1")
-        .with_reply("p2", "no from p2");
+    let mut registry = PeerRegistry::new();
+    register(&mut registry, "p1", &peer1.url);
+    register(&mut registry, "p2", &peer2.url);
 
     let params = ConsultParams {
         peers: targets.clone(),
         question: "please review".to_string(),
     };
-    let (result, report) = wasl_daemon::consult(
-        &registry,
-        &self_host(),
-        "env-x1",
-        &caller(),
-        &params,
-        &mut mesh,
-    );
+    let (result, report) = consult(&registry, &caller(), "env-x1", &params, &http_client()).await;
 
     // replies from both peers, in target order, exact bodies.
     assert_eq!(result.replies.len(), 2);
     assert_eq!(result.replies[0].from, agent("p1"));
-    assert_eq!(result.replies[0].body, "yes from p1");
+    assert_eq!(result.replies[0].body, "reply:please review");
     assert_eq!(result.replies[1].from, agent("p2"));
-    assert_eq!(result.replies[1].body, "no from p2");
+    assert_eq!(result.replies[1].body, "reply:please review");
 
     // report empty — nothing unknown/failed.
     assert!(report.unknown.is_empty());
     assert!(report.failed.is_empty());
 
-    // seam agreement: the gate approved AND the daemon delivered both.
-    assert_eq!(mesh.calls.len(), 2);
+    // seam agreement: the gate approved AND the live A2A path delivered both.
+    assert_eq!(peer1.deliveries().len(), 1);
+    assert_eq!(peer2.deliveries().len(), 1);
 }
 
 // ---------------------------------------------------------------------
-// X2 — denied → no dispatch, Mesh untouched
+// X2 — denied → no dispatch, peer never reached
 // ---------------------------------------------------------------------
 
-#[test]
-fn x2_denied_short_circuits_no_dispatch() {
+#[tokio::test]
+async fn x2_denied_short_circuits_no_dispatch() {
     let mut gk = Gatekeeper::new(
         caps_elicitation(),
         ScriptSurfacer::denying("nope"),
@@ -169,30 +171,24 @@ fn x2_denied_short_circuits_no_dispatch() {
         })
     );
 
-    // The composition MUST NOT dispatch. We prove it by never calling the daemon
-    // (the branch is only reachable on Proceed) and the Mesh is never touched.
-    let mut registry = wasl_registry::PeerRegistry::new();
-    registry.register(card("p1", "host-a"));
-    let mut mesh = FakeMesh::new().with_reply("p1", "unreachable");
+    // The composition MUST NOT dispatch. We prove it by never calling
+    // `wasl_dispatch::consult` (the branch is only reachable on Proceed) — the
+    // live peer is up but never reached.
+    let peer1 = spawn_echo().await;
+    let mut registry = PeerRegistry::new();
+    register(&mut registry, "p1", &peer1.url);
 
     if verdict == Verdict::Proceed {
         let params = ConsultParams {
             peers: targets,
             question: "please review".to_string(),
         };
-        let _ = wasl_daemon::consult(
-            &registry,
-            &self_host(),
-            "env-x2",
-            &caller(),
-            &params,
-            &mut mesh,
-        );
+        let _ = consult(&registry, &caller(), "env-x2", &params, &http_client()).await;
     }
 
     assert!(
-        mesh.calls.is_empty(),
-        "Mesh must be untouched when the gate denies"
+        peer1.deliveries().is_empty(),
+        "the live A2A peer must be untouched when the gate denies"
     );
 }
 
@@ -200,8 +196,8 @@ fn x2_denied_short_circuits_no_dispatch() {
 // X3 — Tier-2 prepare → commit → dispatch
 // ---------------------------------------------------------------------
 
-#[test]
-fn x3_tier2_prepare_commit_then_dispatch() {
+#[tokio::test]
+async fn x3_tier2_prepare_commit_then_dispatch() {
     let mut gk = Gatekeeper::new(
         caps_prepare_commit(),
         ScriptSurfacer::approving(),
@@ -245,43 +241,38 @@ fn x3_tier2_prepare_commit_then_dispatch() {
     assert_eq!(entries[0].targets, targets);
     assert_eq!(entries[0].decision, Some(GateDecision::Approve));
 
-    // dispatch a command over the registry.
-    let mut registry = wasl_registry::PeerRegistry::new();
-    registry.register(card("p1", "host-a"));
-    registry.register(card("p2", "host-b"));
+    // dispatch a command over the live A2A path.
+    let peer1 = spawn_echo().await;
+    let peer2 = spawn_echo().await;
 
-    let mut mesh = FakeMesh::new()
-        .with_reply("p1", "done p1")
-        .with_reply("p2", "done p2");
+    let mut registry = PeerRegistry::new();
+    register(&mut registry, "p1", &peer1.url);
+    register(&mut registry, "p2", &peer2.url);
 
     let params = CommandParams {
         peers: targets,
         task: "do the thing".to_string(),
     };
-    let (result, report) = wasl_daemon::command(
-        &registry,
-        &self_host(),
-        "env-x3",
-        &caller(),
-        &params,
-        &mut mesh,
-    );
+    let (result, report) = command(&registry, &caller(), "env-x3", &params, &http_client()).await;
 
     assert_eq!(result.replies.len(), 2);
     assert_eq!(result.replies[0].from, agent("p1"));
-    assert_eq!(result.replies[0].body, "done p1");
+    assert_eq!(result.replies[0].body, "reply:do the thing");
     assert_eq!(result.replies[1].from, agent("p2"));
-    assert_eq!(result.replies[1].body, "done p2");
+    assert_eq!(result.replies[1].body, "reply:do the thing");
     assert!(report.unknown.is_empty());
     assert!(report.failed.is_empty());
+
+    assert_eq!(peer1.deliveries().len(), 1);
+    assert_eq!(peer2.deliveries().len(), 1);
 }
 
 // ---------------------------------------------------------------------
 // X4 — Tier-3 via an external authority (decision → the generic audit log)
 // ---------------------------------------------------------------------
 
-#[test]
-fn x4_tier3_external_authority_records_decision_and_dispatches() {
+#[tokio::test]
+async fn x4_tier3_external_authority_records_decision_and_dispatches() {
     // Tier-3: caps select the External mode; the gate is surfaced to an external
     // authority (any `Surfacer` — e.g. a connector living outside Wasl) that
     // approves. The decision lands in the GENERIC audit log — there is no
@@ -310,32 +301,30 @@ fn x4_tier3_external_authority_records_decision_and_dispatches() {
     assert_eq!(entries[0].actor, caller());
     assert_eq!(entries[0].decision, Some(GateDecision::Approve));
 
-    // dispatch a message → delivered = [p1].
-    let mut registry = wasl_registry::PeerRegistry::new();
-    registry.register(card("p1", "host-a"));
-    let mut mesh = FakeMesh::new().with_reply("p1", "pong");
+    // dispatch a message over the live A2A path → delivered = [p1].
+    let peer1 = spawn_echo().await;
+    let mut registry = PeerRegistry::new();
+    register(&mut registry, "p1", &peer1.url);
 
     let params = MessageParams {
         peers: targets,
         payload: "ping".to_string(),
     };
-    let (result, report) = wasl_daemon::message(
-        &registry,
-        &self_host(),
-        "env-x4",
-        &caller(),
-        &params,
-        &mut mesh,
-    );
+    let (result, report) = message(&registry, &caller(), "env-x4", &params, &http_client()).await;
 
     assert_eq!(result.delivered, vec![agent("p1")]);
     assert!(report.unknown.is_empty());
     assert!(report.failed.is_empty());
+    assert_eq!(peer1.deliveries().len(), 1);
 }
 
 // ---------------------------------------------------------------------
 // X5 — approved transfer
 // ---------------------------------------------------------------------
+//
+// Transfer is host-addressed, not peer-addressed, so it never went through the
+// daemon's `Mesh`/dispatch's A2A path — `wasl_daemon::transfer` was a one-line
+// passthrough to `wasl_transfer::execute`. X5 now calls that directly.
 
 #[test]
 fn x5_approved_transfer_via_runner() {
@@ -371,7 +360,7 @@ fn x5_approved_transfer_via_runner() {
     };
     let mut runner = FakeRunner::new();
     let (result, failures) =
-        wasl_daemon::transfer(Tool::Scp, &params, &mut runner).expect("non-empty dst list");
+        wasl_transfer::execute(Tool::Scp, &params, &mut runner).expect("non-empty dst list");
 
     assert_eq!(result.delivered, vec![dst1, dst2]);
     assert!(failures.is_empty());
@@ -382,15 +371,16 @@ fn x5_approved_transfer_via_runner() {
 // X6 — multicast with an unknown peer + a failed delivery
 // ---------------------------------------------------------------------
 
-#[test]
-fn x6_multicast_unknown_and_failed_partition() {
+#[tokio::test]
+async fn x6_multicast_unknown_and_failed_partition() {
     let mut gk = Gatekeeper::new(
         caps_elicitation(),
         ScriptSurfacer::approving(),
         FakeSink::ok(),
     );
 
-    // 3 targets: p1 delivers, p2 fails, ghost is unregistered.
+    // 3 targets: p1 delivers, p2 fails (dead loopback port = transport failure),
+    // ghost is unregistered.
     let targets = vec![agent("p1"), agent("p2"), agent("ghost")];
     let verdict = gk
         .authorize(
@@ -414,48 +404,39 @@ fn x6_multicast_unknown_and_failed_partition() {
     assert_eq!(decisions.len(), 1);
     assert_eq!(decisions[0].decision, Some(GateDecision::Approve));
 
-    let mut registry = wasl_registry::PeerRegistry::new();
-    registry.register(card("p1", "host-a"));
-    registry.register(card("p2", "host-a"));
-    // "ghost" is intentionally NOT registered.
+    let peer1 = spawn_echo().await;
+    let dead = dead_url().await;
 
-    let mut mesh = FakeMesh::new()
-        .with_reply("p1", "p1 reply")
-        .with_failure("p2", "timeout");
+    let mut registry = PeerRegistry::new();
+    register(&mut registry, "p1", &peer1.url);
+    register(&mut registry, "p2", &dead);
+    // "ghost" is intentionally NOT registered.
 
     let params = ConsultParams {
         peers: targets,
         question: "poll".to_string(),
     };
-    let (result, report) = wasl_daemon::consult(
-        &registry,
-        &self_host(),
-        "env-x6",
-        &caller(),
-        &params,
-        &mut mesh,
-    );
+    let (result, report) = consult(&registry, &caller(), "env-x6", &params, &http_client()).await;
 
     // replies only for the delivered peer.
     assert_eq!(result.replies.len(), 1);
     assert_eq!(result.replies[0].from, agent("p1"));
-    assert_eq!(result.replies[0].body, "p1 reply");
+    assert_eq!(result.replies[0].body, "reply:poll");
 
     // report partitions: ghost unknown, p2 failed.
     assert_eq!(report.unknown, vec![agent("ghost")]);
     assert_eq!(report.failed, vec![agent("p2")]);
 
-    // partial multicast survived: p1 and p2 were both attempted (ghost was not
-    // resolvable so never handed to the mesh).
-    assert_eq!(mesh.calls.len(), 2);
+    // partial multicast survived: p1 was really reached over the live A2A path.
+    assert_eq!(peer1.deliveries().len(), 1);
 }
 
 // ---------------------------------------------------------------------
 // X7 — Tier-2 commit denied → no dispatch
 // ---------------------------------------------------------------------
 
-#[test]
-fn x7_tier2_commit_denied_no_dispatch() {
+#[tokio::test]
+async fn x7_tier2_commit_denied_no_dispatch() {
     let mut gk = Gatekeeper::new(
         caps_prepare_commit(),
         ScriptSurfacer::approving(),
@@ -509,28 +490,21 @@ fn x7_tier2_commit_denied_no_dispatch() {
         })
     );
 
-    // no dispatch: Mesh untouched.
-    let mut registry = wasl_registry::PeerRegistry::new();
-    registry.register(card("p1", "host-a"));
-    let mut mesh = FakeMesh::new().with_reply("p1", "unreachable");
+    // no dispatch: the live A2A peer is untouched.
+    let peer1 = spawn_echo().await;
+    let mut registry = PeerRegistry::new();
+    register(&mut registry, "p1", &peer1.url);
 
     if verdict == Verdict::Proceed {
         let params = CommandParams {
             peers: targets,
             task: "do it".to_string(),
         };
-        let _ = wasl_daemon::command(
-            &registry,
-            &self_host(),
-            "env-x7",
-            &caller(),
-            &params,
-            &mut mesh,
-        );
+        let _ = command(&registry, &caller(), "env-x7", &params, &http_client()).await;
     }
     assert!(
-        mesh.calls.is_empty(),
-        "Mesh must be untouched when the commit denies"
+        peer1.deliveries().is_empty(),
+        "the live A2A peer must be untouched when the commit denies"
     );
 }
 
@@ -538,8 +512,8 @@ fn x7_tier2_commit_denied_no_dispatch() {
 // X8 — gate audit failure aborts before dispatch
 // ---------------------------------------------------------------------
 
-#[test]
-fn x8_audit_failure_aborts_before_dispatch() {
+#[tokio::test]
+async fn x8_audit_failure_aborts_before_dispatch() {
     // sink scripted to fail: the decision cannot be durably recorded.
     let mut gk = Gatekeeper::new(
         caps_elicitation(),
@@ -568,28 +542,21 @@ fn x8_audit_failure_aborts_before_dispatch() {
         "durability-first: a failed append caches nothing"
     );
 
-    // The composition surfaces the error and does NOT dispatch — the daemon/Mesh
-    // is never invoked.
-    let mut registry = wasl_registry::PeerRegistry::new();
-    registry.register(card("p1", "host-a"));
-    let mut mesh = FakeMesh::new().with_reply("p1", "unreachable");
+    // The composition surfaces the error and does NOT dispatch — the live A2A
+    // peer is never invoked.
+    let peer1 = spawn_echo().await;
+    let mut registry = PeerRegistry::new();
+    register(&mut registry, "p1", &peer1.url);
 
     if let Ok(Verdict::Proceed) = result {
         let params = ConsultParams {
             peers: targets,
             question: "please review".to_string(),
         };
-        let _ = wasl_daemon::consult(
-            &registry,
-            &self_host(),
-            "env-x8",
-            &caller(),
-            &params,
-            &mut mesh,
-        );
+        let _ = consult(&registry, &caller(), "env-x8", &params, &http_client()).await;
     }
     assert!(
-        mesh.calls.is_empty(),
+        peer1.deliveries().is_empty(),
         "no dispatch when the gate audit fails"
     );
 }

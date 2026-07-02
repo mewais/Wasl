@@ -26,7 +26,6 @@ wasl-proto = { workspace = true }
 wasl-gate = { workspace = true }
 wasl-audit = { workspace = true }
 wasl-registry = { workspace = true }
-wasl-mailbox = { workspace = true }
 wasl-transfer = { workspace = true }
 wasl-server = { workspace = true }
 # Real async A2A send path (replaces the retired sync wasl-daemon Mesh).

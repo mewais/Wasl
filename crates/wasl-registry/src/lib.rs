@@ -1,8 +1,8 @@
-//! wasl-registry — peer registry + agent cards + mesh route resolution (WR).
+//! wasl-registry — peer registry + agent cards + peer route resolution (WR).
 //!
 //! Pure: track which agents exist and on which host, resolve whether a target
-//! peer is Local (same daemon) or Remote (another host's daemon). Actual mesh
-//! IO lives in the daemon block. See `docs/specs/registry.md`.
+//! peer is Local (same node) or Remote (another host's node). Actual peer
+//! delivery IO lives in the dispatch block (over A2A). See `docs/specs/registry.md`.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -10,7 +10,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use wasl_proto::{AgentCard, AgentId, HostId};
 
-/// Whether a resolved target is on this daemon or another host's daemon.
+/// Whether a resolved target is on this node or another host's node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Route {
