@@ -8,8 +8,9 @@
 //! 2. surfaces it to the human over MCP `elicitation/create` via the client peer,
 //!    mapping accept/decline/cancel → [`GateOutcome`] (a client that cannot be
 //!    elicited is **blocked**, never silently sent), and
-//! 3. calls the sync heart [`resolve_and_dispatch`] to audit + (only on approval)
-//!    dispatch, then renders the [`ToolReply`] into a [`CallToolResult`].
+//! 3. calls the async heart [`resolve_and_dispatch`] to audit + (only on approval)
+//!    dispatch over REAL A2A, then renders the [`ToolReply`] into a
+//!    [`CallToolResult`].
 //!
 //! No decision or routing logic lives here — it is all in the tested cores and
 //! the [`crate::handle`] heart. State is held behind `Arc<Mutex<…>>` because rmcp
@@ -129,20 +130,21 @@ impl From<TransferArgs> for TransferParams {
 // 1. Mutable state (behind the async lock)
 // ---------------------------------------------------------------------
 
-/// Everything the handler mutates per call: the audit log, the delivery seams,
-/// and a monotonic sequence counter for deterministic audit/envelope ids.
-pub struct WaslState<K: Sink, M: wasl_daemon::Mesh, R: Runner> {
+/// Everything the handler mutates per call: the audit log, the transfer runner,
+/// and a monotonic sequence counter for deterministic audit/envelope ids. The
+/// A2A dispatch seam is a shared `reqwest::Client` (cheap `Arc`-backed clone).
+pub struct WaslState<K: Sink, R: Runner> {
     pub audit: AuditLog<K>,
-    pub mesh: M,
+    pub http: reqwest::Client,
     pub runner: R,
     pub seq: u64,
 }
 
-impl<K: Sink, M: wasl_daemon::Mesh, R: Runner> WaslState<K, M, R> {
-    pub fn new(audit: AuditLog<K>, mesh: M, runner: R) -> Self {
+impl<K: Sink, R: Runner> WaslState<K, R> {
+    pub fn new(audit: AuditLog<K>, http: reqwest::Client, runner: R) -> Self {
         Self {
             audit,
-            mesh,
+            http,
             runner,
             seq: 0,
         }
@@ -162,25 +164,24 @@ impl<K: Sink, M: wasl_daemon::Mesh, R: Runner> WaslState<K, M, R> {
 /// The rmcp MCP server handler for Wasl. Cloneable (shared state behind `Arc`),
 /// as rmcp requires for the tool router.
 #[derive(Clone)]
-pub struct WaslMcp<K: Sink, M: wasl_daemon::Mesh, R: Runner> {
+pub struct WaslMcp<K: Sink, R: Runner> {
     self_id: AgentId,
     self_host: HostId,
     registry: Arc<PeerRegistry>,
-    state: Arc<Mutex<WaslState<K, M, R>>>,
+    state: Arc<Mutex<WaslState<K, R>>>,
     tool_router: ToolRouter<Self>,
 }
 
-impl<K, M, R> WaslMcp<K, M, R>
+impl<K, R> WaslMcp<K, R>
 where
     K: Sink + Send + Sync + 'static,
-    M: wasl_daemon::Mesh + Send + Sync + 'static,
     R: Runner + Send + Sync + 'static,
 {
     pub fn new(
         self_id: AgentId,
         self_host: HostId,
         registry: PeerRegistry,
-        state: WaslState<K, M, R>,
+        state: WaslState<K, R>,
     ) -> Self {
         Self {
             self_id,
@@ -262,13 +263,15 @@ where
             registry: &self.registry,
         };
 
-        // Split the borrow of `state` so the heart can take `&mut` of each seam.
+        // Split the borrow of `state`: the A2A seam is a `&` shared client (cheap
+        // Arc-backed clone), while the audit sink and transfer runner are `&mut`.
         let WaslState {
             audit,
-            mesh,
+            http,
             runner,
             ..
         } = &mut *state;
+        let http = http.clone();
 
         let reply = resolve_and_dispatch(
             &ctx,
@@ -276,10 +279,11 @@ where
             make_call(),
             &base_id,
             seq,
-            mesh,
+            &http,
             runner,
             audit,
         )
+        .await
         .map_err(handle_error_to_mcp)?;
 
         Ok(reply_to_result(reply))
@@ -291,10 +295,9 @@ where
 // ---------------------------------------------------------------------
 
 #[tool_router]
-impl<K, M, R> WaslMcp<K, M, R>
+impl<K, R> WaslMcp<K, R>
 where
     K: Sink + Send + Sync + 'static,
-    M: wasl_daemon::Mesh + Send + Sync + 'static,
     R: Runner + Send + Sync + 'static,
 {
     #[tool(
@@ -372,10 +375,9 @@ where
 // ---------------------------------------------------------------------
 
 #[tool_handler]
-impl<K, M, R> ServerHandler for WaslMcp<K, M, R>
+impl<K, R> ServerHandler for WaslMcp<K, R>
 where
     K: Sink + Send + Sync + 'static,
-    M: wasl_daemon::Mesh + Send + Sync + 'static,
     R: Runner + Send + Sync + 'static,
 {
     fn get_info(&self) -> ServerInfo {

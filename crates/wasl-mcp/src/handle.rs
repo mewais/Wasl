@@ -1,4 +1,4 @@
-//! wasl-mcp `handle` — the synchronous, rmcp-free request→reply heart.
+//! wasl-mcp `handle` — the async, rmcp-free request→reply heart.
 //!
 //! This is the only place in the crate that carries decision-aware logic, and it
 //! reimplements NONE of it: the gate outcome is decided upstream (in the rmcp
@@ -6,17 +6,16 @@
 //!
 //! 1. records the decision to the audit log **durability-first** (an audit
 //!    failure fails the whole call, before any dispatch), and
-//! 2. dispatches over the tested cores (`wasl_daemon` consult/command/message,
-//!    `wasl_transfer` via `wasl_daemon::transfer`) **only** when the outcome is
-//!    [`GateOutcome::Approved`].
+//! 2. dispatches over the tested cores (`wasl_dispatch` consult/command/message
+//!    over REAL async A2A, `wasl_transfer::execute` for transfer) **only** when
+//!    the outcome is [`GateOutcome::Approved`].
 //!
-//! A non-`Approved` outcome NEVER touches the `Mesh`/`Runner` — that invariant is
-//! the whole point of the gate and is proven in the unit tests. Because every
-//! seam here (`Mesh`, `Runner`, `Sink`) is a trait, the entire heart is testable
-//! with fakes, mirroring the daemon's test style.
+//! A non-`Approved` outcome NEVER touches the A2A/`Runner` seams — that invariant
+//! is the whole point of the gate and is proven in the loopback tests. The audit
+//! `Sink` and the transfer `Runner` are traits, and A2A is exercised end-to-end
+//! over loopback, mirroring the dispatch crate's test style.
 
 use wasl_audit::{AuditEntry, AuditError, AuditLog, EntryKind, Sink};
-use wasl_daemon::Mesh;
 use wasl_gate::GateOutcome;
 use wasl_proto::{
     AgentId, CommandParams, CommandResult, ConsultParams, ConsultResult, GateKind, HostId,
@@ -126,28 +125,30 @@ impl From<AuditError> for HandleError {
 }
 
 // ---------------------------------------------------------------------
-// 2. resolve_and_dispatch — the sync heart
+// 2. resolve_and_dispatch — the async heart
 // ---------------------------------------------------------------------
 
 /// Record the already-decided gate `outcome` to `audit` (durability-first) and,
-/// **only on [`GateOutcome::Approved`]**, dispatch the call over `mesh`/`runner`
-/// via the tested `wasl_daemon` core; return the [`ToolReply`].
+/// **only on [`GateOutcome::Approved`]**, dispatch the call over A2A (`http`) /
+/// the transfer `runner` via the tested cores; return the [`ToolReply`].
 ///
 /// * The decision is recorded for every outcome (approve/deny/dismiss) — an audit
 ///   failure short-circuits with [`HandleError::Audit`] and NOTHING is dispatched.
 /// * A `Denied`/`Dismissed` outcome yields [`ToolReply::Blocked`] and the
-///   `mesh`/`runner` seams are never touched (the gate is never bypassed).
+///   A2A/`runner` seams are never touched (the gate is never bypassed).
 ///
 /// `base_id`/`seq` are caller-supplied (deterministic ordering; no clock here).
 #[allow(clippy::too_many_arguments)]
-pub fn resolve_and_dispatch<K: Sink>(
+pub async fn resolve_and_dispatch<K: Sink>(
     ctx: &ToolCtx<'_>,
     outcome: &GateOutcome,
     call: ToolCall,
     base_id: &str,
     seq: u64,
-    mesh: &mut dyn Mesh,
-    runner: &mut dyn Runner,
+    http: &reqwest::Client,
+    // `+ Send` so the (rmcp-required) `Send` future can hold the runner across the
+    // A2A `.await`; callers pass concrete `Send` runners, so it is invisible.
+    runner: &mut (dyn Runner + Send),
     audit: &mut AuditLog<K>,
 ) -> Result<ToolReply, HandleError> {
     let kind = call.gate_kind();
@@ -169,7 +170,7 @@ pub fn resolve_and_dispatch<K: Sink>(
     // The gate is authoritative: only Approved dispatches. Everything else is
     // Blocked and never reaches the delivery seams.
     match outcome {
-        GateOutcome::Approved => Ok(dispatch_approved(ctx, call, base_id, mesh, runner)),
+        GateOutcome::Approved => Ok(dispatch_approved(ctx, call, base_id, http, runner).await),
         GateOutcome::Denied { reason } => Ok(ToolReply::Blocked {
             reason: reason.clone(),
         }),
@@ -181,58 +182,47 @@ pub fn resolve_and_dispatch<K: Sink>(
 
 /// Dispatch an approved call over the tested cores. Kept private so the only
 /// public path into the delivery seams is guarded by the `Approved` branch above.
-fn dispatch_approved(
+///
+/// The messaging verbs (consult/command/message) go over REAL async A2A via
+/// `wasl_dispatch` (`from = ctx.self_id`, no host arg — routing resolves peers by
+/// their A2A endpoint in the registry). Transfer is NOT an A2A call: it runs over
+/// the transfer `runner` via `wasl_transfer::execute`, unchanged.
+async fn dispatch_approved(
     ctx: &ToolCtx<'_>,
     call: ToolCall,
     base_id: &str,
-    mesh: &mut dyn Mesh,
-    runner: &mut dyn Runner,
+    http: &reqwest::Client,
+    runner: &mut (dyn Runner + Send),
 ) -> ToolReply {
     match call {
         ToolCall::Consult(params) => {
-            let (result, _report) = wasl_daemon::consult(
-                ctx.registry,
-                ctx.self_host,
-                base_id,
-                ctx.self_id,
-                &params,
-                mesh,
-            );
+            let (result, _report) =
+                wasl_dispatch::consult(ctx.registry, ctx.self_id, base_id, &params, http).await;
             ToolReply::Consult(result)
         }
         ToolCall::Command(params) => {
-            let (result, _report) = wasl_daemon::command(
-                ctx.registry,
-                ctx.self_host,
-                base_id,
-                ctx.self_id,
-                &params,
-                mesh,
-            );
+            let (result, _report) =
+                wasl_dispatch::command(ctx.registry, ctx.self_id, base_id, &params, http).await;
             ToolReply::Command(result)
         }
         ToolCall::Message(params) => {
-            let (result, _report) = wasl_daemon::message(
-                ctx.registry,
-                ctx.self_host,
-                base_id,
-                ctx.self_id,
-                &params,
-                mesh,
-            );
+            let (result, _report) =
+                wasl_dispatch::message(ctx.registry, ctx.self_id, base_id, &params, http).await;
             ToolReply::Message(result)
         }
-        ToolCall::Transfer { tool, params } => match wasl_daemon::transfer(tool, &params, runner) {
-            Ok((result, _failures)) => ToolReply::Transfer(result),
-            // A transfer with no destinations is a caller error, not a gate
-            // block — surface it as a blocked reply carrying the reason (no
-            // silent success, no dispatch of anything else).
-            Err(TransferError::NoDestinations) => ToolReply::Transfer(TransferResult {
-                delivered: Vec::new(),
-            }),
-            Err(err) => ToolReply::Blocked {
-                reason: err.to_string(),
-            },
-        },
+        ToolCall::Transfer { tool, params } => {
+            match wasl_transfer::execute(tool, &params, runner) {
+                Ok((result, _failures)) => ToolReply::Transfer(result),
+                // A transfer with no destinations is a caller error, not a gate
+                // block — surface it as a blocked reply carrying the reason (no
+                // silent success, no dispatch of anything else).
+                Err(TransferError::NoDestinations) => ToolReply::Transfer(TransferResult {
+                    delivered: Vec::new(),
+                }),
+                Err(err) => ToolReply::Blocked {
+                    reason: err.to_string(),
+                },
+            }
+        }
     }
 }
