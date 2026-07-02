@@ -20,6 +20,7 @@ members = [
     "crates/wasl-node",
     "crates/wasl-filesink",
     "crates/wasl-procrunner",
+    "crates/wasl-adapter-claude",
 ]
 
 [workspace.package]
@@ -45,6 +46,7 @@ wasl-dispatch = { path = "crates/wasl-dispatch" }
 wasl-node = { path = "crates/wasl-node" }
 wasl-filesink = { path = "crates/wasl-filesink" }
 wasl-procrunner = { path = "crates/wasl-procrunner" }
+wasl-adapter-claude = { path = "crates/wasl-adapter-claude" }
 wasl-server = { path = "crates/wasl-server" }
 wasl-daemon = { path = "crates/wasl-daemon" }
 serde = { version = "1", features = ["derive"] }

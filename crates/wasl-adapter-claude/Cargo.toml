@@ -1,0 +1,21 @@
+[package]
+name = "wasl-adapter-claude"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl concrete AgentAdapter driving the Claude Code CLI (the last inch)"
+
+[dependencies]
+wasl-adapter = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
