@@ -11,17 +11,17 @@ ElicitationAction, ApprovalToken}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientCaps {
     pub elicitation: bool,   // the calling MCP client supports server-initiated elicitation
-    pub marsad: bool,        // a Marsad connector is attached (can surface + observe)
+    pub external: bool,        // a external authority is attached (can surface + observe)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum GateMode { Elicitation, Marsad, PrepareCommit }
+pub enum GateMode { Elicitation, external authority, PrepareCommit }
 ```
-`pub fn choose_mode(caps: &ClientCaps) -> GateMode` — **priority: elicitation > marsad > prepare_commit.**
+`pub fn choose_mode(caps: &ClientCaps) -> GateMode` — **priority: elicitation > external > prepare_commit.**
 - `elicitation` true → `Elicitation` (clean in-band path; Claude/Codex).
-- else `marsad` true → `Marsad` (no client elicitation but Marsad present, e.g. Gemini+Marsad — surface
-  direct to Marsad).
+- else `external` true → `external authority` (no client elicitation but external authority present, e.g. Gemini+external authority — surface
+  direct to external authority).
 - else → `PrepareCommit` (self-owned handshake; standalone Gemini / any no-elicitation client).
 
 ## 2. Building the human-facing gate + elicitation
@@ -77,8 +77,8 @@ pub struct GateLedger { /* private */ }
 ## Test plan (test-agent: `tests/happy.rs`, `tests/errors.rs`; 100% line+region). Real asserting `#[test]`s.
 
 **happy.rs**
-- G1  `choose_mode`: `{elicitation:true, marsad:false}`→Elicitation; `{true,true}`→Elicitation (elicitation
-      wins); `{false,true}`→Marsad; `{false,false}`→PrepareCommit. `GateMode` serde snake_case round-trips.
+- G1  `choose_mode`: `{elicitation:true, external:false}`→Elicitation; `{true,true}`→Elicitation (elicitation
+      wins); `{false,true}`→external authority; `{false,false}`→PrepareCommit. `GateMode` serde snake_case round-trips.
 - G2  `ClientCaps` serde round-trips.
 - G3  `build_request`: summary verb+count for each `GateKind` (consult/command/message/transfer) with 1 and
       3 targets; preview stored verbatim; id/kind/from carried through.

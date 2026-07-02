@@ -208,7 +208,7 @@ where
         // client-support check happens at the peer below.
         let caps = ClientCaps {
             elicitation: true,
-            marsad: false,
+            external: false,
         };
         let _mode = choose_mode(&caps);
         let message = wasl_gate::elicitation_for(&req).message;

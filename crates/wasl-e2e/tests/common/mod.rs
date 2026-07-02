@@ -6,24 +6,18 @@
 //!
 //! The fakes wire the real trait seams of the Wasl stack:
 //! * [`ScriptSurfacer`] — a scriptable [`wasl_server::Surfacer`] whose outcome is
-//!   fixed per construction (Tier-1 Elicitation / Tier-3 Marsad path).
-//! * [`MarsadSurfacer`] — a *second* `Surfacer` impl that delegates to a real
-//!   [`wasl_marsad::Connector`] over [`FakeLink`]; a shared handle exposes the
-//!   connector's `feed()` for assertions after the gatekeeper consumed it.
+//!   fixed per construction (Tier-1 Elicitation / Tier-3 External path — any
+//!   external authority implements the same `Surfacer` seam).
 //! * [`FakeSink`] — a recording [`wasl_audit::Sink`], scriptable to fail append.
 //! * [`FakeMesh`] — a recording, per-peer scriptable [`wasl_daemon::Mesh`]; its
 //!   `calls` prove whether the daemon was ever invoked.
 //! * [`FakeRunner`] — a per-dst scriptable [`wasl_transfer::Runner`].
-//! * [`FakeLink`] — a scriptable + recording [`wasl_marsad::MarsadLink`].
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use wasl_audit::{AuditEntry, AuditError, Sink};
 use wasl_gate::{GateMode, GateOutcome};
-use wasl_marsad::{ConnError, Connector, MarsadLink, Observation};
-use wasl_proto::{AgentCard, AgentId, Envelope, GateDecision, GateRequest, HostId};
+use wasl_proto::{AgentCard, AgentId, Envelope, GateRequest, HostId};
 use wasl_registry::Resolved;
 use wasl_server::Surfacer;
 use wasl_transfer::Runner;
@@ -92,90 +86,6 @@ impl Surfacer for ScriptSurfacer {
     fn surface(&mut self, mode: GateMode, req: &GateRequest) -> GateOutcome {
         self.calls.push((mode, req.id.clone()));
         self.outcome.clone()
-    }
-}
-
-// ---------------------------------------------------------------------
-// FakeLink — a scriptable + recording MarsadLink
-// ---------------------------------------------------------------------
-
-/// A `MarsadLink` scripted with a fixed decision and recording every observation
-/// it is asked to emit.
-pub struct FakeLink {
-    decision: GateDecision,
-    fail_emit: bool,
-    pub emitted: Vec<Observation>,
-}
-
-impl FakeLink {
-    pub fn deciding(decision: GateDecision) -> Self {
-        Self {
-            decision,
-            fail_emit: false,
-            emitted: Vec::new(),
-        }
-    }
-
-    pub fn approving() -> Self {
-        Self::deciding(GateDecision::Approve)
-    }
-}
-
-impl MarsadLink for FakeLink {
-    fn request_decision(&mut self, _req: &GateRequest) -> Result<GateDecision, ConnError> {
-        Ok(self.decision.clone())
-    }
-
-    fn emit(&mut self, obs: &Observation) -> Result<(), ConnError> {
-        if self.fail_emit {
-            return Err(ConnError::Transport("emit refused".to_string()));
-        }
-        self.emitted.push(obs.clone());
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------
-// MarsadSurfacer — Surfacer backed by a real wasl_marsad::Connector
-// ---------------------------------------------------------------------
-
-/// A shared handle to a `Connector<FakeLink>`. The gatekeeper takes ownership of
-/// the [`MarsadSurfacer`]; keeping the connector behind an `Rc<RefCell<_>>` lets a
-/// test read the connector's `feed()` after the surfacer has been consumed.
-pub type ConnectorHandle = Rc<RefCell<Connector<FakeLink>>>;
-
-/// A `Surfacer` (Tier-3 Marsad mode) that routes each gate through a
-/// `wasl_marsad::Connector`: `surface` calls `connector.gate(req, seq)` and maps
-/// the resulting `GateOutcome`. The `seq` fed to the connector is caller-supplied
-/// so its `Gate` observation is deterministically ordered.
-pub struct MarsadSurfacer {
-    connector: ConnectorHandle,
-    seq: u64,
-}
-
-impl MarsadSurfacer {
-    /// Build the surfacer over a fresh connector wrapping `link`, returning both
-    /// the surfacer (to hand to the gatekeeper) and a shared handle to the
-    /// connector (to assert its feed afterwards). `seq` is the sequence the
-    /// connector will stamp on its `Gate` observation.
-    pub fn new(link: FakeLink, seq: u64) -> (Self, ConnectorHandle) {
-        let handle: ConnectorHandle = Rc::new(RefCell::new(Connector::new(link)));
-        let surfacer = Self {
-            connector: Rc::clone(&handle),
-            seq,
-        };
-        (surfacer, handle)
-    }
-}
-
-impl Surfacer for MarsadSurfacer {
-    fn surface(&mut self, _mode: GateMode, req: &GateRequest) -> GateOutcome {
-        // Delegate the human decision to Marsad via the connector; the connector
-        // records the `Gate` observation (durability-first) as a side effect.
-        self.connector
-            .borrow_mut()
-            .gate(req, self.seq)
-            .expect("fake marsad link never fails the decision/emit in these scenarios")
     }
 }
 

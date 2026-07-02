@@ -7,41 +7,41 @@ use wasl_gate::{
 use wasl_proto::{AgentId, ElicitationAction, ElicitationResponse, GateDecision, GateKind};
 
 // ---------------------------------------------------------------------
-// G1 — choose_mode priority: elicitation > marsad > prepare_commit
+// G1 — choose_mode priority: elicitation > external > prepare_commit
 // ---------------------------------------------------------------------
 
 #[test]
 fn g1_choose_mode_elicitation_only() {
     let caps = ClientCaps {
         elicitation: true,
-        marsad: false,
+        external: false,
     };
     assert_eq!(choose_mode(&caps), GateMode::Elicitation);
 }
 
 #[test]
-fn g1_choose_mode_elicitation_and_marsad_elicitation_wins() {
+fn g1_choose_mode_elicitation_and_external_elicitation_wins() {
     let caps = ClientCaps {
         elicitation: true,
-        marsad: true,
+        external: true,
     };
     assert_eq!(choose_mode(&caps), GateMode::Elicitation);
 }
 
 #[test]
-fn g1_choose_mode_marsad_only() {
+fn g1_choose_mode_external_only() {
     let caps = ClientCaps {
         elicitation: false,
-        marsad: true,
+        external: true,
     };
-    assert_eq!(choose_mode(&caps), GateMode::Marsad);
+    assert_eq!(choose_mode(&caps), GateMode::External);
 }
 
 #[test]
 fn g1_choose_mode_neither_is_prepare_commit() {
     let caps = ClientCaps {
         elicitation: false,
-        marsad: false,
+        external: false,
     };
     assert_eq!(choose_mode(&caps), GateMode::PrepareCommit);
 }
@@ -50,7 +50,7 @@ fn g1_choose_mode_neither_is_prepare_commit() {
 fn g1_gate_mode_serde_snake_case_round_trip() {
     let cases = [
         (GateMode::Elicitation, "\"elicitation\""),
-        (GateMode::Marsad, "\"marsad\""),
+        (GateMode::External, "\"external\""),
         (GateMode::PrepareCommit, "\"prepare_commit\""),
     ];
     for (mode, expected_json) in cases {
@@ -68,10 +68,10 @@ fn g1_gate_mode_serde_snake_case_round_trip() {
 #[test]
 fn g2_client_caps_serde_round_trip_all_combos() {
     for elicitation in [true, false] {
-        for marsad in [true, false] {
+        for external in [true, false] {
             let caps = ClientCaps {
                 elicitation,
-                marsad,
+                external,
             };
             let json = serde_json::to_string(&caps).expect("serialize ClientCaps");
             let back: ClientCaps = serde_json::from_str(&json).expect("deserialize ClientCaps");
@@ -84,11 +84,11 @@ fn g2_client_caps_serde_round_trip_all_combos() {
 fn g2_client_caps_serde_field_names() {
     let caps = ClientCaps {
         elicitation: true,
-        marsad: false,
+        external: false,
     };
     let value: serde_json::Value = serde_json::to_value(caps).expect("to_value");
     assert_eq!(value["elicitation"], serde_json::json!(true));
-    assert_eq!(value["marsad"], serde_json::json!(false));
+    assert_eq!(value["external"], serde_json::json!(false));
 }
 
 // ---------------------------------------------------------------------

@@ -33,7 +33,7 @@ Research the exact rmcp 0.9 API (docs.rs/rmcp, the repo's `examples/servers`) �
      — confirm the 0.9 method/param names) with `wasl_gate::elicitation_for(&req).message`; map the
      client's accept/decline/cancel → `wasl_gate::GateOutcome` (accept→Approved, decline→Denied, cancel→
      Dismissed). If the client lacks elicitation, fall back to auto-deny with a clear message (Tier-2/Tier-3
-     wiring — prepare/commit token round-trips and the Marsad connector — is a follow-on; a client that
+     wiring — prepare/commit token round-trips and the external-authority Surfacer — is a follow-on; a client that
      can't be prompted must NOT silently send).
 4. Record the decision to the audit log (`AuditEntry{ kind: Decision, actor: self_id, targets, decision:
    outcome.to_decision(), … }`) — durability-first (`AuditLog::record`); an audit failure fails the call.

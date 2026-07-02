@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Wasl three-tier gate: mode selection (elicitation/prepare-commit/marsad) + pending-approval ledger"
+description = "Wasl three-tier gate: mode selection (elicitation/prepare-commit/external) + pending-approval ledger"
 
 [dependencies]
 serde = { workspace = true }

@@ -1,7 +1,7 @@
 //! wasl-server — the server request spine (WS).
 //!
 //! Runs the three-tier permission-before-send gate for a tool call and records
-//! every decision to the audit log. Tier-1 (elicitation) and Tier-3 (marsad) are
+//! every decision to the audit log. Tier-1 (elicitation) and Tier-3 (external) are
 //! surfaced synchronously through the `Surfacer` trait; Tier-2 (prepare/commit)
 //! defers via the gate ledger and resolves on a later `commit`. Pure
 //! orchestration over the `Surfacer` seam + `wasl_audit::Sink` — routing and
@@ -23,7 +23,7 @@ use wasl_proto::{AgentId, ApprovalToken, GateDecision, GateKind, GateRequest};
 // ---------------------------------------------------------------------
 
 /// Surface a gate request to the human in the chosen synchronous mode and return
-/// the outcome. Only called for Tier-1 (Elicitation) and Tier-3 (Marsad); Tier-2
+/// the outcome. Only called for Tier-1 (Elicitation) and Tier-3 (External); Tier-2
 /// (PrepareCommit) never calls this — it defers via the ledger.
 pub trait Surfacer {
     fn surface(&mut self, mode: GateMode, req: &GateRequest) -> GateOutcome;
@@ -101,7 +101,7 @@ impl<S: Surfacer, K: Sink> Gatekeeper<S, K> {
 
     /// Run the permission-before-send gate for an outgoing tool call.
     ///
-    /// Synchronous tiers (Elicitation/Marsad) surface via the `Surfacer`, record
+    /// Synchronous tiers (Elicitation/External) surface via the `Surfacer`, record
     /// the decision, and return a terminal verdict. Tier-2 (PrepareCommit) defers
     /// through the ledger and returns `Pending` — nothing is recorded until
     /// `commit`.
@@ -230,7 +230,7 @@ fn authorize_impl(
     let req = build_request(id, kind, from.clone(), &target_strs, preview);
 
     match mode {
-        GateMode::Elicitation | GateMode::Marsad => {
+        GateMode::Elicitation | GateMode::External => {
             let outcome = surfacer.surface(mode, &req);
             record_decision(recorder, seq, kind, from, targets, outcome.to_decision())?;
             Ok(match outcome {

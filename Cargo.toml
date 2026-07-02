@@ -7,7 +7,6 @@ members = [
     "crates/wasl-mailbox",
     "crates/wasl-transfer",
     "crates/wasl-audit",
-    "crates/wasl-marsad",
     "crates/wasl-server",
     "crates/wasl-daemon",
     "crates/wasl-e2e",
@@ -38,7 +37,6 @@ wasl-a2a-types = { path = "crates/wasl-a2a-types" }
 wasl-a2a-server = { path = "crates/wasl-a2a-server" }
 wasl-a2a-client = { path = "crates/wasl-a2a-client" }
 wasl-adapter = { path = "crates/wasl-adapter" }
-wasl-marsad = { path = "crates/wasl-marsad" }
 wasl-server = { path = "crates/wasl-server" }
 wasl-daemon = { path = "crates/wasl-daemon" }
 serde = { version = "1", features = ["derive"] }

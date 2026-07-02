@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Wasl cross-crate end-to-end scenario suite: gate -> dispatch -> audit -> Marsad, composed with fakes"
+description = "Wasl cross-crate end-to-end scenario suite: gate -> dispatch -> audit -> external authority, composed with fakes"
 publish = false
 
 [dependencies]
@@ -20,6 +20,5 @@ wasl-registry = { workspace = true }
 wasl-mailbox = { workspace = true }
 wasl-transfer = { workspace = true }
 wasl-audit = { workspace = true }
-wasl-marsad = { workspace = true }
 wasl-server = { workspace = true }
 wasl-daemon = { workspace = true }

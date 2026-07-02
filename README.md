@@ -4,7 +4,9 @@
 Codex, Gemini, …) **consult**, **command**, **message**, and **transfer data** with each other, within a
 host and **across hosts**, with a **human-in-the-loop gate before every send**.
 
-Usable by anyone, with or without [Marsad](https://github.com/mewais/Marsad). See
+Fully standalone. Wasl gates itself via MCP elicitation (or a tool-level `prepare`/`commit` fallback), and
+can optionally surface its gates + an observation feed to any **external supervisor/dashboard** — which just
+implements Wasl's generic `Surfacer` / audit `Sink` seams — but names or requires none. See
 [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the block map, the three-tier gate design, and the
 per-host daemon mesh. Built in Rust (official `rmcp` MCP SDK), test-first, 100%-coverage per block.
 

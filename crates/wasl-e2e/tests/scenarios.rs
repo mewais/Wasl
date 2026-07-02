@@ -5,18 +5,15 @@
 //! Tier-2), and ONLY on `Verdict::Proceed` dispatch through the daemon
 //! (`consult`/`command`/`message`/`transfer`). Every test asserts BOTH halves of
 //! the seam — the recorded gate decision AND the dispatch outcome — with concrete
-//! values, so the two agree with the verdict. Tier-3 additionally asserts the
-//! Marsad connector's feed.
+//! values, so the two agree with the verdict. Tier-3 (external authority) records
+//! its decision into the generic audit log — the observation feed IS the audit log.
 
 mod common;
 
-use common::{
-    agent, card, host, FakeLink, FakeMesh, FakeRunner, FakeSink, MarsadSurfacer, ScriptSurfacer,
-};
+use common::{agent, card, host, FakeMesh, FakeRunner, FakeSink, ScriptSurfacer};
 
 use wasl_audit::EntryKind;
 use wasl_gate::{ClientCaps, GateMode};
-use wasl_marsad::ObsKind;
 use wasl_proto::{
     AgentId, ApprovalToken, CommandParams, ConsultParams, GateDecision, GateKind, HostId,
     MessageParams, TransferParams,
@@ -40,21 +37,21 @@ fn caller() -> AgentId {
 fn caps_elicitation() -> ClientCaps {
     ClientCaps {
         elicitation: true,
-        marsad: false,
+        external: false,
     }
 }
 
-fn caps_marsad() -> ClientCaps {
+fn caps_external() -> ClientCaps {
     ClientCaps {
         elicitation: false,
-        marsad: true,
+        external: true,
     }
 }
 
 fn caps_prepare_commit() -> ClientCaps {
     ClientCaps {
         elicitation: false,
-        marsad: false,
+        external: false,
     }
 }
 
@@ -280,16 +277,17 @@ fn x3_tier2_prepare_commit_then_dispatch() {
 }
 
 // ---------------------------------------------------------------------
-// X4 — Tier-3 via the Marsad connector
+// X4 — Tier-3 via an external authority (decision → the generic audit log)
 // ---------------------------------------------------------------------
 
 #[test]
-fn x4_tier3_marsad_connector_server_and_feed_agree() {
-    // Surfacer backed by a Connector<FakeLink> scripted to Approve; the connector
-    // stamps its Gate observation with seq 3.
-    let (surfacer, connector) = MarsadSurfacer::new(FakeLink::approving(), 3);
-    let mut gk = Gatekeeper::new(caps_marsad(), surfacer, FakeSink::ok());
-    assert_eq!(gk.mode(), GateMode::Marsad);
+fn x4_tier3_external_authority_records_decision_and_dispatches() {
+    // Tier-3: caps select the External mode; the gate is surfaced to an external
+    // authority (any `Surfacer` — e.g. a connector living outside Wasl) that
+    // approves. The decision lands in the GENERIC audit log — there is no
+    // Wasl-specific "connector feed"; the audit log IS the observation feed.
+    let mut gk = Gatekeeper::new(caps_external(), ScriptSurfacer::approving(), FakeSink::ok());
+    assert_eq!(gk.mode(), GateMode::External);
 
     let targets = vec![agent("p1")];
     let verdict = gk
@@ -302,23 +300,15 @@ fn x4_tier3_marsad_connector_server_and_feed_agree() {
             ApprovalToken("tok-x4".to_string()),
             3,
         )
-        .expect("marsad path with healthy sink + link");
+        .expect("external path with a healthy sink");
     assert_eq!(verdict, Verdict::Proceed);
 
-    // server audit recorded the decision.
+    // The external decision is recorded to the generic audit log.
     let entries = gk.audit_entries();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].kind, EntryKind::Decision);
+    assert_eq!(entries[0].actor, caller());
     assert_eq!(entries[0].decision, Some(GateDecision::Approve));
-
-    // connector feed carries a Gate observation with Some(Approve) too.
-    let conn = connector.borrow();
-    let gate_obs = conn.by_kind(ObsKind::Gate);
-    assert_eq!(gate_obs.len(), 1);
-    assert_eq!(gate_obs[0].seq, 3);
-    assert_eq!(gate_obs[0].from, caller());
-    assert_eq!(gate_obs[0].decision, Some(GateDecision::Approve));
-    drop(conn);
 
     // dispatch a message → delivered = [p1].
     let mut registry = wasl_registry::PeerRegistry::new();

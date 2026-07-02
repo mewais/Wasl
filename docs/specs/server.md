@@ -6,7 +6,7 @@ a human) and `wasl_audit::Sink` (durable log) — unit tests use fakes.
 
 This is the server request **spine**: for every outgoing tool call, run the three-tier
 permission-before-send gate and record the decision to the audit log. Tier-1 (elicitation) and Tier-3
-(marsad) surface synchronously via `Surfacer`; Tier-2 (prepare/commit) defers through the gate ledger and
+(external) surface synchronously via `Surfacer`; Tier-2 (prepare/commit) defers through the gate ledger and
 resolves on a later `commit`. Routing/transport (registry + mailbox + transfer dispatch) is the daemon's
 job (WD) and is explicitly OUT of scope here.
 
@@ -17,7 +17,7 @@ Re-use: `wasl_proto::{AgentId, GateKind, GateRequest, GateDecision, ApprovalToke
 ## Types
 ```rust
 /// Surface a gate request to the human in the chosen synchronous mode and return
-/// the outcome. Only called for Tier-1 (Elicitation) and Tier-3 (Marsad); Tier-2
+/// the outcome. Only called for Tier-1 (Elicitation) and Tier-3 (External); Tier-2
 /// (PrepareCommit) never calls this — it defers via the ledger.
 pub trait Surfacer {
     fn surface(&mut self, mode: GateMode, req: &GateRequest) -> GateOutcome;
@@ -52,7 +52,7 @@ pub struct Gatekeeper<S: Surfacer, K: Sink> { /* private: caps, surfacer, ledger
   - Build the request: `build_request(id, kind, from.clone(), &target_strs, preview)` where `target_strs`
     is the `targets` mapped to their `String` ids.
   - Branch on `mode()`:
-    - **Elicitation | Marsad (synchronous):** `let outcome = surfacer.surface(mode, &req);` then
+    - **Elicitation | external authority (synchronous):** `let outcome = surfacer.surface(mode, &req);` then
       `record_decision(...)` (see below) with the outcome's decision, and map the outcome to a verdict:
       `Approved → Proceed`, `Denied{reason} → Denied{reason}`, `Dismissed → Dismissed`.
     - **PrepareCommit (Tier-2):** `ledger.prepare(token.clone(), req)`, remember
@@ -78,7 +78,7 @@ The `decision` is `outcome.to_decision()` for the synchronous path (None for `Di
 **fake Surfacer** (scriptable to return Approved / Denied{reason} / Dismissed, and asserts the mode it was
 called with) and a **fake Sink** (records entries; scriptable to fail) in the tests.
 **happy.rs**
-- S1  `mode`: caps{elicitation:true} → Elicitation; {elicitation:false,marsad:true} → Marsad;
+- S1  `mode`: caps{elicitation:true} → Elicitation; {elicitation:false,external:true} → external authority;
       {false,false} → PrepareCommit.
 - S2  Tier-1 approve: caps elicitation, surfacer returns Approved → `Verdict::Proceed`; the audit log has one
       `Decision` entry with `actor==from`, `targets` matching, `decision==Some(Approve)`; the surfacer was
@@ -87,7 +87,7 @@ called with) and a **fake Sink** (records entries; scriptable to fail) in the te
       `Some(Deny{reason})`.
 - S4  Tier-1 dismiss: Dismissed → `Verdict::Dismissed` and an audit entry with `decision == None` (recorded
       but no decision).
-- S5  Tier-3 (marsad) approve: caps{elicitation:false,marsad:true}, surfacer called with `GateMode::Marsad`,
+- S5  Tier-3 (external) approve: caps{elicitation:false,external:true}, surfacer called with `GateMode::External`,
       Approved → Proceed + audit Some(Approve).
 - S6  Tier-2 prepare: caps{false,false} → `authorize` returns `Verdict::Pending{token}`, `pending_count()==1`,
       the surfacer was NOT called, and NO audit entry was recorded yet.

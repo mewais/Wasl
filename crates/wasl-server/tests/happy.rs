@@ -17,14 +17,14 @@ fn targets() -> Vec<AgentId> {
     vec![AgentId("bob".to_string()), AgentId("carol".to_string())]
 }
 
-fn caps(elicitation: bool, marsad: bool) -> ClientCaps {
+fn caps(elicitation: bool, external: bool) -> ClientCaps {
     ClientCaps {
         elicitation,
-        marsad,
+        external,
     }
 }
 
-/// S1 — `mode()` selects Elicitation / Marsad / PrepareCommit per caps.
+/// S1 — `mode()` selects Elicitation / External / PrepareCommit per caps.
 #[test]
 fn s1_mode_selection() {
     let elic = Gatekeeper::new(
@@ -42,15 +42,15 @@ fn s1_mode_selection() {
     assert_eq!(
         elic_both.mode(),
         GateMode::Elicitation,
-        "elicitation takes priority over marsad"
+        "elicitation takes priority over external"
     );
 
-    let marsad = Gatekeeper::new(
+    let external = Gatekeeper::new(
         caps(false, true),
         FakeSurfacer::new(GateOutcome::Approved),
         FakeSink::ok(),
     );
-    assert_eq!(marsad.mode(), GateMode::Marsad);
+    assert_eq!(external.mode(), GateMode::External);
 
     let prepare = Gatekeeper::new(
         caps(false, false),
@@ -166,15 +166,15 @@ fn s4_tier1_dismiss() {
     assert_eq!(entries[0].targets, targets());
 }
 
-/// S5 — Tier-3 (marsad) approve: the surfacer is called with `GateMode::Marsad`,
+/// S5 — Tier-3 (external) approve: the surfacer is called with `GateMode::External`,
 /// Approved → Proceed, audit `Some(Approve)`. Asserts the exact mode passed to the surfacer.
 #[test]
-fn s5_tier3_marsad_approve() {
+fn s5_tier3_external_approve() {
     let surfacer = FakeSurfacer::new(GateOutcome::Approved);
     let surf_log = surfacer.log();
     let mut gk = Gatekeeper::new(caps(false, true), surfacer, FakeSink::ok());
 
-    assert_eq!(gk.mode(), GateMode::Marsad);
+    assert_eq!(gk.mode(), GateMode::External);
 
     let verdict = gk
         .authorize(
@@ -190,10 +190,10 @@ fn s5_tier3_marsad_approve() {
 
     assert_eq!(verdict, Verdict::Proceed);
 
-    // The surfacer received exactly the Marsad mode.
+    // The surfacer received exactly the External mode.
     let log = surf_log.borrow();
     assert_eq!(log.calls, 1);
-    assert_eq!(log.last_mode, Some(GateMode::Marsad));
+    assert_eq!(log.last_mode, Some(GateMode::External));
 
     let entries = gk.audit_entries();
     assert_eq!(entries.len(), 1);

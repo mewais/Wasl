@@ -1,6 +1,6 @@
 # WS — `wasl-server` (gate+audit spine) — working contract
 **Purpose:** the server request spine — run the three-tier permission-before-send gate for a tool call
-(Tier-1 elicitation / Tier-3 marsad synchronous via the `Surfacer` trait; Tier-2 prepare→commit via the
+(Tier-1 elicitation / Tier-3 external synchronous via the `Surfacer` trait; Tier-2 prepare→commit via the
 gate ledger) and record every decision to the audit log. Pure orchestration over the `Surfacer` seam +
 `wasl_audit::Sink`. Routing/transport (registry/mailbox/transfer dispatch) is the daemon's job (WD), NOT
 this block. **Spec:** `../../docs/specs/server.md`

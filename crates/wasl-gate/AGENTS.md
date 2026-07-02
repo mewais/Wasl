@@ -1,9 +1,9 @@
 # WG — `wasl-gate` — working contract
 
 **Purpose:** the three-tier permission-before-send gate — pure decision logic: choose the gate mode per
-client capabilities (elicitation / prepare-commit / marsad), build the human-facing gate request +
+client capabilities (elicitation / prepare-commit / external), build the human-facing gate request +
 elicitation message (never secrets), map an elicitation response to an outcome, and track pending
-prepare→commit approvals in a ledger. IO (sending elicitations, calling Marsad) lives in the server block.
+prepare→commit approvals in a ledger. IO (sending elicitations, calling an external authority) lives in the server block.
 **Tier:** L0/L1 (pure state + logic, no IO, no `unsafe`).
 **Full spec (read first):** `../../docs/specs/gate.md`
 **Architecture:** `../../ARCHITECTURE.md`

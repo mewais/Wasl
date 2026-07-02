@@ -1,10 +1,10 @@
 //! wasl-gate — the three-tier permission-before-send gate (WG).
 //!
 //! Pure decision logic: choose the gate mode per client capabilities
-//! (elicitation / prepare-commit / marsad), build the human-facing gate request
+//! (elicitation / prepare-commit / external), build the human-facing gate request
 //! and elicitation message (never secrets), map an elicitation response to an
 //! outcome, and track pending prepare-commit approvals in a ledger. The actual
-//! IO (sending the elicitation, calling Marsad) lives in the server block.
+//! IO (sending the elicitation, calling an external authority) lives in the server block.
 //!
 //! See `docs/specs/gate.md` for the authoritative contract.
 
@@ -25,23 +25,23 @@ use wasl_proto::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientCaps {
     pub elicitation: bool,
-    pub marsad: bool,
+    pub external: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateMode {
     Elicitation,
-    Marsad,
+    External,
     PrepareCommit,
 }
 
-/// Priority: elicitation > marsad > prepare_commit.
+/// Priority: elicitation > external > prepare_commit.
 pub fn choose_mode(caps: &ClientCaps) -> GateMode {
     if caps.elicitation {
         GateMode::Elicitation
-    } else if caps.marsad {
-        GateMode::Marsad
+    } else if caps.external {
+        GateMode::External
     } else {
         GateMode::PrepareCommit
     }

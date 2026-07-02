@@ -16,10 +16,10 @@ fn targets() -> Vec<AgentId> {
     vec![AgentId("bob".to_string())]
 }
 
-fn caps(elicitation: bool, marsad: bool) -> ClientCaps {
+fn caps(elicitation: bool, external: bool) -> ClientCaps {
     ClientCaps {
         elicitation,
-        marsad,
+        external,
     }
 }
 

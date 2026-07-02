@@ -24,7 +24,8 @@ a stable long-lived session, so context persists across messages.
 `wasl-proto` (internal types), `wasl-gate` (gate logic), `wasl-registry` (peer resolution — extend with
 A2A URLs), `wasl-mailbox` (multicast fan-out + reply correlation), `wasl-audit` (log over a `Sink`),
 `wasl-transfer` (argv + `Runner`), `wasl-server` (`Gatekeeper` gate+audit spine), `wasl-daemon` (routing
-core — its `Mesh` seam is exactly where A2A plugs in), `wasl-marsad` (Tier-3 connector).
+core — its `Mesh` seam is exactly where A2A plugs in). An external supervisor (formerly a dedicated crate)
+is now just any implementer of the generic `Surfacer` (gate authority) + audit `Sink` (observation) seams.
 
 ## What we RETIRE
 `wasl-mesh` (bespoke socket transport) — superseded by A2A over HTTP. Remove after the A2A path lands.
@@ -64,7 +65,7 @@ Phase E — real edges (build; mark verification honestly)
 - **E1 `FileSink`** (durable append-JSONL audit `Sink`). TESTABLE HERE: yes (temp files).
 - **E2 `ProcessRunner`** (real `Runner`: spawn scp/rsync). TESTABLE HERE: the process-drive plumbing via a
   stand-in command (e.g. a script); the REAL scp between two hosts is **UNTESTED HERE** (no 2nd host/scp).
-- **E3 real `AgentAdapter`s** (claude via stream-json/tmux like Marsad; later codex/gemini). Build to
+- **E3 real `AgentAdapter`s** (claude via stream-json/tmux; later codex/gemini). Build to
   compile + unit-test any pure parsing. Driving a REAL CLI is **UNTESTED HERE** (no CLIs). Clearly labeled.
 
 ## TESTABILITY HONESTY MATRIX (what "done" can mean in THIS environment)
