@@ -61,7 +61,11 @@ toml = "0.8"
 [dev-dependencies]
 # Client + async-rw transport, dev-only, so the smoke test can drive the server
 # over an in-memory duplex pipe and list its tools. Same version as the main dep.
-rmcp = { version = "0.9", features = ["client", "server", "transport-async-rw"] }
+# `transport-child-process` additionally powers `examples/live_client.rs` (W5
+# live verification): it spawns a REAL `wasl-mcpd` child process and drives it
+# as an MCP client over real stdio, rather than the in-memory duplex the other
+# suites use — the one place this crate exercises the actual binary end to end.
+rmcp = { version = "0.9", features = ["client", "server", "transport-async-rw", "transport-child-process"] }
 # Loopback A2A heart tests: a real A2aServer over a real AdapterExecutor wrapping a
 # fake AgentAdapter, served on 127.0.0.1:0 via axum, plus #[tokio::test] + TcpListener.
 async-trait = { workspace = true }
