@@ -164,7 +164,10 @@ impl Default for RecordingSink {
 
 impl Sink for RecordingSink {
     fn append(&mut self, entry: &AuditEntry) -> Result<(), AuditError> {
-        self.entries.lock().expect("entries lock").push(entry.clone());
+        self.entries
+            .lock()
+            .expect("entries lock")
+            .push(entry.clone());
         Ok(())
     }
 }

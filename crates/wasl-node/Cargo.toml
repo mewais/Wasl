@@ -10,6 +10,7 @@ description = "Wasl node: composes the gate (server) + send-side dispatch + A2A 
 
 [dependencies]
 wasl-proto = { workspace = true }
+wasl-gate = { workspace = true }
 wasl-server = { workspace = true }
 wasl-audit = { workspace = true }
 wasl-registry = { workspace = true }
