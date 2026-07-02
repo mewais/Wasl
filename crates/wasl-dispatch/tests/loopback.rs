@@ -9,9 +9,7 @@
 
 mod common;
 
-use common::{
-    agent, dead_url, http_client, register, spawn_echo, spawn_failing,
-};
+use common::{agent, dead_url, http_client, register, spawn_echo, spawn_failing};
 
 use wasl_adapter::DeliveryKind;
 use wasl_dispatch::{command, consult, message, DispatchReport};
@@ -58,7 +56,11 @@ async fn d1_consult_fanout_replies_in_order_and_verb_crosses_wire() {
 
     for peer in [&peer1, &peer2] {
         let deliveries = peer.deliveries();
-        assert_eq!(deliveries.len(), 1, "each peer receives exactly one delivery");
+        assert_eq!(
+            deliveries.len(),
+            1,
+            "each peer receives exactly one delivery"
+        );
         let d = &deliveries[0];
         assert_eq!(d.kind, DeliveryKind::Consult);
         assert_eq!(d.from, "caller");
