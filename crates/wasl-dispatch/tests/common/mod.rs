@@ -61,8 +61,6 @@ pub fn register(reg: &mut PeerRegistry, id: &AgentId, endpoint: Option<String>) 
     reg.register(AgentCard {
         id: id.clone(),
         host: HostId("loopback".to_string()),
-        driver: None,
-        workstream: None,
         endpoint,
     });
 }

@@ -81,8 +81,6 @@ fn h2_agent_card_minimal_defaults_optional_fields_to_none() {
     let card: AgentCard = serde_json::from_str(json).unwrap();
     assert_eq!(card.id, AgentId("a".to_string()));
     assert_eq!(card.host, HostId("h".to_string()));
-    assert_eq!(card.driver, None);
-    assert_eq!(card.workstream, None);
     assert_eq!(card.endpoint, None);
 }
 
@@ -91,8 +89,6 @@ fn h2_agent_card_minimal_round_trips() {
     let card = AgentCard {
         id: AgentId("a".to_string()),
         host: HostId("h".to_string()),
-        driver: None,
-        workstream: None,
         endpoint: None,
     };
     let json = serde_json::to_string(&card).unwrap();
@@ -105,15 +101,11 @@ fn h2_agent_card_full_round_trips() {
     let card = AgentCard {
         id: AgentId("claude-1".to_string()),
         host: HostId("host-a".to_string()),
-        driver: Some("claude".to_string()),
-        workstream: Some("wasl-proto".to_string()),
         endpoint: Some("tcp://host-a:9000".to_string()),
     };
     let json = serde_json::to_string(&card).unwrap();
     let back: AgentCard = serde_json::from_str(&json).unwrap();
     assert_eq!(back, card);
-    assert_eq!(back.driver.as_deref(), Some("claude"));
-    assert_eq!(back.workstream.as_deref(), Some("wasl-proto"));
     assert_eq!(back.endpoint.as_deref(), Some("tcp://host-a:9000"));
 }
 

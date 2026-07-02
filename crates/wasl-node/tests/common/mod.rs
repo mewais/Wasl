@@ -43,8 +43,6 @@ pub fn wasl_proto_card(id: &str, url: &str) -> AgentCard {
     AgentCard {
         id: agent(id),
         host: HostId("loopback".to_string()),
-        driver: None,
-        workstream: None,
         endpoint: Some(url.to_string()),
     }
 }

@@ -23,8 +23,6 @@ pub struct HostId(pub String);
 pub struct AgentCard {
     pub id: AgentId,
     pub host: HostId,
-    #[serde(default)] pub driver: Option<String>,     // freeform ("claude"/"codex"/…); Wasl serves any
-    #[serde(default)] pub workstream: Option<String>,  // optional grouping hint
     #[serde(default)] pub endpoint: Option<String>,    // how the mesh reaches it; None = local daemon
 }
 ```

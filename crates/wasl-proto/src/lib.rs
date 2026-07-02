@@ -40,10 +40,6 @@ pub struct AgentCard {
     pub id: AgentId,
     pub host: HostId,
     #[serde(default)]
-    pub driver: Option<String>,
-    #[serde(default)]
-    pub workstream: Option<String>,
-    #[serde(default)]
     pub endpoint: Option<String>,
 }
 

@@ -80,8 +80,6 @@ fn register_peer(reg: &mut PeerRegistry, id: &AgentId, endpoint: Option<String>)
     reg.register(AgentCard {
         id: id.clone(),
         host: host("loopback"),
-        driver: None,
-        workstream: None,
         endpoint,
     });
 }

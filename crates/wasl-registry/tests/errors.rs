@@ -15,8 +15,6 @@ fn card(id: &str, host: &str) -> AgentCard {
     AgentCard {
         id: agent_id(id),
         host: host_id(host),
-        driver: None,
-        workstream: None,
         endpoint: None,
     }
 }

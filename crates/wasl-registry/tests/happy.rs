@@ -15,8 +15,6 @@ fn card(id: &str, host: &str) -> AgentCard {
     AgentCard {
         id: agent_id(id),
         host: host_id(host),
-        driver: None,
-        workstream: None,
         endpoint: None,
     }
 }
@@ -55,15 +53,11 @@ fn r1_register_same_id_overwrites_len_unchanged_new_card_returned() {
     let v1 = AgentCard {
         id: agent_id("bob"),
         host: host_id("host-1"),
-        driver: Some("driver-v1".to_string()),
-        workstream: None,
         endpoint: None,
     };
     let v2 = AgentCard {
         id: agent_id("bob"),
         host: host_id("host-2"),
-        driver: Some("driver-v2".to_string()),
-        workstream: Some("ws-2".to_string()),
         endpoint: Some("http://host-2".to_string()),
     };
 

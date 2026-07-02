@@ -81,8 +81,6 @@ pub fn card(id: &str, host_id: &str, endpoint: Option<String>) -> AgentCard {
     AgentCard {
         id: agent(id),
         host: host(host_id),
-        driver: None,
-        workstream: None,
         endpoint,
     }
 }
