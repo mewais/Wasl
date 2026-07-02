@@ -1,0 +1,10 @@
+{
+  "entry": {
+    "seq": 3,
+    "kind": "decision",
+    "actor": "wasl-a",
+    "targets": ["wasl-b"],
+    "summary": "gate Message",
+    "decision": { "decision": "approve" }
+  }
+}

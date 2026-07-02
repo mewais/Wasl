@@ -1,0 +1,7 @@
+{
+  "gate_id": "gate-1",
+  "outcome": "denied",
+  "decided_by": "operator",
+  "reason": "not during business hours",
+  "decided_at": "2026-07-02T12:00:03.500Z"
+}

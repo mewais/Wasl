@@ -1,0 +1,10 @@
+{
+  "entry": {
+    "seq": 1,
+    "kind": "message",
+    "actor": "wasl-a",
+    "targets": ["wasl-b"],
+    "summary": "message to 1 peer(s)",
+    "decision": null
+  }
+}

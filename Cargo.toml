@@ -16,6 +16,7 @@ members = [
     "crates/wasl-dispatch",
     "crates/wasl-node",
     "crates/wasl-filesink",
+    "crates/wasl-operator",
     "crates/wasl-procrunner",
     "crates/wasl-adapter-claude",
 ]
@@ -41,6 +42,7 @@ wasl-adapter = { path = "crates/wasl-adapter" }
 wasl-dispatch = { path = "crates/wasl-dispatch" }
 wasl-node = { path = "crates/wasl-node" }
 wasl-filesink = { path = "crates/wasl-filesink" }
+wasl-operator = { path = "crates/wasl-operator" }
 wasl-procrunner = { path = "crates/wasl-procrunner" }
 wasl-adapter-claude = { path = "crates/wasl-adapter-claude" }
 wasl-server = { path = "crates/wasl-server" }

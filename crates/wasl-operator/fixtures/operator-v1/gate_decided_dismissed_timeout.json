@@ -1,0 +1,7 @@
+{
+  "gate_id": "gate-1",
+  "outcome": "dismissed",
+  "decided_by": "timeout",
+  "reason": null,
+  "decided_at": "2026-07-02T12:02:00.000Z"
+}

@@ -1,0 +1,26 @@
+[package]
+name = "wasl-operator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl operator surface: HTTP+SSE serving side of the /v1 operator wire contract (OperatorHub, OperatorSurfacer, TeeSink, axum router)"
+
+[dependencies]
+wasl-proto = { workspace = true }
+wasl-gate = { workspace = true }
+wasl-audit = { workspace = true }
+wasl-server = { workspace = true }
+axum = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { version = "0.1", features = ["sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+tokio = { workspace = true }
+bytes = "1"

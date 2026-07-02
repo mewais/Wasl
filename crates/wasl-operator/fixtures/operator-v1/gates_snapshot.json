@@ -1,0 +1,18 @@
+{
+  "last_seq": 42,
+  "gates": [
+    {
+      "gate_id": "gate-1",
+      "request": {
+        "id": "call-9",
+        "kind": "message",
+        "from": "wasl-a",
+        "summary": "message to 1 peer(s)",
+        "preview": "hi bob"
+      },
+      "requested_at": "2026-07-02T12:00:00.000Z",
+      "age_ms": 1500,
+      "deadline": "2026-07-02T12:02:00.000Z"
+    }
+  ]
+}
