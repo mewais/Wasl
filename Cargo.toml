@@ -11,7 +11,6 @@ members = [
     "crates/wasl-daemon",
     "crates/wasl-e2e",
     "crates/wasl-mcp",
-    "crates/wasl-mesh",
     "crates/wasl-a2a-types",
     "crates/wasl-a2a-server",
     "crates/wasl-a2a-client",
