@@ -1,0 +1,1205 @@
+//! `tests/gating_loopback.rs` — END-TO-END tests for W4 gating over in-memory
+//! rmcp (a scriptable `ClientHandler`, the `smoke.rs` duplex idiom) plus real
+//! HTTP+SSE for the operator surface (`wasl_operator::router`) and a real
+//! loopback A2A peer for dispatch proof (the `tests/handle.rs` idiom,
+//! duplicated here since every `tests/*.rs` file is its own separate crate).
+//! Mirrors the spec's §Test plan L1–L9 (`docs/specs/mcp-gating.md`), plus a
+//! NEW smoke test asserting the five advertised tools — the ONE place this
+//! block's fifth `commit` tool is smoke-tested; `tests/smoke.rs` itself is
+//! FROZEN and stays untouched.
+//!
+//! Test-first: this MUST fail to compile until `src/` defines the public API
+//! (`WaslMcp::with_gating`, `GateAuthority`, `WaslMcp::resolve_pending`, the
+//! `commit` tool, ...).
+
+use std::collections::VecDeque;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use serde_json::{json, Value};
+
+use rmcp::model::{
+    CallToolRequestParam, CallToolResult, ClientCapabilities, ClientInfo,
+    CreateElicitationRequestParam, CreateElicitationResult, ElicitationAction,
+};
+use rmcp::service::{RequestContext, RunningService};
+use rmcp::{ClientHandler, ErrorData as McpError, RoleClient, RoleServer, ServiceExt};
+
+use wasl_a2a_server::A2aServer;
+use wasl_a2a_types::{AgentCapabilities, AgentCard as A2aCard};
+use wasl_adapter::{AdapterError, AdapterExecutor, AgentAdapter, Delivery};
+use wasl_audit::{AuditEntry, AuditError, AuditLog, Sink};
+use wasl_gate::{GateError, GateOutcome};
+use wasl_mcp::{GateAuthority, WaslMcp, WaslState};
+use wasl_operator::{HubConfig, NodeInfo, OperatorHub};
+use wasl_proto::{AgentCard, AgentId, ApprovalToken, ConsultResult, GateDecision, HostId};
+use wasl_registry::PeerRegistry;
+use wasl_transfer::Runner;
+
+// =======================================================================
+// 0. Shared harness
+// =======================================================================
+
+fn agent(id: &str) -> AgentId {
+    AgentId(id.to_string())
+}
+
+fn host(id: &str) -> HostId {
+    HostId(id.to_string())
+}
+
+fn token(s: &str) -> ApprovalToken {
+    ApprovalToken(s.to_string())
+}
+
+/// A short-timeout HTTP client so a dead port fails fast instead of hanging.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("build reqwest client")
+}
+
+// ---------------------------------------------------------------------
+// A shared, introspectable audit sink. `WaslMcp` owns its `WaslState` (and
+// therefore the audit log) behind a private `Arc<Mutex<_>>`, so the only way
+// a black-box test can inspect what was recorded is to hand the state an
+// `Arc`-backed `Sink` and keep a clone of the `Arc` in the test.
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Default)]
+struct SharedSink(Arc<Mutex<Vec<AuditEntry>>>);
+
+impl SharedSink {
+    fn entries(&self) -> Vec<AuditEntry> {
+        self.0.lock().expect("shared sink lock").clone()
+    }
+}
+
+impl Sink for SharedSink {
+    fn append(&mut self, entry: &AuditEntry) -> Result<(), AuditError> {
+        self.0.lock().expect("shared sink lock").push(entry.clone());
+        Ok(())
+    }
+}
+
+/// A `Runner` that must never be invoked: every loopback test here either
+/// never reaches the transfer seam (consult/command/message) or reaches it
+/// only via the `NoDestinations` short-circuit (L9), which never calls
+/// `Runner::run`.
+#[derive(Clone)]
+struct PanicRunner;
+
+impl Runner for PanicRunner {
+    fn run(&mut self, _argv: &[String]) -> Result<(), String> {
+        panic!("no test in gating_loopback.rs may invoke the transfer runner");
+    }
+}
+
+type Handler = WaslMcp<SharedSink, PanicRunner>;
+
+fn build_handler(
+    authority: GateAuthority,
+    hub: Option<OperatorHub>,
+    registry: PeerRegistry,
+    sink: SharedSink,
+) -> Handler {
+    let state = WaslState::new(AuditLog::new(sink), http_client(), PanicRunner);
+    WaslMcp::with_gating(agent("me"), host("h1"), registry, state, authority, hub)
+}
+
+/// The default-authority constructor (`new(..) == with_gating(.., Elicitation,
+/// None)` per the spec's backward-compatibility clause).
+fn build_default_handler(registry: PeerRegistry, sink: SharedSink) -> Handler {
+    let state = WaslState::new(AuditLog::new(sink), http_client(), PanicRunner);
+    WaslMcp::new(agent("me"), host("h1"), registry, state)
+}
+
+// ---------------------------------------------------------------------
+// A scriptable rmcp client: declares elicitation capability (or not) at
+// `get_info()`, and answers `create_elicitation` with a scripted queue of
+// actions (mirrors the smoke.rs `()` bare-client idiom, extended to script
+// responses).
+// ---------------------------------------------------------------------
+
+#[derive(Clone)]
+struct ScriptedClient {
+    elicitation_capable: bool,
+    actions: Arc<Mutex<VecDeque<ElicitationAction>>>,
+}
+
+impl ScriptedClient {
+    fn new(elicitation_capable: bool, actions: Vec<ElicitationAction>) -> Self {
+        ScriptedClient {
+            elicitation_capable,
+            actions: Arc::new(Mutex::new(actions.into())),
+        }
+    }
+
+    fn accepting() -> Self {
+        Self::new(true, vec![ElicitationAction::Accept])
+    }
+
+    fn declining() -> Self {
+        Self::new(true, vec![ElicitationAction::Decline])
+    }
+}
+
+impl ClientHandler for ScriptedClient {
+    fn get_info(&self) -> ClientInfo {
+        let mut info = ClientInfo::default();
+        if self.elicitation_capable {
+            info.capabilities = ClientCapabilities::builder().enable_elicitation().build();
+        }
+        info
+    }
+
+    async fn create_elicitation(
+        &self,
+        _request: CreateElicitationRequestParam,
+        _context: RequestContext<RoleClient>,
+    ) -> Result<CreateElicitationResult, McpError> {
+        let action = self
+            .actions
+            .lock()
+            .expect("scripted actions lock")
+            .pop_front()
+            .expect("ScriptedClient: no more scripted elicitation actions");
+        Ok(CreateElicitationResult {
+            action,
+            content: None,
+        })
+    }
+}
+
+/// Wire `handler` and `client` together over an in-memory duplex pipe (the
+/// `tests/smoke.rs` idiom) and run both handshakes concurrently.
+async fn connect<C>(
+    handler: Handler,
+    client: C,
+) -> (
+    RunningService<RoleClient, C>,
+    RunningService<RoleServer, Handler>,
+)
+where
+    C: ClientHandler + Send + Sync + 'static,
+{
+    let (client_tx, server_rx) = tokio::io::duplex(4096);
+    let (server_tx, client_rx) = tokio::io::duplex(4096);
+
+    let server_task = tokio::spawn(async move { handler.serve((server_rx, server_tx)).await });
+    let client_running = client
+        .serve((client_rx, client_tx))
+        .await
+        .expect("client must initialize");
+    let server_running = server_task
+        .await
+        .expect("server task join")
+        .expect("server must initialize");
+
+    (client_running, server_running)
+}
+
+// `&Peer<RoleClient>` rather than `&RunningService<RoleClient, C>`: the
+// latter isn't `Clone` (only its `Deref` target, `Peer`, is — the cheap
+// Arc-backed handle these tests pass into spawned tasks), and `Peer` is the
+// single concrete type every `RunningService<RoleClient, _>` derefs to.
+async fn call(client: &rmcp::Peer<RoleClient>, name: &str, args: Value) -> CallToolResult {
+    client
+        .call_tool(CallToolRequestParam {
+            name: name.to_string().into(),
+            arguments: args.as_object().cloned(),
+        })
+        .await
+        .expect("call_tool transport must succeed")
+}
+
+fn text_of(res: &CallToolResult) -> String {
+    res.content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .unwrap_or_default()
+}
+
+fn is_error(res: &CallToolResult) -> bool {
+    res.is_error.unwrap_or(false)
+}
+
+/// Decode a successful tool reply's JSON content into `T`.
+fn decode<T: serde::de::DeserializeOwned>(res: &CallToolResult) -> T {
+    assert!(!is_error(res), "expected success content, got: {res:?}");
+    serde_json::from_str(&text_of(res)).unwrap_or_else(|e| panic!("decode {res:?}: {e}"))
+}
+
+// ---------------------------------------------------------------------
+// A real loopback A2A peer: a genuine `A2aServer` over a real
+// `AdapterExecutor` wrapping a FAKE, recording innermost `AgentAdapter` —
+// the `tests/handle.rs` idiom, duplicated (separate test-crate).
+// ---------------------------------------------------------------------
+
+struct FakeAdapter {
+    recorded: Arc<Mutex<Vec<Delivery>>>,
+}
+
+#[async_trait]
+impl AgentAdapter for FakeAdapter {
+    async fn deliver(&self, d: &Delivery) -> Result<String, AdapterError> {
+        self.recorded.lock().expect("recorded lock").push(d.clone());
+        Ok(format!("reply:{}", d.text))
+    }
+}
+
+struct A2aPeer {
+    url: String,
+    recorded: Arc<Mutex<Vec<Delivery>>>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl A2aPeer {
+    fn deliveries(&self) -> Vec<Delivery> {
+        self.recorded.lock().expect("recorded lock").clone()
+    }
+}
+
+impl Drop for A2aPeer {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+fn a2a_card() -> A2aCard {
+    A2aCard {
+        name: "loopback-peer".to_string(),
+        description: "wasl-mcp gating loopback peer".to_string(),
+        url: "http://127.0.0.1/".to_string(),
+        version: "0.1.0".to_string(),
+        capabilities: AgentCapabilities {
+            streaming: false,
+            push_notifications: false,
+        },
+        default_input_modes: vec!["text/plain".to_string()],
+        default_output_modes: vec!["text/plain".to_string()],
+        skills: vec![],
+    }
+}
+
+/// Spin a REAL `A2aServer` over a REAL `AdapterExecutor` wrapping a
+/// `FakeAdapter`, bound before `axum::serve` spawns (no readiness race).
+async fn spawn_a2a_echo() -> A2aPeer {
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let adapter = FakeAdapter {
+        recorded: recorded.clone(),
+    };
+    let executor = Arc::new(AdapterExecutor::new(adapter));
+    let server = Arc::new(A2aServer::new(a2a_card(), executor));
+    let app = server.router();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let port = listener.local_addr().expect("local addr").port();
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+
+    A2aPeer {
+        url: format!("http://127.0.0.1:{port}/"),
+        recorded,
+        handle,
+    }
+}
+
+fn registry_with_peer_a(peer_url: &str) -> PeerRegistry {
+    let mut registry = PeerRegistry::new();
+    registry.register(AgentCard {
+        id: agent("peerA"),
+        host: host("loopback"),
+        endpoint: Some(peer_url.to_string()),
+    });
+    registry
+}
+
+// ---------------------------------------------------------------------
+// The operator's real HTTP+SSE surface: `wasl_operator::router` bound on
+// `127.0.0.1:0`, plus a tiny hand-rolled SSE reader over
+// `reqwest::Response::chunk()` (no SSE-client crate in the workspace,
+// mirroring `wasl-operator`'s own `tests/common::SseReader`).
+// ---------------------------------------------------------------------
+
+fn node_info() -> NodeInfo {
+    NodeInfo {
+        agent_id: agent("me"),
+        host_id: host("h1"),
+        version: "0.1.0".to_string(),
+    }
+}
+
+fn fresh_hub() -> OperatorHub {
+    OperatorHub::new(node_info(), HubConfig::default())
+}
+
+fn hub_with_timeout(ms: u64) -> OperatorHub {
+    OperatorHub::new(
+        node_info(),
+        HubConfig {
+            decision_timeout: Duration::from_millis(ms),
+            channel_capacity: 256,
+        },
+    )
+}
+
+/// Bind an ephemeral `127.0.0.1` port, mount `wasl_operator::router(hub)`,
+/// and spawn `axum::serve`. Binding happens synchronously before the task is
+/// spawned so connections queue immediately (no readiness race).
+async fn spawn_operator_router(hub: OperatorHub) -> SocketAddr {
+    let app = wasl_operator::router(hub);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral port");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    addr
+}
+
+const SSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, Clone)]
+struct SseEvent {
+    event: String,
+    data: Value,
+}
+
+struct SseReader {
+    resp: reqwest::Response,
+    buf: String,
+}
+
+impl SseReader {
+    fn new(resp: reqwest::Response) -> Self {
+        SseReader {
+            resp,
+            buf: String::new(),
+        }
+    }
+
+    async fn next_event(&mut self, timeout: Duration) -> Option<SseEvent> {
+        loop {
+            if let Some(idx) = self.buf.find("\n\n") {
+                let block: String = self.buf.drain(..idx + 2).collect();
+                if let Some(ev) = parse_sse_block(&block) {
+                    return Some(ev);
+                }
+                continue;
+            }
+            match tokio::time::timeout(timeout, self.resp.chunk()).await {
+                Ok(Ok(Some(bytes))) => self.buf.push_str(&String::from_utf8_lossy(&bytes)),
+                _ => return None,
+            }
+        }
+    }
+}
+
+fn parse_sse_block(block: &str) -> Option<SseEvent> {
+    let mut event: Option<String> = None;
+    let mut data_lines: Vec<String> = Vec::new();
+    for raw_line in block.split('\n') {
+        let line = raw_line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("event:") {
+            event = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.trim().to_string());
+        }
+        // `id:` is not needed by any assertion below; skipped.
+    }
+    if data_lines.is_empty() {
+        return None; // pure comment/keep-alive block: keep reading.
+    }
+    let data_str = data_lines.join("\n");
+    let data: Value = serde_json::from_str(&data_str)
+        .unwrap_or_else(|e| panic!("SSE data was not JSON: {e}: {data_str:?}"));
+    Some(SseEvent {
+        event: event.unwrap_or_default(),
+        data,
+    })
+}
+
+/// Subscribe to `/v1/events` and consume the `hello` frame.
+async fn subscribe(addr: SocketAddr) -> SseReader {
+    let resp = http_client()
+        .get(format!("http://{addr}/v1/events"))
+        .send()
+        .await
+        .expect("GET /v1/events");
+    let mut sse = SseReader::new(resp);
+    let hello = sse.next_event(SSE_TIMEOUT).await.expect("hello frame");
+    assert_eq!(hello.event, "hello");
+    sse
+}
+
+async fn post_decision(addr: SocketAddr, gate_id: &str, body: Value) -> reqwest::Response {
+    http_client()
+        .post(format!("http://{addr}/v1/gates/{gate_id}/decision"))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST decision")
+}
+
+async fn get_gates(addr: SocketAddr) -> Value {
+    http_client()
+        .get(format!("http://{addr}/v1/gates"))
+        .send()
+        .await
+        .expect("GET /v1/gates")
+        .json()
+        .await
+        .expect("gates json")
+}
+
+// =======================================================================
+// L1 — operator-decided send (approve)
+// =======================================================================
+
+#[tokio::test]
+async fn l1_operator_decided_approve_dispatches_over_a2a() {
+    let peer = spawn_a2a_echo().await;
+    let hub = fresh_hub();
+    let addr = spawn_operator_router(hub.clone()).await;
+    let sink = SharedSink::default();
+
+    let handler = build_handler(
+        GateAuthority::ExternalFirst,
+        Some(hub),
+        registry_with_peer_a(&peer.url),
+        sink.clone(),
+    );
+    let (client, server) = connect(handler, ()).await;
+
+    let mut sse = subscribe(addr).await;
+
+    let call_task = tokio::spawn({
+        let client = client.clone();
+        async move {
+            call(
+                &client,
+                "consult",
+                json!({"peers": ["peerA"], "question": "hi"}),
+            )
+            .await
+        }
+    });
+
+    let requested = sse
+        .next_event(SSE_TIMEOUT)
+        .await
+        .expect("gate_requested frame");
+    assert_eq!(requested.event, "gate_requested");
+    assert_eq!(requested.data["decidable"], json!(true));
+    assert_eq!(requested.data["mode"], json!("external"));
+    assert_eq!(requested.data["request"]["kind"], json!("consult"));
+    let gate_id = requested.data["gate_id"]
+        .as_str()
+        .expect("gate_id string")
+        .to_string();
+
+    let snapshot = get_gates(addr).await;
+    let gates = snapshot["gates"].as_array().expect("gates array");
+    assert_eq!(gates.len(), 1);
+    assert_eq!(gates[0]["gate_id"], json!(gate_id));
+
+    let post = post_decision(addr, &gate_id, json!({"outcome": "approved"})).await;
+    assert_eq!(post.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let decided = sse
+        .next_event(SSE_TIMEOUT)
+        .await
+        .expect("gate_decided frame");
+    assert_eq!(decided.event, "gate_decided");
+    assert_eq!(decided.data["outcome"], json!("approved"));
+    assert_eq!(decided.data["decided_by"], json!("operator"));
+
+    let result = call_task.await.expect("call task join");
+    let consult: ConsultResult = decode(&result);
+    assert_eq!(consult.replies.len(), 1);
+    assert_eq!(consult.replies[0].from, agent("peerA"));
+    assert_eq!(consult.replies[0].body, "reply:hi");
+
+    let deliveries = peer.deliveries();
+    assert_eq!(deliveries.len(), 1, "the fake adapter must have SEEN it");
+    assert_eq!(deliveries[0].from, "me");
+
+    let entries = sink.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].decision, Some(GateDecision::Approve));
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// L2 — operator deny with reason
+// =======================================================================
+
+#[tokio::test]
+async fn l2_operator_deny_with_reason_blocks_and_records_nothing_on_the_wire() {
+    let peer = spawn_a2a_echo().await;
+    let hub = fresh_hub();
+    let addr = spawn_operator_router(hub.clone()).await;
+    let sink = SharedSink::default();
+
+    let handler = build_handler(
+        GateAuthority::ExternalFirst,
+        Some(hub),
+        registry_with_peer_a(&peer.url),
+        sink.clone(),
+    );
+    let (client, server) = connect(handler, ()).await;
+
+    let mut sse = subscribe(addr).await;
+
+    let call_task = tokio::spawn({
+        let client = client.clone();
+        async move {
+            call(
+                &client,
+                "consult",
+                json!({"peers": ["peerA"], "question": "hi"}),
+            )
+            .await
+        }
+    });
+
+    let requested = sse
+        .next_event(SSE_TIMEOUT)
+        .await
+        .expect("gate_requested frame");
+    let gate_id = requested.data["gate_id"].as_str().unwrap().to_string();
+
+    let post = post_decision(
+        addr,
+        &gate_id,
+        json!({"outcome": "denied", "reason": "no thanks"}),
+    )
+    .await;
+    assert_eq!(post.status(), reqwest::StatusCode::NO_CONTENT);
+
+    let decided = sse
+        .next_event(SSE_TIMEOUT)
+        .await
+        .expect("gate_decided frame");
+    assert_eq!(decided.data["outcome"], json!("denied"));
+    assert_eq!(decided.data["reason"], json!("no thanks"));
+
+    let result = call_task.await.expect("call task join");
+    assert!(is_error(&result));
+    assert_eq!(text_of(&result), "blocked: no thanks");
+
+    assert!(
+        peer.deliveries().is_empty(),
+        "a denied call must never dispatch"
+    );
+
+    let entries = sink.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].decision,
+        Some(GateDecision::Deny {
+            reason: "no thanks".to_string()
+        })
+    );
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// L3 — operator timeout
+// =======================================================================
+
+#[tokio::test]
+async fn l3_operator_timeout_dismisses_and_late_post_conflicts() {
+    let peer = spawn_a2a_echo().await;
+    let hub = hub_with_timeout(50);
+    let addr = spawn_operator_router(hub.clone()).await;
+    let sink = SharedSink::default();
+
+    let handler = build_handler(
+        GateAuthority::ExternalFirst,
+        Some(hub),
+        registry_with_peer_a(&peer.url),
+        sink.clone(),
+    );
+    let (client, server) = connect(handler, ()).await;
+
+    let mut sse = subscribe(addr).await;
+
+    let call_task = tokio::spawn({
+        let client = client.clone();
+        async move {
+            call(
+                &client,
+                "consult",
+                json!({"peers": ["peerA"], "question": "hi"}),
+            )
+            .await
+        }
+    });
+
+    let requested = sse
+        .next_event(SSE_TIMEOUT)
+        .await
+        .expect("gate_requested frame");
+    let gate_id = requested.data["gate_id"].as_str().unwrap().to_string();
+
+    // No POST — let the tiny decision_timeout dismiss it.
+    let result = call_task.await.expect("call task join");
+    assert!(is_error(&result));
+    assert_eq!(text_of(&result), "blocked: dismissed");
+
+    let decided = sse
+        .next_event(SSE_TIMEOUT)
+        .await
+        .expect("gate_decided frame");
+    assert_eq!(decided.data["outcome"], json!("dismissed"));
+    assert_eq!(decided.data["decided_by"], json!("timeout"));
+
+    let entries = sink.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].decision, None,
+        "a dismissal carries no gate decision"
+    );
+
+    // A late POST conflicts.
+    let late = post_decision(addr, &gate_id, json!({"outcome": "approved"})).await;
+    assert_eq!(late.status(), reqwest::StatusCode::CONFLICT);
+    let body: Value = late.json().await.expect("409 body");
+    assert_eq!(body["error"], json!("already_decided"));
+
+    assert!(peer.deliveries().is_empty());
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// L4 — elicitation mirrored observe-only
+// =======================================================================
+
+#[tokio::test]
+async fn l4_elicitation_accept_is_mirrored_observe_only_and_dispatches() {
+    let peer = spawn_a2a_echo().await;
+    let hub = fresh_hub();
+    let addr = spawn_operator_router(hub.clone()).await;
+    let sink = SharedSink::default();
+
+    let handler = build_handler(
+        GateAuthority::ElicitationFirst,
+        Some(hub),
+        registry_with_peer_a(&peer.url),
+        sink.clone(),
+    );
+    let (client, server) = connect(handler, ScriptedClient::accepting()).await;
+
+    let mut sse = subscribe(addr).await;
+
+    let result = call(
+        &client,
+        "consult",
+        json!({"peers": ["peerA"], "question": "hi"}),
+    )
+    .await;
+    let consult: ConsultResult = decode(&result);
+    assert_eq!(consult.replies[0].body, "reply:hi");
+    assert_eq!(
+        peer.deliveries().len(),
+        1,
+        "elicitation approval dispatches"
+    );
+
+    let requested = sse
+        .next_event(SSE_TIMEOUT)
+        .await
+        .expect("mirrored gate_requested frame");
+    assert_eq!(requested.data["decidable"], json!(false));
+    assert_eq!(requested.data["mode"], json!("elicitation"));
+    let gate_id = requested.data["gate_id"].as_str().unwrap().to_string();
+
+    let decided = sse
+        .next_event(SSE_TIMEOUT)
+        .await
+        .expect("mirrored gate_decided frame");
+    assert_eq!(decided.data["outcome"], json!("approved"));
+    assert_eq!(decided.data["decided_by"], json!("elicitation"));
+
+    // Never decidable: absent from /v1/gates, and a POST on it 404s.
+    let snapshot = get_gates(addr).await;
+    assert!(snapshot["gates"].as_array().unwrap().is_empty());
+    let post = post_decision(addr, &gate_id, json!({"outcome": "approved"})).await;
+    assert_eq!(post.status(), reqwest::StatusCode::NOT_FOUND);
+    let body: Value = post.json().await.expect("404 body");
+    assert_eq!(body["error"], json!("unknown_gate"));
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+#[tokio::test]
+async fn l4_elicitation_decline_is_mirrored_denied_and_never_dispatches() {
+    let peer = spawn_a2a_echo().await;
+    let hub = fresh_hub();
+    let addr = spawn_operator_router(hub.clone()).await;
+    let sink = SharedSink::default();
+
+    let handler = build_handler(
+        GateAuthority::ElicitationFirst,
+        Some(hub),
+        registry_with_peer_a(&peer.url),
+        sink.clone(),
+    );
+    let (client, server) = connect(handler, ScriptedClient::declining()).await;
+
+    let mut sse = subscribe(addr).await;
+
+    let result = call(
+        &client,
+        "consult",
+        json!({"peers": ["peerA"], "question": "hi"}),
+    )
+    .await;
+    assert!(is_error(&result));
+    assert_eq!(text_of(&result), "blocked: declined");
+    assert!(
+        peer.deliveries().is_empty(),
+        "a decline must never dispatch"
+    );
+
+    sse.next_event(SSE_TIMEOUT)
+        .await
+        .expect("mirrored gate_requested frame");
+    let decided = sse
+        .next_event(SSE_TIMEOUT)
+        .await
+        .expect("mirrored gate_decided frame");
+    assert_eq!(decided.data["outcome"], json!("denied"));
+    assert_eq!(decided.data["decided_by"], json!("elicitation"));
+    assert_eq!(decided.data["reason"], json!("declined"));
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// L5 — Tier-2 roundtrip via operator POST
+// =======================================================================
+
+#[tokio::test]
+async fn l5_prepare_commit_roundtrip_via_operator_post() {
+    let peer = spawn_a2a_echo().await;
+    let hub = fresh_hub();
+    let addr = spawn_operator_router(hub.clone()).await;
+    let sink = SharedSink::default();
+
+    let handler = build_handler(
+        GateAuthority::PrepareCommit,
+        Some(hub),
+        registry_with_peer_a(&peer.url),
+        sink.clone(),
+    );
+    let (client, server) = connect(handler, ()).await;
+
+    let mut sse = subscribe(addr).await;
+
+    let pending_json = "{\"status\":\"pending\",\"token\":\"tok-mcp-0\",\"hint\":\"awaiting human \
+                         approval; call the commit tool with this token\"}";
+
+    let first = call(
+        &client,
+        "consult",
+        json!({"peers": ["peerA"], "question": "hi"}),
+    )
+    .await;
+    assert!(!is_error(&first), "pending is a SUCCESS content block");
+    assert_eq!(text_of(&first), pending_json);
+
+    let requested = sse
+        .next_event(SSE_TIMEOUT)
+        .await
+        .expect("gate_requested frame");
+    assert_eq!(requested.data["decidable"], json!(true));
+    assert_eq!(requested.data["mode"], json!("prepare_commit"));
+    assert_eq!(requested.data["request"]["id"], json!("tok-mcp-0"));
+    let gate_id = requested.data["gate_id"].as_str().unwrap().to_string();
+
+    // commit BEFORE any decision -> the pending JSON again (idempotent poll).
+    let poll = call(&client, "commit", json!({"token": "tok-mcp-0"})).await;
+    assert!(!is_error(&poll));
+    assert_eq!(text_of(&poll), pending_json);
+
+    let post = post_decision(addr, &gate_id, json!({"outcome": "approved"})).await;
+    assert_eq!(post.status(), reqwest::StatusCode::NO_CONTENT);
+
+    sse.next_event(SSE_TIMEOUT)
+        .await
+        .expect("gate_decided frame");
+
+    // The decision reaches `decisions` via a spawned background task; poll
+    // `commit` until it settles (short bound, no arbitrary sleep-and-hope).
+    let mut committed = None;
+    for _ in 0..100 {
+        let res = call(&client, "commit", json!({"token": "tok-mcp-0"})).await;
+        if text_of(&res) != pending_json {
+            committed = Some(res);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let committed = committed.expect("commit must eventually settle");
+    let consult: ConsultResult = decode(&committed);
+    assert_eq!(consult.replies[0].from, agent("peerA"));
+    assert_eq!(consult.replies[0].body, "reply:hi");
+
+    let entries = sink.entries();
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly ONE audit entry, recorded at commit, not at prepare"
+    );
+    assert_eq!(entries[0].decision, Some(GateDecision::Approve));
+
+    let re_commit = call(&client, "commit", json!({"token": "tok-mcp-0"})).await;
+    assert!(is_error(&re_commit));
+    assert_eq!(
+        text_of(&re_commit),
+        "blocked: approval token already resolved"
+    );
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// L6 — Tier-2 embedder path (no hub)
+// =======================================================================
+
+#[tokio::test]
+async fn l6_prepare_commit_embedder_path_approved() {
+    let peer = spawn_a2a_echo().await;
+    let sink = SharedSink::default();
+    let handler = build_handler(
+        GateAuthority::PrepareCommit,
+        None,
+        registry_with_peer_a(&peer.url),
+        sink.clone(),
+    );
+    let embedder = handler.clone();
+    let (client, server) = connect(handler, ()).await;
+
+    let pending = call(
+        &client,
+        "consult",
+        json!({"peers": ["peerA"], "question": "hi"}),
+    )
+    .await;
+    assert!(!is_error(&pending));
+
+    embedder
+        .resolve_pending(&token("tok-mcp-0"), GateOutcome::Approved)
+        .await
+        .expect("first resolve_pending must succeed");
+
+    assert_eq!(
+        embedder
+            .resolve_pending(&token("tok-mcp-0"), GateOutcome::Approved)
+            .await,
+        Err(GateError::AlreadyResolved)
+    );
+
+    let committed = call(&client, "commit", json!({"token": "tok-mcp-0"})).await;
+    let consult: ConsultResult = decode(&committed);
+    assert_eq!(consult.replies[0].body, "reply:hi");
+
+    assert_eq!(
+        embedder
+            .resolve_pending(&token("tok-mcp-999"), GateOutcome::Approved)
+            .await,
+        Err(GateError::UnknownToken)
+    );
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+#[tokio::test]
+async fn l6_prepare_commit_embedder_path_denied() {
+    let peer = spawn_a2a_echo().await;
+    let sink = SharedSink::default();
+    let handler = build_handler(
+        GateAuthority::PrepareCommit,
+        None,
+        registry_with_peer_a(&peer.url),
+        sink.clone(),
+    );
+    let embedder = handler.clone();
+    let (client, server) = connect(handler, ()).await;
+
+    call(
+        &client,
+        "consult",
+        json!({"peers": ["peerA"], "question": "hi"}),
+    )
+    .await;
+
+    embedder
+        .resolve_pending(
+            &token("tok-mcp-0"),
+            GateOutcome::Denied {
+                reason: "no".to_string(),
+            },
+        )
+        .await
+        .expect("resolve_pending Denied must succeed");
+
+    let committed = call(&client, "commit", json!({"token": "tok-mcp-0"})).await;
+    assert!(is_error(&committed));
+    assert_eq!(text_of(&committed), "blocked: no");
+
+    let entries = sink.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].decision,
+        Some(GateDecision::Deny {
+            reason: "no".to_string()
+        })
+    );
+    assert!(peer.deliveries().is_empty());
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+#[tokio::test]
+async fn l6_prepare_commit_embedder_path_dismissed() {
+    let peer = spawn_a2a_echo().await;
+    let sink = SharedSink::default();
+    let handler = build_handler(
+        GateAuthority::PrepareCommit,
+        None,
+        registry_with_peer_a(&peer.url),
+        sink.clone(),
+    );
+    let embedder = handler.clone();
+    let (client, server) = connect(handler, ()).await;
+
+    call(
+        &client,
+        "consult",
+        json!({"peers": ["peerA"], "question": "hi"}),
+    )
+    .await;
+
+    embedder
+        .resolve_pending(&token("tok-mcp-0"), GateOutcome::Dismissed)
+        .await
+        .expect("resolve_pending Dismissed must succeed");
+
+    let committed = call(&client, "commit", json!({"token": "tok-mcp-0"})).await;
+    assert!(is_error(&committed));
+    assert_eq!(text_of(&committed), "blocked: dismissed");
+
+    let entries = sink.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].decision, None);
+    assert!(peer.deliveries().is_empty());
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// L7 — commit on an unknown token
+// =======================================================================
+
+#[tokio::test]
+async fn l7_commit_on_unknown_token_when_nothing_was_ever_prepared() {
+    let sink = SharedSink::default();
+    let handler = build_default_handler(PeerRegistry::new(), sink.clone());
+    let (client, server) = connect(handler, ()).await;
+
+    let res = call(&client, "commit", json!({"token": "tok-mcp-0"})).await;
+    assert!(is_error(&res));
+    assert_eq!(text_of(&res), "blocked: unknown approval token");
+    assert!(
+        sink.entries().is_empty(),
+        "an unknown commit audits nothing"
+    );
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// L8 — default authority = today's behavior
+// =======================================================================
+
+#[tokio::test]
+async fn l8_default_authority_denies_a_non_elicitation_capable_client_on_every_tool() {
+    let peer = spawn_a2a_echo().await;
+    let sink = SharedSink::default();
+    let mut registry = registry_with_peer_a(&peer.url);
+    registry.register(AgentCard {
+        id: agent("hostPeer"),
+        host: host("h2"),
+        endpoint: Some(peer.url.clone()),
+    });
+    let handler = build_default_handler(registry, sink.clone());
+    let (client, server) = connect(handler, ()).await;
+
+    const PINNED_DENY: &str = "blocked: client cannot be prompted (no elicitation capability)";
+
+    let c = call(
+        &client,
+        "consult",
+        json!({"peers": ["peerA"], "question": "q"}),
+    )
+    .await;
+    assert!(is_error(&c));
+    assert_eq!(text_of(&c), PINNED_DENY);
+
+    let cmd = call(&client, "command", json!({"peers": ["peerA"], "task": "t"})).await;
+    assert!(is_error(&cmd));
+    assert_eq!(text_of(&cmd), PINNED_DENY);
+
+    let m = call(
+        &client,
+        "message",
+        json!({"peers": ["peerA"], "payload": "p"}),
+    )
+    .await;
+    assert!(is_error(&m));
+    assert_eq!(text_of(&m), PINNED_DENY);
+
+    let t = call(
+        &client,
+        "transfer",
+        json!({"src_host": "h1", "dst_hosts": ["h2"], "path": "/data/f"}),
+    )
+    .await;
+    assert!(is_error(&t));
+    assert_eq!(text_of(&t), PINNED_DENY);
+
+    assert!(
+        peer.deliveries().is_empty(),
+        "every denied call must never dispatch"
+    );
+    let entries = sink.entries();
+    assert_eq!(entries.len(), 4);
+    for e in &entries {
+        assert_eq!(
+            e.decision,
+            Some(GateDecision::Deny {
+                reason: "client cannot be prompted (no elicitation capability)".to_string()
+            })
+        );
+    }
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+#[tokio::test]
+async fn l8_default_authority_elicitation_capable_accept_still_dispatches() {
+    let peer = spawn_a2a_echo().await;
+    let sink = SharedSink::default();
+    let handler = build_default_handler(registry_with_peer_a(&peer.url), sink.clone());
+    let (client, server) = connect(handler, ScriptedClient::accepting()).await;
+
+    let result = call(
+        &client,
+        "consult",
+        json!({"peers": ["peerA"], "question": "hi"}),
+    )
+    .await;
+    let consult: ConsultResult = decode(&result);
+    assert_eq!(consult.replies[0].body, "reply:hi");
+    assert_eq!(peer.deliveries().len(), 1);
+    assert_eq!(sink.entries()[0].decision, Some(GateDecision::Approve));
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// L9 — NoDestinations pinned reply
+// =======================================================================
+
+#[tokio::test]
+async fn l9_approved_transfer_with_no_destinations_is_a_pinned_blocked_reply() {
+    let sink = SharedSink::default();
+    let handler = build_default_handler(PeerRegistry::new(), sink.clone());
+    let (client, server) = connect(handler, ScriptedClient::accepting()).await;
+
+    let result = call(
+        &client,
+        "transfer",
+        json!({"src_host": "h1", "dst_hosts": [], "path": "/data/f"}),
+    )
+    .await;
+    assert!(is_error(&result));
+    assert_eq!(
+        text_of(&result),
+        "blocked: transfer has no destination hosts"
+    );
+
+    let entries = sink.entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].decision,
+        Some(GateDecision::Approve),
+        "the gate decision is audited even though the transfer itself failed post-gate"
+    );
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// Smoke — the FIVE advertised tools (the one permitted edit-adjacent change:
+// a NEW test here, tests/smoke.rs itself stays frozen and untouched).
+// =======================================================================
+
+#[tokio::test]
+async fn smoke_lists_the_five_tools_including_commit() {
+    let sink = SharedSink::default();
+    let handler = build_default_handler(PeerRegistry::new(), sink);
+    let (client, server) = connect(handler, ()).await;
+
+    let tools = client
+        .list_all_tools()
+        .await
+        .expect("list_tools must succeed");
+    let mut names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "command".to_string(),
+            "commit".to_string(),
+            "consult".to_string(),
+            "message".to_string(),
+            "transfer".to_string(),
+        ],
+        "the five Wasl tools (post-W4: + commit) must be advertised"
+    );
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}

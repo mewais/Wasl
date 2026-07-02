@@ -16,8 +16,16 @@ path = "src/main.rs"
 # (a prose paragraph clippy reads as a lazy list continuation). The test file is
 # frozen (acceptance fixture) and cannot be edited, so allow the lint crate-wide;
 # it is a documentation-formatting nit, not a correctness lint.
+#
+# The frozen `tests/gating_unit.rs` (W4, `docs/specs/mcp-gating.md`) builds a
+# real rmcp `ClientInfo` via `let mut info = ClientInfo::default(); info.capabilities
+# = …;` (mirroring rmcp's own `ClientCapabilities::builder()` idiom exactly) —
+# clippy's `field_reassign_with_default` flags that pattern. Same story: the
+# test file is frozen and cannot be edited, so allow the lint crate-wide; it is
+# a style nit (not a correctness lint) on a two-line, single-field test fixture.
 [lints.clippy]
 doc_lazy_continuation = "allow"
+field_reassign_with_default = "allow"
 
 [dependencies]
 serde = { workspace = true }
@@ -28,6 +36,9 @@ wasl-audit = { workspace = true }
 wasl-registry = { workspace = true }
 wasl-transfer = { workspace = true }
 wasl-server = { workspace = true }
+# W4: the operator hub/surfacer/tee + its real HTTP+SSE router (Tier-3
+# `OperatorSurfacer`, `TeeSink`, `wasl_operator::serve` wired from `run()`).
+wasl-operator = { workspace = true }
 # Real async A2A send path (replaces the retired sync wasl-daemon Mesh).
 wasl-dispatch = { workspace = true }
 reqwest = { workspace = true }
@@ -65,3 +76,10 @@ wasl-transfer = { workspace = true }
 # executable stub-CLI file for the adapter-factory custom-bin test. Never used
 # to mutate real process env (see docs/specs/node-config.md).
 tempfile = "3"
+# W4: also a normal dependency now (see [dependencies] above); restated here
+# (matching the `wasl-transfer` precedent below^ / above) because the gating
+# loopback tests additionally drive its real HTTP+SSE router directly, with
+# the already-present `reqwest`/`axum`/`tokio` dev-deps above (no SSE-client
+# crate needed — `reqwest::Response::chunk()` is enough for a hand-rolled
+# reader).
+wasl-operator = { workspace = true }

@@ -8,8 +8,8 @@
 //! re-exported from the crate root: that failure is the test-first baseline.
 
 use wasl_mcp::{
-    A2aConfig, AdapterConfig, AdapterKind, AuditConfig, Config, ConfigError, IdentityConfig,
-    OperatorConfig, PeerEntry,
+    A2aConfig, AdapterConfig, AdapterKind, AuditConfig, Config, ConfigError, GateConfig,
+    IdentityConfig, OperatorConfig, PeerEntry,
 };
 
 /// The complete example from the spec: every section, every key, two peers.
@@ -63,6 +63,7 @@ fn full_parse_every_field_exact() {
         operator: OperatorConfig {
             bind: Some("127.0.0.1:4243".to_string()),
         },
+        gate: GateConfig::default(),
         audit: AuditConfig {
             path: "/var/lib/wasl/audit.jsonl".to_string(),
         },

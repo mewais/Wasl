@@ -438,7 +438,13 @@ async fn approved_transfer_runs_over_runner_and_never_touches_a2a() {
 }
 
 #[tokio::test]
-async fn transfer_with_no_destinations_yields_empty_delivered() {
+async fn transfer_with_no_destinations_is_blocked_not_an_empty_success() {
+    // Per docs/specs/mcp-gating.md §7 (supersedes this arm's earlier pinned
+    // behavior in mcp-a2a.md): a transfer that cannot address anyone is a
+    // caller error, surfaced as a blocked reply carrying
+    // `TransferError::NoDestinations`'s Display — never a silent
+    // `{"delivered":[]}` success. The gate decision (Approve) is still
+    // audited; the failure is post-gate.
     let (self_id, self_host) = ids();
     let registry = PeerRegistry::new();
 
@@ -474,13 +480,17 @@ async fn transfer_with_no_destinations_yields_empty_delivered() {
     .expect("empty transfer is a valid (recorded) outcome");
 
     match reply {
-        ToolReply::Transfer(res) => assert!(
-            res.delivered.is_empty(),
-            "no destinations → nothing delivered"
-        ),
-        other => panic!("expected Transfer reply, got {other:?}"),
+        ToolReply::Blocked { reason } => {
+            assert_eq!(reason, "transfer has no destination hosts")
+        }
+        other => panic!("expected Blocked reply, got {other:?}"),
     }
     assert!(runner.argvs.is_empty(), "no destinations → no runner jobs");
+    assert_eq!(
+        audit.entries()[0].decision,
+        Some(GateDecision::Approve),
+        "the gate decision is audited even though the transfer itself failed post-gate"
+    );
 }
 
 #[tokio::test]

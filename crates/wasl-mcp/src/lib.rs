@@ -1,26 +1,32 @@
 //! wasl-mcp — MCP server facade for Wasl (the IO shell over the tested cores).
 //!
 //! Exposes the four Wasl agent-to-agent tools (consult / command / message /
-//! transfer) as MCP tools. Each call runs the permission-before-send gate
-//! (surfaced to the client via MCP `elicitation/create`, reusing the tested
-//! `wasl_gate` logic) and, only on approval, dispatches over REAL async A2A
-//! (`wasl_dispatch` for the messaging verbs; `wasl_transfer` for transfer),
-//! recording every decision to `wasl_audit`. Transport/runtime is this crate's
+//! transfer) plus the Tier-2 `commit` redemption tool as MCP tools. Each call
+//! runs the real three-tier permission-before-send gate (`crate::gating`
+//! picks Tier-1 elicitation / Tier-3 external / Tier-2 prepare-commit per the
+//! configured [`GateAuthority`] and the REAL client capabilities, reusing the
+//! tested `wasl_gate` logic) and, only on approval, dispatches over REAL
+//! async A2A (`wasl_dispatch` for the messaging verbs; `wasl_transfer` for
+//! transfer), recording every decision to `wasl_audit` (and, when an operator
+//! is bound, mirroring it to `/v1/events`). Transport/runtime is this crate's
 //! concern; all decision + routing logic is the tested cores.
-//! See `docs/specs/mcp-a2a.md`.
+//! See `docs/specs/mcp-gating.md` (current) and `docs/specs/mcp-a2a.md`.
 
 pub mod config;
+pub mod gating;
 pub mod handle;
 pub mod server;
 
 use wasl_audit::{AuditEntry, AuditError, AuditLog, Sink};
 use wasl_filesink::FileSink;
+use wasl_operator::{HubConfig, NodeInfo, OperatorHub, TeeSink};
 use wasl_procrunner::ProcessRunner;
 
 pub use config::{
     build_adapter, registry_from_peers, A2aConfig, AdapterConfig, AdapterKind, AuditConfig, Config,
-    ConfigError, EnvOverrides, IdentityConfig, OperatorConfig, PeerEntry,
+    ConfigError, EnvOverrides, GateConfig, IdentityConfig, OperatorConfig, PeerEntry,
 };
+pub use gating::{detect_caps, ledger_decision_of, proto_action, select_mode, GateAuthority};
 pub use handle::{resolve_and_dispatch, HandleError, ToolCall, ToolCtx, ToolReply};
 pub use server::{WaslMcp, WaslState};
 
@@ -65,6 +71,25 @@ impl Sink for DefaultSink {
     }
 }
 
+/// The concrete sink `run()`'s handler is built over: the plain [`DefaultSink`]
+/// when no operator is bound, or [`TeeSink`]-wrapped (durable append first,
+/// then a broadcast `Audit` frame fan-out to `/v1/events`) when one is. One
+/// concrete enum (not a boxed trait object) so `build_handler` stays a single
+/// `WaslMcp<RunSink, ProcessRunner>` type regardless of `[operator] bind`.
+pub enum RunSink {
+    Plain(DefaultSink),
+    Teed(TeeSink<DefaultSink>),
+}
+
+impl Sink for RunSink {
+    fn append(&mut self, entry: &AuditEntry) -> Result<(), AuditError> {
+        match self {
+            RunSink::Plain(sink) => sink.append(entry),
+            RunSink::Teed(tee) => tee.append(entry),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------
 // 2. build_handler
 // ---------------------------------------------------------------------
@@ -73,30 +98,37 @@ impl Sink for DefaultSink {
 /// (LOUDLY, on stderr) if the file cannot be opened — the server still
 /// starts, but the operator is told the trail is not durable rather than it
 /// being dropped silently.
-fn open_audit(path: &str) -> AuditLog<DefaultSink> {
+fn open_audit(path: &str) -> DefaultSink {
     match FileSink::open(path) {
-        Ok(sink) => AuditLog::new(DefaultSink::File(sink)),
+        Ok(sink) => DefaultSink::File(sink),
         Err(err) => {
             eprintln!(
                 "wasl-mcpd: WARNING: could not open durable audit log at {path:?}: {err}. \
                  Falling back to a NON-DURABLE in-memory audit sink for this run."
             );
-            AuditLog::new(DefaultSink::Mem(MemSink::new()))
+            DefaultSink::Mem(MemSink::new())
         }
     }
 }
 
 /// Build the default handler wired to the durable/real seams: identity +
-/// peers + audit path from `cfg`, a `ProcessRunner` for transfer, and a
-/// shared `reqwest::Client` for A2A.
-fn build_handler(cfg: &Config) -> WaslMcp<DefaultSink, ProcessRunner> {
+/// peers + audit path from `cfg`, a `ProcessRunner` for transfer, a shared
+/// `reqwest::Client` for A2A, the configured [`GateAuthority`], and — when
+/// `hub` is `Some` (i.e. `[operator] bind` was set and parsed) — the durable
+/// sink teed to the operator's `/v1/events` feed.
+fn build_handler(cfg: &Config, hub: Option<OperatorHub>) -> WaslMcp<RunSink, ProcessRunner> {
     let self_id = wasl_proto::AgentId(cfg.identity.agent_id.clone());
     let self_host = wasl_proto::HostId(cfg.identity.host_id.clone());
     let registry = registry_from_peers(&cfg.peers);
-    let audit = open_audit(&cfg.audit.path);
+    let sink = open_audit(&cfg.audit.path);
+    let run_sink = match &hub {
+        Some(hub) => RunSink::Teed(TeeSink::new(sink, hub.clone())),
+        None => RunSink::Plain(sink),
+    };
+    let audit = AuditLog::new(run_sink);
     let http = reqwest::Client::new();
     let state = WaslState::new(audit, http, ProcessRunner::new());
-    WaslMcp::new(self_id, self_host, registry, state)
+    WaslMcp::with_gating(self_id, self_host, registry, state, cfg.gate.authority, hub)
 }
 
 // ---------------------------------------------------------------------
@@ -112,13 +144,14 @@ fn build_handler(cfg: &Config) -> WaslMcp<DefaultSink, ProcessRunner> {
 ///
 /// On success: builds the handler (identity/registry/audit path from the
 /// config, durable `FileSink` audit + `ProcessRunner` transfer + shared A2A
-/// `reqwest::Client`), starts a tokio runtime, serves over stdio, and blocks
-/// until the client disconnects.
+/// `reqwest::Client` + the configured gate authority), starts a tokio
+/// runtime, serves over stdio, and blocks until the client disconnects.
 ///
 /// If `cfg.a2a.bind` is set (post-env-overlay), it ALSO spawns this node's
-/// A2A RECEIVE server concurrently (see the UNTESTED-HERE shell below).
-/// `cfg.operator` is read and validated at load time, then deliberately
-/// ignored here — W3 consumes it.
+/// A2A RECEIVE server concurrently (see the UNTESTED-HERE shell below). If
+/// `cfg.operator.bind` is set, it ALSO spawns the operator surface
+/// (`wasl_operator::serve`) and tees the audit sink to it — see the
+/// UNTESTED-HERE shell just below the A2A one.
 pub fn run() {
     let cfg = match Config::load() {
         Ok(cfg) => cfg,
@@ -180,7 +213,43 @@ pub fn run() {
         }
         // ── end A2A RECEIVE shell ─────────────────────────────────────────────
 
-        let handler = build_handler(&cfg);
+        // ── OPERATOR wiring — IO SHELL, UNTESTED HERE ──────────────────────────
+        //
+        // `wasl_operator::router` (the axum app this binds) IS loopback-tested
+        // (`wasl-operator`'s own suite, plus `wasl-mcp`'s `gating_loopback.rs`
+        // driving it end to end over a REAL bind). What is NOT exercised by any
+        // test in this crate is THIS live `serve()` bind inside `run()` — same
+        // compile-only-shell status as the A2A receive loop above.
+        let hub = match cfg.operator.bind.clone() {
+            Some(bind) => match bind.parse::<std::net::SocketAddr>() {
+                Ok(addr) => {
+                    let info = NodeInfo {
+                        agent_id: wasl_proto::AgentId(cfg.identity.agent_id.clone()),
+                        host_id: wasl_proto::HostId(cfg.identity.host_id.clone()),
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                    };
+                    let hub = OperatorHub::new(info, HubConfig::default());
+                    let serve_hub = hub.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = wasl_operator::serve(serve_hub, addr).await {
+                            eprintln!("wasl-mcpd: operator server terminated: {err}");
+                        }
+                    });
+                    Some(hub)
+                }
+                Err(err) => {
+                    eprintln!(
+                        "wasl-mcpd: WARNING: operator.bind={bind:?} is not a valid socket \
+                         address ({err}); operator surface not started."
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        // ── end OPERATOR shell ──────────────────────────────────────────────────
+
+        let handler = build_handler(&cfg, hub);
         match handler.serve(stdio()).await {
             Ok(running) => {
                 if let Err(err) = running.waiting().await {

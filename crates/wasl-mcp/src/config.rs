@@ -20,6 +20,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::gating::GateAuthority;
+
 // ---------------------------------------------------------------------
 // 1. Public config shape
 // ---------------------------------------------------------------------
@@ -30,6 +32,7 @@ pub struct Config {
     pub identity: IdentityConfig,
     pub a2a: A2aConfig,
     pub operator: OperatorConfig,
+    pub gate: GateConfig,
     pub audit: AuditConfig,
     pub adapter: AdapterConfig,
     pub peers: Vec<PeerEntry>,
@@ -50,11 +53,18 @@ pub struct A2aConfig {
     pub bind: Option<String>,
 }
 
-/// RESERVED FOR W3: parsed + validated here, but deliberately unused by
-/// `run()` in this block.
+/// The node's operator surface bind (W2 parsed + validated it, W3 shipped the
+/// crate it wires to, W4 `run()` CONSUMES it — see `docs/specs/mcp-gating.md` §1/§8).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OperatorConfig {
     pub bind: Option<String>,
+}
+
+/// Which authority may decide a gate (`docs/specs/mcp-gating.md` §1/§3).
+/// `Default` = [`GateAuthority::Elicitation`] — exactly today's behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GateConfig {
+    pub authority: GateAuthority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +101,7 @@ impl Default for Config {
             },
             a2a: A2aConfig::default(),
             operator: OperatorConfig::default(),
+            gate: GateConfig::default(),
             audit: AuditConfig {
                 path: "wasl-audit.jsonl".to_string(),
             },
@@ -117,6 +128,8 @@ pub enum ConfigError {
     Toml(String),
     /// `adapter.kind` is not a known adapter.
     UnknownAdapterKind(String),
+    /// `gate.authority` is not one of the four known authorities.
+    UnknownGateAuthority(String),
     /// A peer url is not an absolute http/https URL.
     MalformedPeerUrl {
         agent_id: String,
@@ -139,6 +152,7 @@ impl fmt::Display for ConfigError {
             ConfigError::Read { path, detail } => write!(f, "read config {path}: {detail}"),
             ConfigError::Toml(detail) => write!(f, "invalid config TOML: {detail}"),
             ConfigError::UnknownAdapterKind(kind) => write!(f, "unknown adapter kind: {kind}"),
+            ConfigError::UnknownGateAuthority(v) => write!(f, "unknown gate authority: {v}"),
             ConfigError::MalformedPeerUrl {
                 agent_id,
                 url,
@@ -172,6 +186,7 @@ struct RawConfig {
     identity: RawIdentity,
     a2a: RawBind,
     operator: RawBind,
+    gate: RawGate,
     audit: RawAudit,
     adapter: RawAdapter,
     peers: Vec<RawPeer>,
@@ -197,6 +212,20 @@ impl Default for RawIdentity {
 #[serde(deny_unknown_fields, default)]
 struct RawBind {
     bind: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawGate {
+    authority: String,
+}
+
+impl Default for RawGate {
+    fn default() -> Self {
+        RawGate {
+            authority: "elicitation".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,7 +305,8 @@ impl EnvOverrides {
 impl Config {
     /// Parse + validate a TOML document. Pure (no env, no fs). Applies
     /// defaults for missing sections/keys; runs ALL validation in order: TOML
-    /// syntax/shape -> binds -> adapter kind -> peer urls -> duplicate peers.
+    /// syntax/shape -> binds -> adapter kind -> gate authority -> peer urls ->
+    /// duplicate peers.
     pub fn from_toml_str(s: &str) -> Result<Config, ConfigError> {
         let raw: RawConfig = toml::from_str(s).map_err(|e| ConfigError::Toml(e.to_string()))?;
 
@@ -286,6 +316,14 @@ impl Config {
         let kind = match raw.adapter.kind.as_str() {
             "claude" => AdapterKind::Claude,
             other => return Err(ConfigError::UnknownAdapterKind(other.to_string())),
+        };
+
+        let authority = match raw.gate.authority.as_str() {
+            "elicitation" => GateAuthority::Elicitation,
+            "elicitation-first" => GateAuthority::ElicitationFirst,
+            "external-first" => GateAuthority::ExternalFirst,
+            "prepare-commit" => GateAuthority::PrepareCommit,
+            other => return Err(ConfigError::UnknownGateAuthority(other.to_string())),
         };
 
         for p in &raw.peers {
@@ -318,6 +356,7 @@ impl Config {
             operator: OperatorConfig {
                 bind: operator_bind,
             },
+            gate: GateConfig { authority },
             audit: AuditConfig {
                 path: raw.audit.path,
             },

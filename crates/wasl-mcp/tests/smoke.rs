@@ -1,8 +1,9 @@
 //! In-memory smoke test: wire a real rmcp client to the `WaslMcp` server over a
-//! `tokio::io::duplex` pipe (no OS process, no stdio) and assert that the four
-//! Wasl tools are advertised. This covers the async rmcp handler surface end to
-//! end — tool registration + `list_tools` over the wire — which the pure-core
-//! unit tests cannot.
+//! `tokio::io::duplex` pipe (no OS process, no stdio) and assert that the five
+//! Wasl tools are advertised (W4 adds the fifth, `commit` — see
+//! `docs/specs/mcp-gating.md` §9). This covers the async rmcp handler surface
+//! end to end — tool registration + `list_tools` over the wire — which the
+//! pure-core unit tests cannot.
 
 use rmcp::ServiceExt;
 use tokio::io::duplex;
@@ -35,7 +36,7 @@ fn handler() -> WaslMcp<MemSink, OkRunner> {
 }
 
 #[tokio::test]
-async fn lists_the_four_tools() {
+async fn lists_the_five_tools() {
     // Two in-memory pipes: client->server and server->client.
     let (client_tx, server_rx) = duplex(4096);
     let (server_tx, client_rx) = duplex(4096);
@@ -64,11 +65,12 @@ async fn lists_the_four_tools() {
         names,
         vec![
             "command".to_string(),
+            "commit".to_string(),
             "consult".to_string(),
             "message".to_string(),
             "transfer".to_string(),
         ],
-        "the four Wasl tools must be advertised"
+        "the five Wasl tools (post-W4: + commit) must be advertised"
     );
 
     client.cancel().await.expect("client shutdown");

@@ -18,11 +18,11 @@
 use wasl_audit::{AuditEntry, AuditError, AuditLog, EntryKind, Sink};
 use wasl_gate::GateOutcome;
 use wasl_proto::{
-    AgentId, CommandParams, CommandResult, ConsultParams, ConsultResult, GateKind, HostId,
-    MessageParams, MessageResult, TransferParams, TransferResult,
+    AgentId, ApprovalToken, CommandParams, CommandResult, ConsultParams, ConsultResult, GateKind,
+    HostId, MessageParams, MessageResult, TransferParams, TransferResult,
 };
 use wasl_registry::PeerRegistry;
-use wasl_transfer::{Runner, Tool, TransferError};
+use wasl_transfer::{Runner, Tool};
 
 // ---------------------------------------------------------------------
 // 1. Types
@@ -37,7 +37,10 @@ pub struct ToolCtx<'a> {
 }
 
 /// The unified reply of a gated tool call: the tested-core result on approval,
-/// or a `Blocked` marker (with a human reason) when the gate did not approve.
+/// a `Blocked` marker (with a human reason) when the gate did not approve, or
+/// (Tier-2 only) `Pending` — the call has been deferred and awaits a later
+/// `commit`. `Pending` is a SUCCESS content block, not a block/error: the
+/// agent's next move (call `commit` with the token) is well-defined.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolReply {
     Consult(ConsultResult),
@@ -45,6 +48,7 @@ pub enum ToolReply {
     Message(MessageResult),
     Transfer(TransferResult),
     Blocked { reason: String },
+    Pending { token: ApprovalToken },
 }
 
 impl ToolReply {
@@ -213,12 +217,10 @@ async fn dispatch_approved(
         ToolCall::Transfer { tool, params } => {
             match wasl_transfer::execute(tool, &params, runner) {
                 Ok((result, _failures)) => ToolReply::Transfer(result),
-                // A transfer with no destinations is a caller error, not a gate
-                // block — surface it as a blocked reply carrying the reason (no
-                // silent success, no dispatch of anything else).
-                Err(TransferError::NoDestinations) => ToolReply::Transfer(TransferResult {
-                    delivered: Vec::new(),
-                }),
+                // A transfer that cannot address anyone is a caller error,
+                // surfaced like every other transfer failure — never an empty
+                // success (supersedes mcp-a2a.md's earlier pinned arm; see
+                // docs/specs/mcp-gating.md §7).
                 Err(err) => ToolReply::Blocked {
                     reason: err.to_string(),
                 },
