@@ -174,10 +174,11 @@ pub fn run() {
         //
         // This composes only already-tested pieces (`wasl_node::receiver` →
         // `A2aServer` over a real `AdapterExecutor` wrapping the config-selected
-        // `NodeAdapter` — `ClaudeAdapter` or, since W7, `CodexAdapter`), but the
-        // LIVE serve loop and driving a REAL `claude`/`codex` CLI are NOT
-        // exercised by any test in this crate (neither binary is in the build
-        // env and the socket serve loop is never entered under test).
+        // `NodeAdapter` — `ClaudeAdapter`, `CodexAdapter` (W7), or, since
+        // W8'b, `AntigravityAdapter`), but the LIVE serve loop and driving a
+        // REAL `claude`/`codex`/`agy` CLI are NOT exercised by any test in
+        // this crate (none of the three binaries is in the build env and the
+        // socket serve loop is never entered under test).
         // Compile-only shell.
         if let Some(bind) = cfg.a2a.bind.clone() {
             match bind.parse::<std::net::SocketAddr>() {

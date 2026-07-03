@@ -79,11 +79,13 @@ pub struct AdapterConfig {
 }
 
 /// The adapter selector. W7 (`docs/specs/adapter-codex.md`) adds `Codex`
-/// alongside the original `Claude`.
+/// alongside the original `Claude`; W8′b (`docs/specs/adapter-antigravity.md`)
+/// adds `Antigravity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterKind {
     Claude,
     Codex,
+    Antigravity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -317,6 +319,7 @@ impl Config {
         let kind = match raw.adapter.kind.as_str() {
             "claude" => AdapterKind::Claude,
             "codex" => AdapterKind::Codex,
+            "antigravity" => AdapterKind::Antigravity,
             other => return Err(ConfigError::UnknownAdapterKind(other.to_string())),
         };
 
@@ -499,12 +502,16 @@ pub fn registry_from_peers(peers: &[PeerEntry]) -> wasl_registry::PeerRegistry {
 
 /// The receive-side adapter selected by config: an exhaustive-match
 /// delegating enum, NOT `Box<dyn AgentAdapter>` — a trait object would erase
-/// the compile-time forcing function that made adding `Codex` here require
-/// touching this match. See `docs/specs/adapter-codex.md`'s "Node-config
-/// integration" section (the authoritative shape for this type).
+/// the compile-time forcing function that made adding `Codex`/`Antigravity`
+/// here require touching this match. See `docs/specs/adapter-codex.md`'s and
+/// `docs/specs/adapter-antigravity.md`'s "Node-config integration" sections
+/// (the authoritative shape for this type).
 pub enum NodeAdapter {
     Claude(wasl_adapter_claude::ClaudeAdapter<wasl_adapter_claude::ProcessCliInvoker>),
     Codex(wasl_adapter_codex::CodexAdapter<wasl_adapter_codex::ProcessCliInvoker>),
+    Antigravity(
+        wasl_adapter_antigravity::AntigravityAdapter<wasl_adapter_antigravity::ProcessCliInvoker>,
+    ),
 }
 
 #[async_trait::async_trait]
@@ -516,13 +523,14 @@ impl wasl_adapter::AgentAdapter for NodeAdapter {
         match self {
             NodeAdapter::Claude(inner) => wasl_adapter::AgentAdapter::deliver(inner, d).await,
             NodeAdapter::Codex(inner) => wasl_adapter::AgentAdapter::deliver(inner, d).await,
+            NodeAdapter::Antigravity(inner) => wasl_adapter::AgentAdapter::deliver(inner, d).await,
         }
     }
 }
 
 /// Construct the receive-side adapter selected by the config. Written as an
-/// exhaustive match on `AdapterKind` so adding a kind (W7 codex) forces a
-/// decision here.
+/// exhaustive match on `AdapterKind` so adding a kind (W7 codex, W8′b
+/// antigravity) forces a decision here.
 pub fn build_adapter(cfg: &AdapterConfig) -> NodeAdapter {
     match cfg.kind {
         AdapterKind::Claude => match &cfg.bin {
@@ -542,6 +550,17 @@ pub fn build_adapter(cfg: &AdapterConfig) -> NodeAdapter {
                 wasl_adapter_codex::ProcessCliInvoker,
                 bin.clone(),
             )),
+        },
+        AdapterKind::Antigravity => match &cfg.bin {
+            None => NodeAdapter::Antigravity(wasl_adapter_antigravity::AntigravityAdapter::new(
+                wasl_adapter_antigravity::ProcessCliInvoker,
+            )),
+            Some(bin) => {
+                NodeAdapter::Antigravity(wasl_adapter_antigravity::AntigravityAdapter::with_bin(
+                    wasl_adapter_antigravity::ProcessCliInvoker,
+                    bin.clone(),
+                ))
+            }
         },
     }
 }
