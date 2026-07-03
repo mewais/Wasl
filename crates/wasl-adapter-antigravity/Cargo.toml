@@ -1,0 +1,37 @@
+[package]
+name = "wasl-adapter-antigravity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl concrete AgentAdapter driving the Antigravity CLI (the last inch)"
+
+[dependencies]
+wasl-adapter = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util"] }
+
+[lints.clippy]
+# tests/adapter.rs (frozen, owned by the test-agent) uses an
+# `Arc<Mutex<Option<(Vec<String>, String)>>>` recorder field that trips
+# clippy::type_complexity. The code-agent cannot edit tests/**, so silence this
+# style lint package-wide (no such complex types exist in src/).
+type_complexity = "allow"
+# tests/process_invoker.rs (frozen) constructs the unit struct via
+# `ProcessCliInvoker::default()`, which trips
+# clippy::default_constructed_unit_structs. Tests are owned by the test-agent.
+default_constructed_unit_structs = "allow"
+
+[features]
+# Gates tests/live.rs, which drives the REAL `agy` binary. Excluded from
+# default test runs (no `agy` binary in CI); run explicitly with
+# `cargo test -p wasl-adapter-antigravity --features live-cli`.
+live-cli = []
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
