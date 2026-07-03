@@ -409,9 +409,21 @@ impl OperatorHub {
     }
 
     /// Mint a gate id, open a capacity-1 rendezvous channel, register it as a
-    /// pending DECIDABLE gate (inserted before the frame is broadcast, so a
-    /// `decide`/timeout can never race ahead of the gate's own visibility),
-    /// and broadcast `GateRequested{decidable: true, ..}`.
+    /// pending DECIDABLE gate, and broadcast `GateRequested{decidable: true,
+    /// ..}` — all while still holding the `pending` lock.
+    ///
+    /// The broadcast MUST happen before the lock is released, not merely
+    /// after the table insert: `decide`/`timeout_gate` also need the
+    /// `pending` lock to find and remove this gate, so as long as the
+    /// broadcast is inside the same critical section, no `decide` racing
+    /// this call can publish `GateDecided` before this `GateRequested` frame
+    /// — the ordering `operator-api.md` pins ("`gate_requested` always
+    /// precedes its `gate_decided`") falls out of mutex serialization
+    /// itself, rather than merely being likely because the insert happens
+    /// first. (An earlier version broadcast AFTER releasing the lock — insert
+    /// before broadcast still let `decide` observe and resolve the gate,
+    /// including its own broadcast, before this call's broadcast ran; see
+    /// `tests/gate_requested_ordering.rs` for the regression this fixes.)
     pub fn open_gate(&self, mode: GateMode, req: &GateRequest) -> PendingWait {
         let gate_id = self.0.ids.next();
         let (tx, rx) = std::sync::mpsc::sync_channel::<GateOutcome>(1);
@@ -428,8 +440,8 @@ impl OperatorHub {
                     waiter: tx,
                 },
             );
+            self.publish_requested(&gate_id, mode, req, true, requested_at, deadline);
         }
-        self.publish_requested(&gate_id, mode, req, true, requested_at, deadline);
         PendingWait { gate_id, rx }
     }
 

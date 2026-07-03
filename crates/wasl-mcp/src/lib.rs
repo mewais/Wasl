@@ -28,7 +28,7 @@ pub use config::{
 };
 pub use gating::{detect_caps, ledger_decision_of, proto_action, select_mode, GateAuthority};
 pub use handle::{resolve_and_dispatch, HandleError, ToolCall, ToolCtx, ToolReply};
-pub use server::{WaslMcp, WaslState};
+pub use server::{CounterTokenIds, RandomTokenIds, TokenIds, WaslMcp, WaslState};
 
 // ---------------------------------------------------------------------
 // 1. Default IO seams for `run()`

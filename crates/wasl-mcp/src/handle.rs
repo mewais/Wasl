@@ -60,6 +60,10 @@ impl ToolReply {
 
 /// Which tool's params to dispatch on approval. Keeping the params inside the
 /// enum lets `resolve_and_dispatch` stay one function over all four tools.
+/// `Clone` so `commit` (server.rs) can peek the remembered call durability-
+/// first (clone it out) rather than removing it before the audit write that
+/// might still fail — see `server.rs::commit`'s doc comment.
+#[derive(Clone)]
 pub enum ToolCall {
     Consult(ConsultParams),
     Command(CommandParams),

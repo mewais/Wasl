@@ -32,7 +32,7 @@ use wasl_a2a_types::{AgentCapabilities, AgentCard as A2aCard};
 use wasl_adapter::{AdapterError, AdapterExecutor, AgentAdapter, Delivery};
 use wasl_audit::{AuditEntry, AuditError, AuditLog, Sink};
 use wasl_gate::{GateError, GateOutcome};
-use wasl_mcp::{GateAuthority, WaslMcp, WaslState};
+use wasl_mcp::{CounterTokenIds, GateAuthority, WaslMcp, WaslState};
 use wasl_operator::{HubConfig, NodeInfo, OperatorHub};
 use wasl_proto::{AgentCard, AgentId, ApprovalToken, ConsultResult, GateDecision, HostId};
 use wasl_registry::PeerRegistry;
@@ -85,6 +85,41 @@ impl Sink for SharedSink {
     }
 }
 
+/// A sink that can be switched to fail on demand (and back), so a test can
+/// simulate a TRANSIENT audit-sink outage across a `commit` retry — proves
+/// the Tier-2 `commit` path is durability-first (regression test for the
+/// review finding that `commit` used to consume the ledger token BEFORE the
+/// audit write, permanently losing the human's decision on a write failure).
+#[derive(Clone, Default)]
+struct SwitchableSink {
+    entries: Arc<Mutex<Vec<AuditEntry>>>,
+    failing: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl SwitchableSink {
+    fn set_failing(&self, failing: bool) {
+        self.failing
+            .store(failing, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn entries(&self) -> Vec<AuditEntry> {
+        self.entries.lock().expect("switchable sink lock").clone()
+    }
+}
+
+impl Sink for SwitchableSink {
+    fn append(&mut self, entry: &AuditEntry) -> Result<(), AuditError> {
+        if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(AuditError::Sink("disk full".to_string()));
+        }
+        self.entries
+            .lock()
+            .expect("switchable sink lock")
+            .push(entry.clone());
+        Ok(())
+    }
+}
+
 /// A `Runner` that must never be invoked: every loopback test here either
 /// never reaches the transfer seam (consult/command/message) or reaches it
 /// only via the `NoDestinations` short-circuit (L9), which never calls
@@ -100,6 +135,14 @@ impl Runner for PanicRunner {
 
 type Handler = WaslMcp<SharedSink, PanicRunner>;
 
+/// Production (`WaslMcp::new`/`with_gating`) mints unguessable Tier-2 tokens
+/// (`RandomTokenIds`, see `server.rs`'s `TokenIds` seam) — deliberately NOT
+/// the pinned `"tok-mcp-{n}"` literals this suite's L5-L7 cases assert on.
+/// These loopback tests only need DETERMINISTIC tokens to pin those literals
+/// (they are not testing token unguessability — that is
+/// `prepared_tokens_are_not_sequential_or_guessable`'s job, below), so the
+/// harness opts into `CounterTokenIds` via `with_seams` instead of weakening
+/// the production default.
 fn build_handler(
     authority: GateAuthority,
     hub: Option<OperatorHub>,
@@ -107,14 +150,22 @@ fn build_handler(
     sink: SharedSink,
 ) -> Handler {
     let state = WaslState::new(AuditLog::new(sink), http_client(), PanicRunner);
-    WaslMcp::with_gating(agent("me"), host("h1"), registry, state, authority, hub)
+    WaslMcp::with_seams(
+        agent("me"),
+        host("h1"),
+        registry,
+        state,
+        authority,
+        hub,
+        Arc::new(CounterTokenIds::default()),
+    )
 }
 
-/// The default-authority constructor (`new(..) == with_gating(.., Elicitation,
-/// None)` per the spec's backward-compatibility clause).
+/// The default-authority equivalent of `build_handler` (still deterministic
+/// tokens, still `GateAuthority::Elicitation`/no hub — `WaslMcp::new`'s
+/// behavior — just via `with_seams` so L5-L7's pinned token literals hold).
 fn build_default_handler(registry: PeerRegistry, sink: SharedSink) -> Handler {
-    let state = WaslState::new(AuditLog::new(sink), http_client(), PanicRunner);
-    WaslMcp::new(agent("me"), host("h1"), registry, state)
+    build_handler(GateAuthority::default(), None, registry, sink)
 }
 
 // ---------------------------------------------------------------------
@@ -175,16 +226,16 @@ impl ClientHandler for ScriptedClient {
 }
 
 /// Wire `handler` and `client` together over an in-memory duplex pipe (the
-/// `tests/smoke.rs` idiom) and run both handshakes concurrently.
-async fn connect<C>(
-    handler: Handler,
+/// `tests/smoke.rs` idiom) and run both handshakes concurrently. Generic
+/// over the handler's `Sink` (not just `Handler = WaslMcp<SharedSink, _>`) so
+/// the audit-failure regression test can plug in `SwitchableSink`.
+async fn connect<C, H>(
+    handler: H,
     client: C,
-) -> (
-    RunningService<RoleClient, C>,
-    RunningService<RoleServer, Handler>,
-)
+) -> (RunningService<RoleClient, C>, RunningService<RoleServer, H>)
 where
     C: ClientHandler + Send + Sync + 'static,
+    H: rmcp::ServerHandler + Send + Sync + 'static,
 {
     let (client_tx, server_rx) = tokio::io::duplex(4096);
     let (server_tx, client_rx) = tokio::io::duplex(4096);
@@ -1165,6 +1216,189 @@ async fn l9_approved_transfer_with_no_destinations_is_a_pinned_blocked_reply() {
         entries[0].decision,
         Some(GateDecision::Approve),
         "the gate decision is audited even though the transfer itself failed post-gate"
+    );
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// Bug 1 (durability-first commit) — regression: a Tier-2 `commit` audit-sink
+// failure must not permanently strand an approved decision. The old code
+// consumed the ledger token (and dropped the decision out of `decisions`)
+// BEFORE the audit write ran, so a transient sink failure lost the human's
+// approval with no audit trace and made the token "already resolved"
+// forever on every retry.
+// =======================================================================
+
+#[tokio::test]
+async fn commit_survives_a_transient_audit_failure_and_redeems_exactly_once_on_retry() {
+    let peer = spawn_a2a_echo().await;
+    let sink = SwitchableSink::default();
+    let state = WaslState::new(AuditLog::new(sink.clone()), http_client(), PanicRunner);
+    let handler: WaslMcp<SwitchableSink, PanicRunner> = WaslMcp::with_seams(
+        agent("me"),
+        host("h1"),
+        registry_with_peer_a(&peer.url),
+        state,
+        GateAuthority::PrepareCommit,
+        None,
+        Arc::new(CounterTokenIds::default()),
+    );
+    let embedder = handler.clone();
+    let (client, server) = connect(handler, ()).await;
+
+    let pending = call(
+        &client,
+        "consult",
+        json!({"peers": ["peerA"], "question": "hi"}),
+    )
+    .await;
+    assert!(!is_error(&pending), "pending is a SUCCESS content block");
+
+    embedder
+        .resolve_pending(&token("tok-mcp-0"), GateOutcome::Approved)
+        .await
+        .expect("resolve_pending must succeed");
+
+    // The sink is failing: `commit` must fail the whole call
+    // (durability-first, handle.rs's own contract) rather than silently
+    // dropping the decision or dispatching anyway.
+    sink.set_failing(true);
+    let failing_attempt = client
+        .call_tool(CallToolRequestParam {
+            name: "commit".to_string().into(),
+            arguments: json!({"token": "tok-mcp-0"}).as_object().cloned(),
+        })
+        .await;
+    assert!(
+        failing_attempt.is_err(),
+        "an audit-sink failure must propagate as a call error, not a silent success: {failing_attempt:?}"
+    );
+    assert!(
+        sink.entries().is_empty(),
+        "the failed write must not be recorded"
+    );
+    assert!(
+        peer.deliveries().is_empty(),
+        "nothing may dispatch while the audit write is failing"
+    );
+
+    // THE BUG: the old code committed the ledger (and removed the decision
+    // from `decisions`) BEFORE the audit write above ran, so at this point
+    // the token would already be irrecoverably "resolved" with the approval
+    // gone. Prove the fix: the SAME token is still redeemable once the sink
+    // recovers.
+    sink.set_failing(false);
+    let retried = call(&client, "commit", json!({"token": "tok-mcp-0"})).await;
+    assert!(
+        !is_error(&retried),
+        "the same token must still redeem once the sink recovers: {retried:?}"
+    );
+    let consult: ConsultResult = decode(&retried);
+    assert_eq!(consult.replies[0].from, agent("peerA"));
+    assert_eq!(consult.replies[0].body, "reply:hi");
+    assert_eq!(
+        peer.deliveries().len(),
+        1,
+        "the retry must dispatch exactly once"
+    );
+    assert_eq!(
+        sink.entries().len(),
+        1,
+        "exactly ONE audit entry — from the successful retry, none from the failed attempt"
+    );
+    assert_eq!(sink.entries()[0].decision, Some(GateDecision::Approve));
+
+    // Now that it is truly committed, a further commit is a terminal
+    // already-resolved block, never a re-dispatch.
+    let re_commit = call(&client, "commit", json!({"token": "tok-mcp-0"})).await;
+    assert!(is_error(&re_commit));
+    assert_eq!(
+        text_of(&re_commit),
+        "blocked: approval token already resolved"
+    );
+    assert_eq!(
+        peer.deliveries().len(),
+        1,
+        "a terminal re-commit must never dispatch again"
+    );
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// Bug 3 (security) — Tier-2 approval tokens must be unguessable, not the
+// old sequential `tok-mcp-{seq}` counter. `WaslMcp` is `Clone` over a shared
+// `Arc<Mutex<WaslState>>`, so nothing else stops a second session from
+// calling `commit` with a token it merely guessed; only the token's own
+// unguessability protects it. Deliberately uses the PRODUCTION
+// `with_gating` constructor (not `with_seams` + `CounterTokenIds`, unlike
+// every other test in this file) so this proves what actually ships.
+// =======================================================================
+
+#[tokio::test]
+async fn prepared_tokens_are_not_sequential_or_guessable() {
+    let peer = spawn_a2a_echo().await;
+    let sink = SharedSink::default();
+    let state = WaslState::new(AuditLog::new(sink), http_client(), PanicRunner);
+    let handler: Handler = WaslMcp::with_gating(
+        agent("me"),
+        host("h1"),
+        registry_with_peer_a(&peer.url),
+        state,
+        GateAuthority::PrepareCommit,
+        None,
+    );
+    let (client, server) = connect(handler, ()).await;
+
+    let first = call(
+        &client,
+        "consult",
+        json!({"peers": ["peerA"], "question": "hi"}),
+    )
+    .await;
+    let second = call(
+        &client,
+        "consult",
+        json!({"peers": ["peerA"], "question": "hi"}),
+    )
+    .await;
+
+    let tok1 = decode::<Value>(&first)["token"]
+        .as_str()
+        .expect("token string")
+        .to_string();
+    let tok2 = decode::<Value>(&second)["token"]
+        .as_str()
+        .expect("token string")
+        .to_string();
+
+    assert_ne!(
+        tok1, tok2,
+        "two distinct prepared gates get distinct tokens"
+    );
+    assert_ne!(tok1, "tok-mcp-0", "must not be the old sequential scheme");
+    assert_ne!(tok2, "tok-mcp-1", "must not be the old sequential scheme");
+
+    // Unguessable: 128 bits of hex payload after the fixed prefix, and the
+    // two draws must not merely be adjacent integers (the whole point of
+    // the fix — a guessable/enumerable scheme, even a non-decimal one,
+    // would still defeat the purpose).
+    let mut values = Vec::new();
+    for tok in [&tok1, &tok2] {
+        let payload = tok.strip_prefix("tok-mcp-").expect("tok-mcp- prefix");
+        assert_eq!(payload.len(), 32, "128 bits of hex payload: {tok}");
+        assert!(
+            payload.chars().all(|c| c.is_ascii_hexdigit()),
+            "hex payload: {tok}"
+        );
+        values.push(u128::from_str_radix(payload, 16).expect("valid hex"));
+    }
+    assert!(
+        values[0].abs_diff(values[1]) > 1,
+        "tokens must not be sequential/adjacent integers"
     );
 
     client.cancel().await.expect("client shutdown");

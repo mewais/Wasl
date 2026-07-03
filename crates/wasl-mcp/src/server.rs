@@ -19,6 +19,7 @@
 //! See `docs/specs/mcp-gating.md`.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use rmcp::handler::server::tool::ToolRouter;
@@ -184,6 +185,72 @@ impl<K: Sink, R: Runner> WaslState<K, R> {
 }
 
 // ---------------------------------------------------------------------
+// 1.5 TokenIds — Tier-2 approval-token minting (unguessable in production)
+// ---------------------------------------------------------------------
+//
+// A Tier-2 approval token is a bearer credential: whoever presents it to
+// `commit` redeems the human's decision, and `WaslMcp` is `Clone` over a
+// shared `Arc<Mutex<WaslState>>`, so nothing else stops a second session
+// from calling `commit` with a token it merely guessed. The old
+// `ApprovalToken(format!("tok-mcp-{seq}"))` scheme minted them off the same
+// monotonic counter `finish_call` uses for audit/envelope ids — sequential
+// and therefore enumerable (see `docs/specs/mcp-gating.md` §5, now
+// superseded by this seam). `TokenIds` (mirrors `wasl_operator::GateIds`)
+// decouples "how a token is minted" from the rest of the flow so production
+// can use an unguessable source while tests stay deterministic.
+
+/// Injectable source of Tier-2 approval-token ids. Production MUST use an
+/// unguessable id ([`RandomTokenIds`], the default via [`WaslMcp::new`] /
+/// [`WaslMcp::with_gating`]); a deterministic sequence ([`CounterTokenIds`])
+/// is for tests only, via [`WaslMcp::with_seams`].
+pub trait TokenIds: Send + Sync {
+    fn next(&self) -> String;
+}
+
+/// Draw a `u64` with no guessable relationship to any other value this
+/// process has drawn: a fresh `std::collections::hash_map::RandomState` (the
+/// same OS-seeded, SipHash-keyed construction `HashMap` uses for its own
+/// HashDoS resistance — no `rand` dependency needed) hashes the wall-clock
+/// nanosecond count, so the output depends on both a key an external caller
+/// cannot observe and an input they cannot predict in advance.
+fn random_u64() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u128(nanos);
+    hasher.finish()
+}
+
+/// Production default: a 128-bit opaque, unguessable token (two independent
+/// [`random_u64`] draws, rendered lowercase hex) — no sequential counter, no
+/// cross-session predictability.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RandomTokenIds;
+
+impl TokenIds for RandomTokenIds {
+    fn next(&self) -> String {
+        format!("tok-mcp-{:016x}{:016x}", random_u64(), random_u64())
+    }
+}
+
+/// Deterministic ids for tests: `"tok-mcp-0"`, `"tok-mcp-1"`, ... (the
+/// pre-fix sequence). NEVER use in production — the whole point of this
+/// block is that production tokens must not be predictable.
+#[derive(Debug, Default)]
+pub struct CounterTokenIds(AtomicU64);
+
+impl TokenIds for CounterTokenIds {
+    fn next(&self) -> String {
+        let n = self.0.fetch_add(1, Ordering::Relaxed);
+        format!("tok-mcp-{n}")
+    }
+}
+
+// ---------------------------------------------------------------------
 // 2. The handler
 // ---------------------------------------------------------------------
 
@@ -201,6 +268,9 @@ pub struct WaslMcp<K: Sink, R: Runner> {
     /// The operator surface, if `[operator] bind` is configured. `Some` is
     /// the only source of `ClientCaps::external = true` (`detect_caps`).
     hub: Option<OperatorHub>,
+    /// Tier-2 approval-token minting (`RandomTokenIds` in production; a
+    /// deterministic sequence only under `with_seams`, for tests).
+    token_ids: Arc<dyn TokenIds>,
 }
 
 impl<K, R> WaslMcp<K, R>
@@ -227,7 +297,9 @@ where
     }
 
     /// The full W4 constructor: a configured [`GateAuthority`] and an
-    /// optional attached [`OperatorHub`].
+    /// optional attached [`OperatorHub`]. Always mints unguessable Tier-2
+    /// tokens ([`RandomTokenIds`]) — see [`WaslMcp::with_seams`] for the
+    /// deterministic-for-tests variant.
     pub fn with_gating(
         self_id: AgentId,
         self_host: HostId,
@@ -235,6 +307,31 @@ where
         state: WaslState<K, R>,
         authority: GateAuthority,
         hub: Option<OperatorHub>,
+    ) -> Self {
+        Self::with_seams(
+            self_id,
+            self_host,
+            registry,
+            state,
+            authority,
+            hub,
+            Arc::new(RandomTokenIds),
+        )
+    }
+
+    /// The full seam constructor: everything `with_gating` takes, plus an
+    /// injectable [`TokenIds`] source. Production code should use
+    /// [`WaslMcp::new`]/[`WaslMcp::with_gating`] (unguessable tokens by
+    /// default); this exists so tests can pin deterministic token literals
+    /// (`CounterTokenIds`) without weakening the production default.
+    pub fn with_seams(
+        self_id: AgentId,
+        self_host: HostId,
+        registry: PeerRegistry,
+        state: WaslState<K, R>,
+        authority: GateAuthority,
+        hub: Option<OperatorHub>,
+        token_ids: Arc<dyn TokenIds>,
     ) -> Self {
         Self {
             self_id,
@@ -244,6 +341,7 @@ where
             tool_router: Self::tool_router(),
             authority,
             hub,
+            token_ids,
         }
     }
 
@@ -353,8 +451,8 @@ where
     ) -> CallToolResult {
         let (token, req) = {
             let mut state = self.state.lock().await;
-            let seq = state.next_seq();
-            let token = ApprovalToken(format!("tok-mcp-{seq}"));
+            // Unguessable, not the sequential seq counter — see `TokenIds`.
+            let token = ApprovalToken(self.token_ids.next());
             let req = build_request(
                 token.0.clone(),
                 kind,
@@ -586,37 +684,74 @@ where
         let token = ApprovalToken(args.token);
         let mut state = self.state.lock().await;
 
-        if let Some(outcome) = state.decisions.remove(&token) {
-            // The ledger needs SOME decision to retire the token; the AUDIT
-            // decision (recorded below, inside `finish_call`) is
-            // `outcome.to_decision()`, which correctly records `None` for a
-            // dismissal.
-            state
-                .ledger
-                .commit(&token, ledger_decision_of(&outcome))
-                .expect(
+        // `decisions.remove` is the single-winner gate: at most one
+        // concurrent `commit` call can walk away with `Some(outcome)` for a
+        // given token (a second caller sees `None` below and, since the
+        // ledger is still pending until this call finishes, gets the
+        // idempotent poll reply instead of racing the dispatch).
+        let outcome = match state.decisions.remove(&token) {
+            Some(outcome) => outcome,
+            None => {
+                if state.ledger.is_pending(&token) {
+                    // The human has not decided yet: idempotent poll.
+                    return Ok(pending_result(&token));
+                }
+                let err = classify_not_pending(&mut state.ledger, &token);
+                return Ok(reply_to_result(ToolReply::Blocked {
+                    reason: err.to_string(),
+                }));
+            }
+        };
+        // Durability-first, like every other tier: do NOT touch the ledger
+        // or `pending_calls` yet. `finish_call` -> `resolve_and_dispatch`
+        // records the audit entry BEFORE it dispatches anything, and an
+        // audit-sink failure fails the whole call (handle.rs's own
+        // contract) — if we had already consumed the ledger token here (the
+        // old behavior), that failure would strand the human's approval:
+        // the token could never be re-committed, and the decision would
+        // vanish with no audit trace. Peeking the remembered call (cheap —
+        // `ToolCall` is `Clone`) instead of removing it keeps the token
+        // re-committable across a transient failure.
+        let call = state
+            .pending_calls
+            .get(&token)
+            .expect("pending_calls in lockstep with decisions: a decided token's call is still remembered")
+            .clone();
+        drop(state);
+
+        // The ONE audit record for this gate is written here, at commit —
+        // not at prepare. No `resolve_announced`: when the operator is on,
+        // the hub already broadcast `GateDecided` at POST/timeout time.
+        match self.finish_call(&outcome, call).await {
+            Ok(reply) => {
+                // The audit record is durably written (and dispatch, if
+                // approved, already ran) — NOW it is safe to irreversibly
+                // retire the token.
+                let mut state = self.state.lock().await;
+                state.pending_calls.remove(&token);
+                state
+                    .ledger
+                    .commit(&token, ledger_decision_of(&outcome))
+                    .expect(
                     "ledger in lockstep with decisions: a decided token is always still pending",
                 );
-            let call = state
-                .pending_calls
-                .remove(&token)
-                .expect("pending_calls in lockstep with the ledger");
-            drop(state);
-            // The ONE audit record for this gate is written here, at commit —
-            // not at prepare. No `resolve_announced`: when the operator is on,
-            // the hub already broadcast `GateDecided` at POST/timeout time.
-            return self.finish_call(&outcome, call).await;
+                Ok(reply)
+            }
+            Err(err) => {
+                // The audit write failed before anything was dispatched
+                // (`resolve_and_dispatch` is durability-first) — restore the
+                // decision so the human's approval is not lost: the ledger
+                // token and `pending_calls` entry are still exactly as they
+                // were before this call, so a retry of `commit` (once the
+                // transient sink failure clears) redeems it exactly once.
+                // `or_insert` (not a plain insert) preserves "first decision
+                // wins" if a fresh decision somehow landed in the meantime
+                // (the same idiom `prepare_call`'s background waiter uses).
+                let mut state = self.state.lock().await;
+                state.decisions.entry(token).or_insert(outcome);
+                Err(err)
+            }
         }
-
-        if state.ledger.is_pending(&token) {
-            // The human has not decided yet: idempotent poll.
-            return Ok(pending_result(&token));
-        }
-
-        let err = classify_not_pending(&mut state.ledger, &token);
-        Ok(reply_to_result(ToolReply::Blocked {
-            reason: err.to_string(),
-        }))
     }
 }
 
