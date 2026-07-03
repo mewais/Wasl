@@ -1,5 +1,8 @@
 # E2E — `wasl-e2e` — cross-crate scenario suite — spec (authoritative)
 
+> **⚠️ SUPERSEDED (2026-07 cycle):** the `wasl-daemon`/`wasl-mailbox`/`Mesh` dispatch path described below was RETIRED and DELETED this cycle. `wasl-e2e` now composes gate+audit with **`wasl-dispatch` over real loopback A2A** (`wasl-a2a-server` + `AdapterExecutor`); see the crate's `AGENTS.md` for the 1:1 old→new scenario mapping. This file is kept for design history only.
+
+
 **Tests-only crate** (empty `src`). Composes the whole Wasl stack over its real trait seams, driven by
 fakes, to prove the blocks integrate into the intended system: a tool call is **gated** (server, three
 tiers) and, only on approval, **dispatched** to peers (daemon) and **recorded** (audit) — with the Tier-3

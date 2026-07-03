@@ -64,7 +64,7 @@ fn gate_err(result: Result<Verdict, ServerError>) -> Result<Verdict, NodeError> 
 pub struct Node<S: Surfacer, K: Sink> {
     self_id: AgentId,
     /// This node's host identity (part of the node's identity; routing over the
-    /// mesh is the daemon's concern, so it is not read on the loopback send path).
+    /// peer transport is the dispatch/node layer's concern (over A2A), so it is not read on the loopback send path).
     #[allow(dead_code)]
     self_host: HostId,
     gate: Gatekeeper<S, K>,

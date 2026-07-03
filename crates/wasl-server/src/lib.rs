@@ -5,7 +5,7 @@
 //! surfaced synchronously through the `Surfacer` trait; Tier-2 (prepare/commit)
 //! defers via the gate ledger and resolves on a later `commit`. Pure
 //! orchestration over the `Surfacer` seam + `wasl_audit::Sink` — routing and
-//! transport live in the daemon (WD). See `docs/specs/server.md`.
+//! transport lives in the dispatch/node layer over A2A. See `docs/specs/node.md`.
 
 use std::collections::HashMap;
 use std::fmt;

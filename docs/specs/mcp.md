@@ -1,5 +1,8 @@
 # MCP — `wasl-mcp` (`wasl-mcpd`) — MCP server facade — spec (authoritative)
 
+> **⚠️ SUPERSEDED (2026-07 cycle):** the dispatch section below (`wasl_daemon::{consult|command|message|transfer}`, `Mesh`) is SUPERSEDED. `wasl-mcpd` now dispatches over **real A2A** via `wasl-dispatch`, with config-driven peers (`node-config.md`), real three-tier gating (`mcp-gating.md`), and an optional operator surface (`operator.md`). The `wasl-daemon`/`wasl-mailbox` crates are deleted. This file's gate/audit spine remains accurate; treat the transport bits as history.
+
+
 **Tier:** L2 (IO shell over tested cores). **Deps:** `rmcp` (0.9, `server` + `transport-io`), `tokio`, all
 Wasl logic crates (`proto`, `gate`, `audit`, `registry`, `mailbox`, `transfer`, `server`, `daemon`),
 `serde`/`serde_json`. This crate is the **transport/runtime shell** — it adds NO new decision or routing
