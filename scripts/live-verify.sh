@@ -120,7 +120,7 @@ RAND_WORD() { # a short, hard-to-collide token for exact-match probes.
   # Deliberately shaped like a mundane build tag: probes phrased as bare
   # "reply with exactly: <token>" with tier-name prefixes ("elicit",
   # "external") trip claude's prompt-injection heuristic and get REFUSED
-  # (observed live 2026-07-02; same class as Marsad's i10 BANANA finding).
+  # (observed live 2026-07-02; same class of prompt-injection-heuristic refusal seen elsewhere).
   # The $1 tier tag stays out of the token; it's only for caller bookkeeping.
   echo "build-$$-${RANDOM}"
 }

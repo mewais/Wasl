@@ -10,7 +10,7 @@ tracking.
 
 ## ⚠️ CONTRACT STATUS — VERIFIED AGAINST THE REAL CLI (codex-cli 0.142.5, 2026-07-02)
 
-Ground truth is the R2 codex research doc (`Marsad/docs/specs/codex-research.md`), verified against the
+Ground truth is the codex research (maintained by the consuming project), verified against the
 real installed binary with two live model calls plus recursive `--help` trees, generated protocol schemas,
 and direct reads of the on-disk session files. The facts this spec depends on, and their status:
 
@@ -193,7 +193,7 @@ once the `turn.failed` exit behavior is live-verified.
 the flag exists on interactive `codex`/`codex resume`/`codex fork` only, and the live session recorded
 `"never"` unrequested). **Therefore this adapter can never surface an interactive approval prompt** — mid-
 turn HITL gating is structurally unavailable in spawn-per-turn exec mode (it exists only in `codex
-app-server`'s JSON-RPC protocol, which is Marsad's territory, not Wasl's). The consequences, stated
+app-server`'s JSON-RPC protocol, which is the consuming supervisor's territory, not Wasl's). The consequences, stated
 plainly:
 
 - The receive side's ONLY risk control is the up-front sandbox tier, and this spec pins it to

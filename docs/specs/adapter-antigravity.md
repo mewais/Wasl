@@ -10,7 +10,7 @@ seam + `ProcessCliInvoker` + per-context session ledger.
 
 ## ⚠️ CONTRACT STATUS — PARTIALLY LIVE-VERIFIED (agy 1.0.15, amended 2026-07-03)
 
-Ground truth was originally the antigravity research doc (`Marsad/docs/specs/antigravity-research.md`),
+Ground truth was originally the antigravity research (maintained by the consuming project),
 produced against the real installed binary (`~/.local/bin/agy`, 1.0.15) under a hard **zero-live-call
 constraint** (free-tier account): every fact came from `--help` output, `agy models`/`agy changelog`,
 binary string tables, and real on-disk state — **not one `agy -p` invocation was ever run** at authoring
@@ -105,7 +105,7 @@ amendment, not a silent code fix — exactly as this W8′-fix correction itself
   (mapping below — corrected 2026-07-03: success keys off `conversation_id`+`response` presence, NOT
   `status`/`error`). No mid-turn events exist: a `-p` turn is **call-and-wait**, with zero visibility into
   tool calls/thinking while running (the research's `transcript_full.jsonl` tailing idea is
-  observe-side Marsad territory, explicitly out of W8′ scope).
+  observe-side supervisor territory, explicitly out of W8′ scope).
 - **`--print-timeout` left at its `5m0s` default** in adapter argv — it bounds any residual hang; the
   permission probe passes a short explicit value (test plan).
 
