@@ -8,7 +8,7 @@ Fully standalone. Wasl gates itself via MCP elicitation (or a tool-level `prepar
 can optionally surface its gates + an observation feed to any **external supervisor/dashboard** — which just
 implements Wasl's generic `Surfacer` / audit `Sink` seams — but names or requires none. See
 [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the block map, the three-tier gate design, and the
-per-host daemon mesh. Built in Rust (official `rmcp` MCP SDK), test-first, 100%-coverage per block.
+per-host node mesh (each host runs a `wasl-mcpd` node; nodes peer over A2A). Built in Rust (official `rmcp` MCP SDK), test-first, 100%-coverage per block.
 
 ## Status
 Greenfield. Standing up the block-decomposed core (M1) test-first.
