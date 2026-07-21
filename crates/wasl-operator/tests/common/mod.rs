@@ -130,6 +130,7 @@ pub fn filler_entry(seq: u64) -> AuditEntry {
         targets: vec![],
         summary: "filler".to_string(),
         decision: None,
+        ..Default::default()
     }
 }
 

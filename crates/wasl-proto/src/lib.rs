@@ -23,6 +23,13 @@ pub struct AgentId(pub String);
 #[serde(transparent)]
 pub struct HostId(pub String);
 
+/// A request-correlation id threaded across A2A by the live-runtime feature's
+/// `Causation`/`TurnRequest` types. Mirrors `AgentId`/`HostId` exactly: a
+/// `#[serde(transparent)]` tuple newtype over `String`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RequestId(pub String);
+
 impl AgentId {
     pub fn as_str(&self) -> &str {
         &self.0
@@ -30,6 +37,12 @@ impl AgentId {
 }
 
 impl HostId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl RequestId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -198,7 +211,34 @@ impl ElicitationResponse {
 }
 
 // ---------------------------------------------------------------------
-// 6. Error
+// 6. Runtime delivery certainty
+// ---------------------------------------------------------------------
+
+/// The live-runtime delivery-certainty of a turn.
+///
+/// Owned HERE in L0 `wasl-proto` so it can be shared by both `wasl-audit`
+/// (the durable record — stored on an `AuditEntry`) and `wasl-runtime` (the
+/// live scheduler / per-target actor) WITHOUT a dependency cycle: `wasl-runtime`
+/// depends on `wasl-audit`, so a type both must reference cannot live in
+/// `wasl-runtime`. Vocabulary + snake_case wire form per `docs/specs/runtime.md`
+/// §8.1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryCertainty {
+    /// Never reached the session.
+    NotInjected,
+    /// Handed to the session, outcome pending.
+    Injected,
+    /// Turn completed (reply captured) OR a definite in-session failure.
+    Completed,
+    /// Failed before any side effect could occur — SAFE to retry.
+    FailedBeforeInjection,
+    /// Crash/disconnect AFTER injection — MAY have caused a side effect.
+    OutcomeUnknown,
+}
+
+// ---------------------------------------------------------------------
+// 7. Error
 // ---------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]

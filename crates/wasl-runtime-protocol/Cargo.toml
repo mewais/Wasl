@@ -1,0 +1,19 @@
+[package]
+name = "wasl-runtime-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl runtime protocol (R2): concrete interactive drivers over the R1 driver seam (Phase-1: skeleton — the traits + ProtocolEvent live in R1)"
+
+[dependencies]
+wasl-runtime = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

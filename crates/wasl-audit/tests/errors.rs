@@ -49,6 +49,7 @@ fn entry(seq: u64, actor: &str, target: &str, summary: &str) -> AuditEntry {
         targets: vec![agent(target)],
         summary: summary.to_string(),
         decision: None,
+        ..Default::default()
     }
 }
 

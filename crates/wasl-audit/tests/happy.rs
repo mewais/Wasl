@@ -53,6 +53,7 @@ fn entry(seq: u64, kind: EntryKind, actor: &str, targets_: &[&str], summary: &st
         targets: targets(targets_),
         summary: summary.to_string(),
         decision: None,
+        ..Default::default()
     }
 }
 

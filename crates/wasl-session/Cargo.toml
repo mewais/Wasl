@@ -1,0 +1,19 @@
+[package]
+name = "wasl-session"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "wasl-session (R3): Wasl's local control-surface binary (Phase-1: crate/bin skeleton over the R1 public vocabulary)"
+
+[[bin]]
+name = "wasl-session"
+path = "src/main.rs"
+
+[dependencies]
+wasl-runtime = { workspace = true }
+wasl-proto = { workspace = true }
+
+[dev-dependencies]

@@ -172,6 +172,7 @@ pub async fn resolve_and_dispatch<K: Sink>(
         targets,
         summary: format!("gate {kind:?}"),
         decision: outcome.to_decision(),
+        ..Default::default()
     };
     audit.record(entry)?;
 

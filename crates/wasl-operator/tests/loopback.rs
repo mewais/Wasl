@@ -478,6 +478,7 @@ async fn l8_audit_tee_over_http_matches_inner_sink_entry() {
         targets: vec![AgentId("wasl-b".to_string())],
         summary: "message to 1 peer(s)".to_string(),
         decision: None,
+        ..Default::default()
     };
     tee.append(&entry).expect("tee append ok");
 

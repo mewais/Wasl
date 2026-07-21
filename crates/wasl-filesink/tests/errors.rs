@@ -20,6 +20,7 @@ fn entry(seq: u64, summary: &str) -> AuditEntry {
         targets: vec![agent("bob")],
         summary: summary.to_string(),
         decision: None,
+        ..Default::default()
     }
 }
 

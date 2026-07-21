@@ -201,6 +201,7 @@ fn record_decision(
         targets,
         summary: format!("gate {kind:?}"),
         decision,
+        ..Default::default()
     };
     recorder
         .record_entry(entry)

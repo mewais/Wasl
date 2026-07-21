@@ -22,6 +22,9 @@ members = [
     "crates/wasl-adapter-codex",
     "crates/wasl-adapter-antigravity",
     "crates/wasl-adapter-opencode",
+    "crates/wasl-runtime",
+    "crates/wasl-runtime-protocol",
+    "crates/wasl-session",
 ]
 
 [workspace.package]
@@ -52,6 +55,9 @@ wasl-adapter-codex = { path = "crates/wasl-adapter-codex" }
 wasl-adapter-antigravity = { path = "crates/wasl-adapter-antigravity" }
 wasl-adapter-opencode = { path = "crates/wasl-adapter-opencode" }
 wasl-server = { path = "crates/wasl-server" }
+wasl-runtime = { path = "crates/wasl-runtime" }
+wasl-runtime-protocol = { path = "crates/wasl-runtime-protocol" }
+wasl-session = { path = "crates/wasl-session" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"

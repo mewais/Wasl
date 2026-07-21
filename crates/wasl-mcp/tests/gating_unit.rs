@@ -448,6 +448,7 @@ fn entry(seq: u64) -> AuditEntry {
         targets: vec![AgentId("target".to_string())],
         summary: "gate Message".to_string(),
         decision: None,
+        ..Default::default()
     }
 }
 

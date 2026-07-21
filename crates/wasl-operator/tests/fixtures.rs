@@ -223,6 +223,7 @@ fn fixture_audit_decision_matches_hub_broadcast() {
         targets: vec![AgentId("wasl-b".to_string())],
         summary: "gate Message".to_string(),
         decision: Some(GateDecision::Approve),
+        ..Default::default()
     };
     hub.publish_audit(&entry);
     let f = rx.try_recv().expect("audit frame").frame;
@@ -243,6 +244,7 @@ fn fixture_audit_message_matches_hub_broadcast() {
         targets: vec![AgentId("wasl-b".to_string())],
         summary: "message to 1 peer(s)".to_string(),
         decision: None,
+        ..Default::default()
     };
     hub.publish_audit(&entry);
     let f = rx.try_recv().expect("audit frame").frame;

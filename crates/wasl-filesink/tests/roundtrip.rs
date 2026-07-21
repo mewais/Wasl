@@ -31,6 +31,7 @@ fn entry(
         targets: targets(targets_),
         summary: summary.to_string(),
         decision,
+        ..Default::default()
     }
 }
 

@@ -483,6 +483,7 @@ fn h11a_tee_sink_broadcasts_only_after_durable_append_succeeds() {
         targets: vec![AgentId("wasl-b".to_string())],
         summary: "message to 1 peer(s)".to_string(),
         decision: None,
+        ..Default::default()
     };
     tee.append(&entry).expect("append ok");
 
@@ -508,6 +509,7 @@ fn h11b_tee_sink_inner_error_propagates_and_broadcasts_nothing() {
         targets: vec![],
         summary: "boom".to_string(),
         decision: None,
+        ..Default::default()
     };
     let err = tee.append(&entry).unwrap_err();
     assert_eq!(err, wasl_audit::AuditError::Sink("disk full".to_string()));
@@ -529,6 +531,7 @@ fn h11c_tee_sink_ok_with_zero_subscribers() {
         targets: vec![],
         summary: "no one is listening".to_string(),
         decision: None,
+        ..Default::default()
     };
     tee.append(&entry)
         .expect("append ok even with zero subscribers");
@@ -546,6 +549,7 @@ fn h11d_tee_sink_into_inner_returns_the_wrapped_sink() {
         targets: vec![],
         summary: "s".to_string(),
         decision: None,
+        ..Default::default()
     };
     tee.append(&entry).unwrap();
     let inner = tee.into_inner();
@@ -595,6 +599,7 @@ fn h12_frame_variants_serialize_the_wire_payload_untagged() {
         targets: vec![],
         summary: "s".to_string(),
         decision: None,
+        ..Default::default()
     };
     let au = Frame::Audit {
         entry: entry.clone(),

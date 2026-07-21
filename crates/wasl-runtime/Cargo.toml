@@ -1,0 +1,33 @@
+[package]
+name = "wasl-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wasl runtime (R1): generic managed-runtime core — the type/trait surface for live targets, the driver seam, and the public TurnEvent vocabulary"
+
+[dependencies]
+wasl-proto = { workspace = true }
+wasl-audit = { workspace = true }
+wasl-adapter = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+
+[lints.clippy]
+# tests/control_api_wire.rs (frozen, owned by the test-agent) calls
+# `serde_json::to_value(&caps)` where `caps` is a `RuntimeCapabilities` — which
+# the spec (§2) mandates be `Copy`. On a `Copy` type the `&` trips
+# clippy::needless_borrows_for_generic_args (a pure STYLE lint). The code-agent
+# cannot edit tests/**, and `Copy` is spec-required, so silence this style lint
+# package-wide. `src/` contains no needless borrow (the lib is clippy-clean).
+# Same repo convention as wasl-adapter-claude/-codex/-opencode/-antigravity.
+needless_borrows_for_generic_args = "allow"
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
