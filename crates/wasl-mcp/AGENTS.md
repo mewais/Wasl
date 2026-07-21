@@ -244,3 +244,24 @@ in one pinned arm by W4 §7), `../../docs/specs/node-config.md` (W2 — node con
   ticks up correspondingly to **86.73% lines** / 83.10% regions (from 86.57%/82.98%) — `lib.rs`'s residual
   20.33% region / 19.64% line untested-IO-shell status is unchanged (the doc-comment edit there carries no new
   executable code), and no other file's numbers moved.
+- **M1 (`src/server.rs`, `Cargo.toml`, security hardening):** `RandomTokenIds` — the Tier-2 approval-token
+  generator — now draws its 128 bits from the **OS CSPRNG via `getrandom`** (`getrandom::getrandom(&mut [u8;8])`
+  per draw, two draws per token), replacing the old `random_u64` that hashed `SystemTime::now()` nanoseconds
+  through a `std::collections::hash_map::RandomState` (SipHash — stdlib-documented as HashDoS-resistant,
+  explicitly NOT cryptographic, and fed a low-entropy/predictable wall-clock input). The public contract is
+  byte-for-byte unchanged: `RandomTokenIds: TokenIds`, `next()` still returns `"tok-mcp-"` + 32 lowercase hex
+  (`{:016x}{:016x}`); `CounterTokenIds` (the deterministic test seam) is untouched. `getrandom` is fail-closed
+  (`.expect` on OS-entropy failure — a machine that cannot supply cryptographic entropy must not mint bearer
+  approval tokens). `getrandom = "0.2"` is a DIRECT dep (pinned to the `0.2.17` already resolved in the build
+  graph via `ring`, so `Cargo.lock` did not change and no duplicate/forked getrandom major was introduced); NOT
+  `rand` (heavier, unnecessary).
+- **Testability honesty (M1):** the CSPRNG switch is a **SOURCE-LEVEL** security property — the correctness of
+  M1 is that `server.rs`'s `random_u64` now reads from a documented OS CSPRNG, which is verified by reading the
+  source (dev-manager review), NOT by a red→green test flip. The black-box `tests/token_ids.rs` suite (6 tests:
+  format, 10k-uniqueness, per-half high-cardinality, no-fixed-stride, portable concurrency, `CounterTokenIds`
+  contrast) is a **REGRESSION NET, not a CSPRNG proof**: statistically a genuine CSPRNG passes all six with
+  certainty, but these tests cannot themselves prove the source is a CSPRNG (the tester honestly reported the
+  weak timestamp-hash impl also passed them — they can't distinguish the two statistically under a normal
+  clock). All six stay green on the hardened impl. No coverage % is claimed for `server.rs` here (it is NOT
+  under a 100% gate per this crate's coverage-honesty stance above); the new `getrandom` call sits inside the
+  already-exercised token path and does not change any of the stated 100%-gated `config.rs`/`gating.rs` numbers.

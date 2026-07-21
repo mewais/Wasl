@@ -69,6 +69,13 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "syn
 # root Cargo.toml [workspace.dependencies] table is owned by a concurrently
 # landing crate, so this dep is direct here rather than workspace-hoisted.
 toml = "0.8"
+# M1: the OS CSPRNG source for `RandomTokenIds` (src/server.rs) — 128-bit,
+# cryptographically-strong Tier-2 approval tokens instead of the old
+# SystemTime-nanos-hashed-through-SipHash-`RandomState` (HashDoS-resistant, NOT
+# cryptographic). Pinned to "0.2" to reuse the getrandom 0.2.17 already resolved
+# in the build graph (via `ring`), so no duplicate/forked getrandom major is
+# introduced. Direct (not workspace-hoisted) for the same reason `toml` is above.
+getrandom = "0.2"
 
 [dev-dependencies]
 # Client + async-rw transport, dev-only, so the smoke test can drive the server

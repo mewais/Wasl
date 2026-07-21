@@ -207,27 +207,28 @@ pub trait TokenIds: Send + Sync {
     fn next(&self) -> String;
 }
 
-/// Draw a `u64` with no guessable relationship to any other value this
-/// process has drawn: a fresh `std::collections::hash_map::RandomState` (the
-/// same OS-seeded, SipHash-keyed construction `HashMap` uses for its own
-/// HashDoS resistance — no `rand` dependency needed) hashes the wall-clock
-/// nanosecond count, so the output depends on both a key an external caller
-/// cannot observe and an input they cannot predict in advance.
+/// Draw a `u64` straight from the operating system's cryptographically secure
+/// pseudo-random number generator (OS CSPRNG) via the `getrandom` crate: eight
+/// bytes of OS entropy assembled little-endian. This is genuine cryptographic
+/// randomness — the output is unpredictable to any external observer and has no
+/// derivable relationship to any other value this process has drawn.
+///
+/// `getrandom` is fail-closed: if the OS CSPRNG is unavailable this `.expect`s
+/// and aborts token minting rather than falling back to a weaker source. A
+/// machine that cannot supply cryptographic entropy must not mint Tier-2
+/// approval tokens at all (a bearer credential minted from a degraded source
+/// would be a silent security regression), so failing loud here is deliberate.
 fn random_u64() -> u64 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let mut hasher = RandomState::new().build_hasher();
-    hasher.write_u128(nanos);
-    hasher.finish()
+    let mut buf = [0u8; 8];
+    getrandom::getrandom(&mut buf).expect("OS CSPRNG (getrandom) must not fail");
+    u64::from_le_bytes(buf)
 }
 
-/// Production default: a 128-bit opaque, unguessable token (two independent
-/// [`random_u64`] draws, rendered lowercase hex) — no sequential counter, no
-/// cross-session predictability.
+/// Production default: a 128-bit opaque, unguessable token drawn from the OS
+/// CSPRNG (two independent [`random_u64`] draws via `getrandom`, rendered
+/// lowercase hex) — no sequential counter, no cross-session predictability, and
+/// no reliance on wall-clock timing. 128 bits of OS-provided cryptographic
+/// randomness make the token infeasible to guess.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RandomTokenIds;
 
