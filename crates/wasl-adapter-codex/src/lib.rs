@@ -190,7 +190,15 @@ impl CliInvoker for ProcessCliInvoker {
 
         if let Some(mut si) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
-            si.write_all(stdin.as_bytes()).await.map_err(ad)?;
+            match si.write_all(stdin.as_bytes()).await {
+                Ok(()) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::WriteZero
+                    ) => {}
+                Err(e) => return Err(ad(e)),
+            }
         }
 
         let output = child.wait_with_output().await.map_err(ad)?;
