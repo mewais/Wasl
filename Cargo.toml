@@ -21,6 +21,7 @@ members = [
     "crates/wasl-adapter-claude",
     "crates/wasl-adapter-codex",
     "crates/wasl-adapter-antigravity",
+    "crates/wasl-adapter-opencode",
 ]
 
 [workspace.package]
@@ -49,6 +50,7 @@ wasl-procrunner = { path = "crates/wasl-procrunner" }
 wasl-adapter-claude = { path = "crates/wasl-adapter-claude" }
 wasl-adapter-codex = { path = "crates/wasl-adapter-codex" }
 wasl-adapter-antigravity = { path = "crates/wasl-adapter-antigravity" }
+wasl-adapter-opencode = { path = "crates/wasl-adapter-opencode" }
 wasl-server = { path = "crates/wasl-server" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

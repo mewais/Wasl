@@ -56,6 +56,9 @@ wasl-adapter-codex = { workspace = true }
 # W8'b (`docs/specs/adapter-antigravity.md`): the receive-side agy-backed
 # NodeAdapter variant (`build_adapter` in src/config.rs).
 wasl-adapter-antigravity = { workspace = true }
+# W9 (`docs/specs/adapter-opencode.md`): the receive-side opencode-backed
+# NodeAdapter variant (`build_adapter` in src/config.rs).
+wasl-adapter-opencode = { workspace = true }
 wasl-node = { workspace = true }
 # NodeAdapter's `impl AgentAdapter` (src/config.rs) delegates via
 # `#[async_trait::async_trait]`, same macro the trait itself is defined with.

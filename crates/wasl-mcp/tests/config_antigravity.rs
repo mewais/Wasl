@@ -141,6 +141,9 @@ fn build_adapter_selects_the_antigravity_variant_for_adapter_kind_antigravity() 
         NodeAdapter::Antigravity(_) => {}
         NodeAdapter::Claude(_) => panic!("kind Antigravity must build NodeAdapter::Antigravity"),
         NodeAdapter::Codex(_) => panic!("kind Antigravity must build NodeAdapter::Antigravity"),
+        NodeAdapter::Opencode(_) => {
+            panic!("kind Antigravity must build NodeAdapter::Antigravity")
+        }
     }
 }
 
@@ -159,6 +162,7 @@ fn build_adapter_still_selects_the_claude_variant_for_adapter_kind_claude() {
                 NodeAdapter::Claude(_) => "Claude",
                 NodeAdapter::Codex(_) => "Codex",
                 NodeAdapter::Antigravity(_) => "Antigravity",
+                NodeAdapter::Opencode(_) => "Opencode",
             }
         ),
     }
@@ -179,6 +183,7 @@ fn build_adapter_still_selects_the_codex_variant_for_adapter_kind_codex() {
                 NodeAdapter::Claude(_) => "Claude",
                 NodeAdapter::Codex(_) => "Codex",
                 NodeAdapter::Antigravity(_) => "Antigravity",
+                NodeAdapter::Opencode(_) => "Opencode",
             }
         ),
     }

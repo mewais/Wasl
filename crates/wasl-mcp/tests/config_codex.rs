@@ -125,6 +125,7 @@ fn build_adapter_selects_the_codex_variant_for_adapter_kind_codex() {
         // `crates/wasl-mcp/AGENTS.md`'s W4 section documents for
         // `tests/config_pure.rs`'s `GateConfig` field addition).
         NodeAdapter::Antigravity(_) => panic!("kind Codex must build NodeAdapter::Codex"),
+        NodeAdapter::Opencode(_) => panic!("kind Codex must build NodeAdapter::Codex"),
     }
 }
 
@@ -143,6 +144,7 @@ fn build_adapter_still_selects_the_claude_variant_for_adapter_kind_claude() {
         // W8'b adds a third `NodeAdapter` variant; see the comment on the
         // sibling match above.
         NodeAdapter::Antigravity(_) => panic!("kind Claude must build NodeAdapter::Claude"),
+        NodeAdapter::Opencode(_) => panic!("kind Claude must build NodeAdapter::Claude"),
     }
 }
 
