@@ -29,6 +29,15 @@
 
 use serde::{Deserialize, Serialize};
 
+// Phase-2A logic modules (the actor / journal / config / providers).
+mod actor;
+mod config;
+mod journal;
+mod provider;
+
+pub use config::ManagedConfig;
+pub use provider::WaslManagedRuntimeProvider;
+
 // `wasl_proto` owns the shared vocabulary (`AgentId`/`RequestId`/`GateDecision`
 // and, critically, `DeliveryCertainty`), re-exported by `wasl-audit`; this crate
 // re-USES those types verbatim rather than defining its own (no dependency
@@ -127,7 +136,7 @@ pub struct RuntimeCapabilities {
 /// detail (that lives behind [`InteractiveProtocol`], §6). Object-safe; used as
 /// `Arc<dyn DeliveryTarget>` (§10).
 #[async_trait::async_trait]
-pub trait DeliveryTarget: Send + Sync {
+pub trait DeliveryTarget: NativeGateResolver + std::fmt::Debug + Send + Sync {
     /// Stable Wasl-side handle (not a CLI-native id). Constant for the target's
     /// lifetime.
     fn target_id(&self) -> &TargetId;
@@ -156,6 +165,23 @@ pub trait DeliveryTarget: Send + Sync {
     /// Shut the target down. Drain finishes the active turn then stops;
     /// Immediate stops now (§7).
     async fn shutdown(&self, mode: ShutdownMode) -> Result<(), RuntimeError>;
+}
+
+/// Native-gate resolution (runtime.md §9 option (i)): a managed target answers a
+/// pending native CLI permission gate through the single-writer actor (never a
+/// raw side-channel). Exposed as an extra trait the managed target implements so
+/// callers can `resolve_native_gate` on the `Arc<dyn DeliveryTarget>` a managed
+/// provider returns via a downcast-free trait-upcast on the concrete handle.
+#[async_trait::async_trait]
+pub trait NativeGateResolver: Send + Sync {
+    /// Resolve the native gate held by `turn_id` with `decision`: the actor
+    /// answers the CLI's prompt over the transport, emits `NativeGateResolved`,
+    /// and returns to `Busy`/`Idle`.
+    async fn resolve_native_gate(
+        &self,
+        turn_id: TurnId,
+        decision: wasl_proto::GateDecision,
+    ) -> Result<(), RuntimeError>;
 }
 
 /// [`DeliveryTarget::events`] returns this: a `Pin<Box<dyn Stream<Item =
@@ -574,6 +600,31 @@ pub trait InteractiveProtocol: Send + Sync {
         native: &NativeSessionId,
         opts: &SpawnOptions,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError>;
+}
+
+/// Blanket forwarding impl so an `Arc<P>` is itself an [`InteractiveProtocol`]
+/// (the managed provider is generic over `P: InteractiveProtocol`; a shared
+/// driver is naturally passed as `Arc<P>`).
+#[async_trait::async_trait]
+impl<T: InteractiveProtocol + ?Sized> InteractiveProtocol for std::sync::Arc<T> {
+    fn capabilities(&self) -> RuntimeCapabilities {
+        (**self).capabilities()
+    }
+
+    async fn spawn(
+        &self,
+        opts: &SpawnOptions,
+    ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
+        (**self).spawn(opts).await
+    }
+
+    async fn resume(
+        &self,
+        native: &NativeSessionId,
+        opts: &SpawnOptions,
+    ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
+        (**self).resume(native, opts).await
+    }
 }
 
 /// A live connection to ONE running agent session. The actor is the SOLE holder —
