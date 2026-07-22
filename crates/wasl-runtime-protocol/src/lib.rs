@@ -7,25 +7,31 @@
 //! cycle-fix: the driver-seam traits + the internal [`ProtocolEvent`] enum live
 //! in R1; only concrete drivers live here).
 //!
-//! ## Phase-1 scope
+//! ## Phase-2B scope (THIS phase) — `FakeLineProtocol`
 //!
-//! In Phase-1 this crate has **NO type surface of its own** — it merely EXISTS
-//! and DEPENDS ON R1, proving the R2 → R1 dependency edge and that R1 owns the
-//! driver-seam traits. The concrete drivers (`FakeLineProtocol` (Phase 2B),
-//! `ClaudeStreamProtocol` (Phase 4), `OpenCodeAcpProtocol` / `OpenCodeServeProtocol`
-//! (Phase 5)) land in later phases.
+//! Phase-2B lands the first concrete driver: [`FakeLineProtocol`] over the
+//! long-lived in-repo fake structured agent (the `wasl-fake-agent` dev-bin). It
+//! spawns the fake as a REAL OS child, speaks its line-oriented-JSON wire, maps
+//! each event to R1's [`ProtocolEvent`], and owns the §1.4 process supervision
+//! (concurrent stderr drain, hang watchdog, bounded interrupt→TERM→KILL
+//! escalation, the M2 `BrokenPipe`/`WriteZero`-is-benign stdin fix, reaping on
+//! drop). The remaining concrete drivers (`ClaudeStreamProtocol` (Phase 4),
+//! `OpenCodeAcpProtocol` / `OpenCodeServeProtocol` (Phase 5)) land later.
 //!
-//! The re-export below documents the R1-owned generic contract these drivers will
-//! implement, and makes the dependency edge explicit at the crate root.
+//! The re-export below makes the R1-owned generic contract these drivers
+//! implement / map onto explicit at the crate root.
 //!
 //! [`InteractiveProtocol`]: wasl_runtime::InteractiveProtocol
 //! [`ProtocolEvent`]: wasl_runtime::ProtocolEvent
 
 #![forbid(unsafe_code)]
 
+mod fake_line;
+
+pub use fake_line::{FakeLineProtocol, SupervisionTimeouts};
+
 // The R1-owned generic driver contract every R2 driver implements/maps onto.
-// Phase-1 only re-surfaces it here to make the R2 → R1 edge explicit; the
-// concrete driver structs arrive in Phase 2B/4/5.
+// Re-surfaced here to make the R2 → R1 edge explicit.
 pub use wasl_runtime::{
     ComposedPrompt, InteractiveProtocol, InteractiveTransport, NativeSessionId, ProtocolEvent,
     RuntimeCapabilities, RuntimeError, SpawnOptions,

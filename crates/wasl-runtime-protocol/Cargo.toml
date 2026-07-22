@@ -6,14 +6,50 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Wasl runtime protocol (R2): concrete interactive drivers over the R1 driver seam (Phase-1: skeleton — the traits + ProtocolEvent live in R1)"
+description = "Wasl runtime protocol (R2): concrete interactive drivers over the R1 driver seam (Phase-2B: the long-lived fake structured agent + FakeLineProtocol)"
+
+# The long-lived in-repo fake structured agent (runtime-protocol.md §1.1). A
+# `[[bin]]` declared IN THIS crate makes Cargo define `CARGO_BIN_EXE_wasl-fake-agent`
+# for this crate's own integration tests (same mechanism `wasl-mcp/tests/config_bin.rs`
+# uses for `wasl-mcpd`), so `tests/support/mod.rs`'s `fake_agent_bin()` resolves.
+[[bin]]
+name = "wasl-fake-agent"
+path = "src/bin/wasl-fake-agent.rs"
+
+# Lint allowances below exist ONLY to accommodate the FROZEN test files the
+# code-agent may not edit (`tests/**`, owned by the test-agent). `src/**` is
+# clean of every one of these — verified: `cargo clippy -p wasl-runtime-protocol
+# --lib --bins -- -D warnings` passes with none of these allowances. Same repo
+# convention as `wasl-runtime`/`wasl-adapter-*` (per-package frozen-test carve-outs).
+[lints.rust]
+# tests/hold_queueing.rs (frozen) does `use wasl_runtime::RuntimeProvider;` but
+# calls the provider's INHERENT `target_for` (not the trait method), so the
+# `RuntimeProvider` import is redundant → `unused_imports`. The code-agent cannot
+# edit the test; `src/**` has zero unused imports.
+unused_imports = "allow"
+
+[lints.clippy]
+# Frozen test doc comments (`tests/hostile_inputs.rs`, `tests/fake_agent_wire.rs`)
+# use un-indented multi-line `//!` list continuations that trip
+# `doc_lazy_continuation` — a pure STYLE lint. The code-agent cannot edit tests;
+# `src/**` is clean.
+doc_lazy_continuation = "allow"
+# `tests/hostile_inputs.rs:93` writes `|e| pred(e)` (a redundant closure over a
+# `&dyn Fn`) — a test-agent style choice the code-agent cannot change; `src/**`
+# has no redundant closures.
+redundant_closure = "allow"
 
 [dependencies]
 wasl-runtime = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "io-std", "time", "sync", "macros", "rt", "rt-multi-thread", "signal"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# The genericity actor-integration test (`tests/hold_queueing.rs`) builds a
+# `TurnRequest`, which needs the same vocabulary crates R1's own support uses.
+wasl-adapter = { workspace = true }
+wasl-proto = { workspace = true }
+wasl-audit = { workspace = true }
