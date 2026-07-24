@@ -169,6 +169,57 @@ async fn handle_request(
                 }
             }
         }
+        "ask_wasl_gate" => {
+            // Phase-2C probe (A) — the WORKS case. Mid-turn emit a `gate` (→
+            // NativeGateRequested), BLOCK reading exactly ONE more stdin line (the
+            // actor's `resolve_native_gate` answer, over the SAME pipe), then
+            // complete `done` with a correlated `reply:"answered:<key>"`.
+            let key = req.get("key").and_then(Value::as_str).unwrap_or("");
+            accepted(out).await;
+            gate(out, "ask_wasl", key).await;
+            // Block until the actor answers over stdin (any line unblocks — the
+            // resolution is the round-trip proof; we need not parse it).
+            loop {
+                match reader.next_line().await {
+                    Ok(Some(line)) => {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        done(out, &format!("answered:{key}")).await;
+                        return;
+                    }
+                    Ok(None) | Err(_) => return, // stdin closed while blocked.
+                }
+            }
+        }
+        "ask_wasl_tool" => {
+            // Phase-2C probe (B) — the LEAK case (the sharper probe). Mid-turn
+            // emit a `tool_start` name `ask_wasl` (→ ToolStarted), BLOCK reading
+            // exactly ONE more stdin line that must arrive over the SAME pipe as
+            // an ANSWER TO THIS TOOL CALL, and ONLY after that line arrives emit
+            // `tool_end` then `done` with `reply:"answered:<key>"`.
+            let key = req.get("key").and_then(Value::as_str).unwrap_or("");
+            accepted(out).await;
+            tool_start(out, "ask_wasl").await;
+            // Block until the answer arrives over stdin. Through the FROZEN API
+            // there is no way for the single-writer actor to send this line AS AN
+            // ANSWER TO THIS TOOL CALL, so the turn stays blocked (the demonstrated
+            // hang); with the Phase-2C `answer_tool_call` fix the actor's answer
+            // arrives here and the turn proceeds.
+            loop {
+                match reader.next_line().await {
+                    Ok(Some(line)) => {
+                        if line.trim().is_empty() {
+                            continue;
+                        }
+                        tool_end(out, "ask_wasl", true).await;
+                        done(out, &format!("answered:{key}")).await;
+                        return;
+                    }
+                    Ok(None) | Err(_) => return, // stdin closed while blocked.
+                }
+            }
+        }
         "gate_then_exit" => {
             // §1.3 gate-then-exit: emit the gate, then the process exits (→
             // NativeGateRequested then ProcessExited).
@@ -371,6 +422,22 @@ async fn gate(out: &mut tokio::io::Stdout, summary: &str, preview: &str) {
     write_event(
         out,
         &serde_json::json!({ "ev": "gate", "summary": summary, "preview": preview }),
+    )
+    .await;
+}
+
+async fn tool_start(out: &mut tokio::io::Stdout, name: &str) {
+    write_event(
+        out,
+        &serde_json::json!({ "ev": "tool_start", "name": name }),
+    )
+    .await;
+}
+
+async fn tool_end(out: &mut tokio::io::Stdout, name: &str, ok: bool) {
+    write_event(
+        out,
+        &serde_json::json!({ "ev": "tool_end", "name": name, "ok": ok }),
     )
     .await;
 }

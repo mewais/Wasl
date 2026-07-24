@@ -22,8 +22,8 @@ use crate::journal::Journal;
 use crate::{
     BusyPolicy, CancelReason, DeliveryTarget, EventSeq, IdempotencyKey, InteractiveProtocol,
     NativeGateResolver, RuntimeCapabilities, RuntimeClock, RuntimeError, ShutdownMode,
-    SpawnOptions, TargetId, TargetKey, TargetStatus, TurnEventStream, TurnId, TurnReceipt,
-    TurnRequest,
+    SpawnOptions, TargetId, TargetKey, TargetStatus, ToolCallAnswerer, TurnEventStream, TurnId,
+    TurnReceipt, TurnRequest,
 };
 
 /// One live managed target: the public `DeliveryTarget` handle plus a handle onto
@@ -189,6 +189,25 @@ impl NativeGateResolver for ManagedTarget {
             .send(Command::ResolveGate {
                 turn_id,
                 decision,
+                reply: tx,
+            })
+            .await
+            .map_err(|_| RuntimeError::Shutdown)?;
+        rx.await.map_err(|_| RuntimeError::Shutdown)?
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolCallAnswerer for ManagedTarget {
+    async fn answer_tool_call(&self, turn_id: TurnId, value: String) -> Result<(), RuntimeError> {
+        // Route through the SAME serialized mailbox as `resolve_native_gate`: the
+        // single actor task that owns the transport is the sole writer; this
+        // handle never exposes a raw second writer to the caller (Phase-2C).
+        let (tx, rx) = oneshot::channel();
+        self.mailbox
+            .send(Command::AnswerToolCall {
+                turn_id,
+                value,
                 reply: tx,
             })
             .await

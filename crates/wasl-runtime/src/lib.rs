@@ -136,7 +136,9 @@ pub struct RuntimeCapabilities {
 /// detail (that lives behind [`InteractiveProtocol`], §6). Object-safe; used as
 /// `Arc<dyn DeliveryTarget>` (§10).
 #[async_trait::async_trait]
-pub trait DeliveryTarget: NativeGateResolver + std::fmt::Debug + Send + Sync {
+pub trait DeliveryTarget:
+    NativeGateResolver + ToolCallAnswerer + std::fmt::Debug + Send + Sync
+{
     /// Stable Wasl-side handle (not a CLI-native id). Constant for the target's
     /// lifetime.
     fn target_id(&self) -> &TargetId;
@@ -182,6 +184,24 @@ pub trait NativeGateResolver: Send + Sync {
         turn_id: TurnId,
         decision: wasl_proto::GateDecision,
     ) -> Result<(), RuntimeError>;
+}
+
+/// Tool-call answer-back (runtime.md §9 — the tool-channel counterpart of
+/// [`NativeGateResolver`]): a managed target answers a mid-turn
+/// `ProtocolEvent::ToolStarted`-shaped bidirectional callback through the
+/// single-writer actor (never a raw side-channel). Phase-2C additive extension,
+/// exposed as an extra supertrait the managed target implements so callers can
+/// `answer_tool_call` on the `Arc<dyn DeliveryTarget>` a managed provider
+/// returns via a downcast-free trait-upcast on the concrete handle — mirroring
+/// exactly how [`NativeGateResolver::resolve_native_gate`] is reached.
+#[async_trait::async_trait]
+pub trait ToolCallAnswerer: Send + Sync {
+    /// Answer the tool call blocking `turn_id` with `value`: the actor sends the
+    /// answer over the transport (via [`InteractiveTransport::answer_tool_call`])
+    /// from within its own serialized mailbox task — the SAME single writer that
+    /// owns the `Box<dyn InteractiveTransport>` — so the blocked turn can proceed.
+    /// NEVER hands the caller a second concurrent writer.
+    async fn answer_tool_call(&self, turn_id: TurnId, value: String) -> Result<(), RuntimeError>;
 }
 
 /// [`DeliveryTarget::events`] returns this: a `Pin<Box<dyn Stream<Item =
@@ -643,6 +663,23 @@ pub trait InteractiveTransport: Send {
     /// Best-effort interrupt of the active turn (only if `capabilities().
     /// interruptible`).
     async fn interrupt(&mut self) -> Result<(), RuntimeError>;
+
+    /// Answer a mid-turn `ProtocolEvent::ToolStarted`-shaped bidirectional
+    /// callback: send `value` back to the session over the SAME transport the
+    /// actor is reading from, so a turn blocked behind a tool-shaped callback can
+    /// proceed. Phase-2C additive extension (runtime.md §9 — the tool-channel
+    /// counterpart of the gate-channel answer-back `resolve_native_gate` funnels
+    /// through `send_turn`).
+    ///
+    /// DEFAULT NO-OP: every existing implementor (the unidirectional
+    /// claude-stdin / opencode-ACP drivers) compiles unchanged and stays
+    /// object-safe; only a driver whose native wire actually maps a callback onto
+    /// `ToolStarted` and blocks awaiting an answer overrides this. The
+    /// single-writer invariant is preserved — the ACTOR is still the sole caller,
+    /// reached ONLY through its serialized mailbox (never a raw second handle).
+    async fn answer_tool_call(&mut self, _name: &str, _value: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
 }
 
 /// The NORMALIZED event vocabulary every driver maps its native wire onto.

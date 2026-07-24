@@ -61,6 +61,15 @@ pub(crate) enum Command {
         decision: GateDecision,
         reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
+    /// Answer a mid-turn `ToolStarted`-shaped bidirectional callback (Phase-2C):
+    /// the actor sends `value` over the transport via
+    /// `InteractiveTransport::answer_tool_call` — the tool-channel counterpart of
+    /// `ResolveGate`, reached ONLY through this mailbox (single writer).
+    AnswerToolCall {
+        turn_id: TurnId,
+        value: String,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
+    },
     /// A no-reply nudge (sent by `events()` on subscribe) asking the actor to
     /// re-poll the transport now — the scripted transport cannot signal a late
     /// `push_event`, so a fresh subscriber pokes the actor to pick it up promptly
@@ -118,6 +127,11 @@ pub(crate) struct Actor {
     draining: bool,
     /// Awaiting a native gate.
     awaiting_gate: bool,
+    /// The name of the most-recent still-running tool call (set on `ToolStarted`,
+    /// cleared on `ToolFinished`/terminal). Used by `answer_tool_call` (Phase-2C)
+    /// to answer a mid-turn `ToolStarted`-shaped bidirectional callback with the
+    /// tool's own name.
+    running_tool: Option<String>,
     /// Turn-lifecycle events pumped while idle (before the owning turn was
     /// submitted), replayed once the turn becomes active (§7.4).
     pending_events: VecDeque<ProtocolEvent>,
@@ -170,6 +184,7 @@ impl Actor {
             terminal: false,
             draining: false,
             awaiting_gate: false,
+            running_tool: None,
             pending_events: VecDeque::new(),
             idle_parked: false,
             idle_drained: false,
@@ -319,6 +334,14 @@ impl Actor {
                 reply,
             } => {
                 let res = self.resolve_gate(turn_id, decision).await;
+                let _ = reply.send(res);
+            }
+            Command::AnswerToolCall {
+                turn_id,
+                value,
+                reply,
+            } => {
+                let res = self.answer_tool_call(turn_id, value).await;
                 let _ = reply.send(res);
             }
         }
@@ -553,6 +576,9 @@ impl Actor {
             ProtocolEvent::ToolStarted { name } => {
                 if let Some(a) = self.active.as_ref() {
                     let turn_id = a.id.clone();
+                    // Track the running tool so a mid-turn `ToolStarted`-shaped
+                    // bidirectional callback can be answered by name (Phase-2C).
+                    self.running_tool = Some(name.clone());
                     self.set_busy(BusyPhase::RunningTool);
                     self.emit(TurnEvent::ToolStarted { turn_id, name });
                 }
@@ -560,6 +586,7 @@ impl Actor {
             ProtocolEvent::ToolFinished { name, ok } => {
                 if let Some(a) = self.active.as_ref() {
                     let turn_id = a.id.clone();
+                    self.running_tool = None;
                     self.set_busy(BusyPhase::Generating);
                     self.emit(TurnEvent::ToolFinished { turn_id, name, ok });
                 }
@@ -611,6 +638,7 @@ impl Actor {
             certainty: DeliveryCertainty::Completed,
         });
         self.awaiting_gate = false;
+        self.running_tool = None;
         self.advance_after_terminal().await;
     }
 
@@ -638,6 +666,7 @@ impl Actor {
             certainty,
         });
         self.awaiting_gate = false;
+        self.running_tool = None;
     }
 
     async fn fail_active(&mut self, certainty: DeliveryCertainty, error: String) {
@@ -696,6 +725,7 @@ impl Actor {
         self.emit(TurnEvent::ProcessExited { code });
         self.terminal = true;
         self.awaiting_gate = false;
+        self.running_tool = None;
         self.shared.set_status(TargetStatus::Faulted {
             error: "process exited".to_string(),
             recoverable: false,
@@ -869,6 +899,7 @@ impl Actor {
         self.terminal = true;
         self.draining = false;
         self.awaiting_gate = false;
+        self.running_tool = None;
         self.emit(TurnEvent::ProcessExited { code: None });
         self.shared.set_status(TargetStatus::Stopped);
         self.emit_status();
@@ -919,6 +950,47 @@ impl Actor {
         self.emit(TurnEvent::NativeGateResolved { turn_id, decision });
         // Back to Busy (the turn proceeds).
         self.set_busy(BusyPhase::Generating);
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------
+    // answer_tool_call (Phase-2C — the tool-channel counterpart of §9's gate
+    // answer-back; mirrors `resolve_gate` exactly but funnels the answer through
+    // `InteractiveTransport::answer_tool_call` instead of `send_turn`).
+    // ---------------------------------------------------------------
+
+    async fn answer_tool_call(
+        &mut self,
+        turn_id: TurnId,
+        value: String,
+    ) -> Result<(), RuntimeError> {
+        // No tool call is blocking the turn — nothing to answer (the tool-channel
+        // analogue of `resolve_gate`'s `!awaiting_gate` guard).
+        let Some(name) = self.running_tool.clone() else {
+            return Err(RuntimeError::NotFound {
+                detail: "no tool call is awaiting an answer".to_string(),
+            });
+        };
+        // Correlate by turn id: the answer must target the turn that holds the
+        // running tool call. `running_tool == Some` implies an active turn (it is
+        // set ONLY inside the `ToolStarted` handler's `if let Some(a) =
+        // self.active`, and every active-clearing path also clears it), so the
+        // active turn is present here.
+        let active_id = self
+            .active
+            .as_ref()
+            .expect("answer_tool_call: running_tool implies an active turn (set/cleared together)")
+            .id
+            .clone();
+        if active_id != turn_id {
+            return Err(RuntimeError::NotFound {
+                detail: format!("turn {turn_id:?} does not hold the running tool call"),
+            });
+        }
+        // Answer the tool call over the transport (single writer): the actor is
+        // the sole caller, reached only through its mailbox — never a raw second
+        // handle. The unidirectional drivers' default no-op simply returns Ok.
+        self.transport.answer_tool_call(&name, &value).await?;
         Ok(())
     }
 

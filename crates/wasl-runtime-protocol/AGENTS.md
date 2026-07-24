@@ -117,3 +117,33 @@ table + accessors) · `src/bin` unit 3 (fact-map `recall` micro-tests) · `epipe
 same reason Phase-2A `wasl-runtime`'s does: the residuals are genuinely-unreachable-by-the-public-API IO /
 defensive branches (driver) + an intentionally-un-exhaustively-driven test fixture (bin). The
 mapping/framing/supervision CORE is at 93.65% line with every miss enumerated and verified live above.
+
+## Phase-2C scope (LANDED) — two new fake-agent wire commands for the bidirectional gate
+
+Phase-2C added, to the fake-agent BINARY ONLY (`src/bin/wasl-fake-agent.rs`; the `FakeLineProtocol` driver in
+`fake_line.rs` was NOT touched — both commands reuse EXISTING `ProtocolEvent` mappings, per the tester's
+finding that no new event variant is needed), the two wire commands `bidirectional_genericity.rs` specifies:
+
+- **`{"cmd":"ask_wasl_gate","key":"<K>"}`** (probe A, the WORKS case): emit `accepted`, then
+  `{"ev":"gate","summary":"ask_wasl","preview":"<K>"}` (the existing `gate`→`NativeGateRequested` mapping),
+  BLOCK reading exactly ONE more stdin line (the actor's `resolve_native_gate` answer, over the SAME pipe),
+  then `{"ev":"done","reply":"answered:<K>"}`.
+- **`{"cmd":"ask_wasl_tool","key":"<K>"}`** (probe B, the LEAK/sharper case): emit `accepted`, then
+  `{"ev":"tool_start","name":"ask_wasl"}` (the existing `tool_start`→`ToolStarted` mapping), BLOCK reading
+  exactly ONE more stdin line, then — ONLY after that line arrives — `{"ev":"tool_end","name":"ask_wasl",
+  "ok":true}` and `{"ev":"done","reply":"answered:<K>"}`. Through the frozen API there is no way for the
+  single-writer actor to send that line as an answer TO THIS TOOL CALL, so the turn stays blocked (the
+  demonstrated bounded hang); the Phase-2C `wasl-runtime::InteractiveTransport::answer_tool_call` fix (in the
+  R1 crate) is what would send it — the commented recommended-target test targets exactly that.
+
+Two small event emitters (`tool_start`, `tool_end`) were added alongside the existing `gate`/`done`/`accepted`
+emitters. All 3 live probes in `bidirectional_genericity.rs` are green; ALL Phase-2B tests (51) remain green
+with ZERO regression (the fake's observable wire is still pinned black-box by `fake_agent_wire.rs`, unaffected).
+
+### Coverage honesty (Phase-2C) — measured
+`cargo llvm-cov -p wasl-runtime-protocol --summary-only`: `fake_line.rs` **93.65% line** (UNCHANGED — the
+driver core was not touched); `bin/wasl-fake-agent.rs` ~51.6% line (the fixture, down slightly from 55.69%
+because the two new command branches add well-formed-only-driven arms + the `tool_start`/`tool_end` emitters,
+whose missing-field fallbacks the tester's well-formed `req_ask_wasl_*` builders never trigger — the same
+intentionally-un-exhaustively-driven-fixture posture as Phase-2B, NOT gamed). TOTAL ~76.9% line.
+`--fail-under-lines 100` exits 1 for the same documented reasons as Phase-2B.

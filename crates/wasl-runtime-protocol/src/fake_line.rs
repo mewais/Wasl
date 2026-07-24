@@ -241,6 +241,58 @@ struct FakeLineTransport {
 }
 
 impl FakeLineTransport {
+    /// Write ONE `text` line (plus the newline frame) to the child's stdin and
+    /// flush, applying the M2 `BrokenPipe`/`WriteZero`-is-benign discipline
+    /// (mirrors `wasl-adapter-{codex,claude}::ProcessCliInvoker`). Shared by BOTH
+    /// stdin-writing paths — `send_turn` (a new turn's request line) and
+    /// `answer_tool_call` (a mid-turn tool-call answer over the SAME pipe) — so
+    /// the exact write+flush+EPIPE handling is identical for both.
+    async fn write_stdin_line(&mut self, text: &str) -> Result<(), RuntimeError> {
+        let Some(stdin) = self.stdin.as_mut() else {
+            // stdin already gone (child exited): a write to a dead child is the
+            // benign EPIPE case — swallow it (the M2 lesson), do not fail.
+            return Ok(());
+        };
+
+        let mut line = text.as_bytes().to_vec();
+        line.push(b'\n');
+
+        // M2 EPIPE lesson: a child that stopped reading its stdin (or exited)
+        // yields BrokenPipe / WriteZero on the write — that is BENIGN (swallowed),
+        // NOT a failure of the whole call. Any other IO error is a real transport
+        // error.
+        match stdin.write_all(&line).await {
+            Ok(()) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::WriteZero
+                ) =>
+            {
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(RuntimeError::Transport {
+                    detail: format!("fake agent stdin write: {e}"),
+                })
+            }
+        }
+        match stdin.flush().await {
+            Ok(()) => Ok(()),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::WriteZero
+                ) =>
+            {
+                Ok(())
+            }
+            Err(e) => Err(RuntimeError::Transport {
+                detail: format!("fake agent stdin flush: {e}"),
+            }),
+        }
+    }
+
     /// Note a returned event: reset the watchdog and clear the in-flight flag on a
     /// terminal.
     fn observe(&mut self, ev: &ProtocolEvent) {
@@ -350,51 +402,10 @@ impl InteractiveTransport for FakeLineTransport {
         self.turn_terminal_seen = false;
         self.last_event_at = Instant::now();
 
-        let Some(stdin) = self.stdin.as_mut() else {
-            // stdin already gone (child exited): a write to a dead child is the
-            // benign EPIPE case — swallow it (the M2 lesson), do not fail.
-            return Ok(());
-        };
-
         // One request per line: the composed prompt text IS the JSON request line
-        // (the tester controls the exact bytes); we append only the newline frame.
-        let mut line = prompt.0.clone().into_bytes();
-        line.push(b'\n');
-
-        // M2 EPIPE lesson (mirrors `wasl-adapter-{codex,claude}::ProcessCliInvoker`):
-        // a child that stopped reading its stdin (or exited) yields BrokenPipe /
-        // WriteZero on the write — that is BENIGN (swallowed), NOT a failure of
-        // the whole call. Any other IO error is a real transport error.
-        match stdin.write_all(&line).await {
-            Ok(()) => {}
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::WriteZero
-                ) =>
-            {
-                return Ok(());
-            }
-            Err(e) => {
-                return Err(RuntimeError::Transport {
-                    detail: format!("fake agent stdin write: {e}"),
-                })
-            }
-        }
-        match stdin.flush().await {
-            Ok(()) => Ok(()),
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::WriteZero
-                ) =>
-            {
-                Ok(())
-            }
-            Err(e) => Err(RuntimeError::Transport {
-                detail: format!("fake agent stdin flush: {e}"),
-            }),
-        }
+        // (the tester controls the exact bytes); the helper appends the newline
+        // frame, flushes, and applies the M2 EPIPE-is-benign discipline.
+        self.write_stdin_line(&prompt.0).await
     }
 
     async fn next_event(&mut self) -> Option<ProtocolEvent> {
@@ -426,6 +437,18 @@ impl InteractiveTransport for FakeLineTransport {
             best_effort_signal(pid, "-INT");
         }
         Ok(())
+    }
+
+    async fn answer_tool_call(&mut self, _name: &str, value: &str) -> Result<(), RuntimeError> {
+        // The tool-channel answer-back (§1 bidirectional callback): the fake's
+        // `ask_wasl_tool` command emitted `tool_start` then BLOCKED reading exactly
+        // ONE more stdin line — this write unblocks it, so the turn can proceed to
+        // `tool_end` + `done`. We write `value` as that one line over the SAME pipe
+        // `send_turn` writes to, using the IDENTICAL write+flush+EPIPE-is-benign
+        // path (the fake's parser needs only a non-empty line; it does not parse
+        // the payload). BrokenPipe/WriteZero here is benign for the same M2 reason:
+        // the child may have already moved on / exited.
+        self.write_stdin_line(value).await
     }
 }
 

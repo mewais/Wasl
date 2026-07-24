@@ -53,3 +53,10 @@ tokio = { workspace = true }
 wasl-adapter = { workspace = true }
 wasl-proto = { workspace = true }
 wasl-audit = { workspace = true }
+# Phase-2C (`tests/bidirectional_genericity.rs`) drains the actor's public
+# `TurnEventStream` (a `Pin<Box<dyn Stream>>`) via `StreamExt::next`, exactly as
+# R1's own `provider_and_journal.rs` does — needs `futures` in scope. Added per
+# the tester-specified dev-dep precedent this file's `[dev-dependencies]` already
+# set (`wasl-adapter`/`wasl-proto`/`wasl-audit` were added the same way for the
+# `hold_queueing.rs` genericity test).
+futures = { workspace = true }

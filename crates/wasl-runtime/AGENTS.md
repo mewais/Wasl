@@ -169,3 +169,54 @@ turn (which would have either broken the exactly-one-Started invariant or deadlo
 proven by `fifo_and_admission::{concurrent_submit_admission_never_double_starts,
 concurrent_submits_do_not_interleave_the_single_writer_stream}` (both green) and by in-`src` reproductions
 during development (flat 5 s/round, no accumulation).
+
+## Phase-2C scope (LANDED) — the `answer_tool_call` bidirectional tool-channel extension
+
+Phase-2C is an ADDITIVE, minimal extension to the frozen surface (same discipline as the earlier
+wasl-proto/wasl-audit extensions), driven by `wasl-runtime-protocol/tests/bidirectional_genericity.rs`. The
+genericity gate found a precise leak: the frozen `InteractiveTransport` had an answer-back path bound to
+`NativeGateRequested` ALONE (`resolve_native_gate` → `Command::ResolveGate` → the single actor task calls
+`send_turn` with the answer), but a mid-turn callback mapped onto `ProtocolEvent::ToolStarted` had NO
+answer-back — a turn blocked behind a tool-shaped callback could not be answered through the frozen API and
+hung. The authorized minimal fix (NO new `ProtocolEvent` variant, NO second writer) added, in `src/**` only:
+
+- **`InteractiveTransport::answer_tool_call(&mut self, name: &str, value: &str) -> Result<(), RuntimeError>`
+  with a DEFAULT no-op body (`Ok(())`)** (`lib.rs`). Non-breaking + object-safe: every existing implementor
+  (claude-stdin / opencode-ACP / `FakeLineProtocol`) compiles unchanged and keeps using the default; only a
+  driver whose native wire actually blocks on a `ToolStarted`-shaped callback overrides it.
+- **`ToolCallAnswerer` supertrait of `DeliveryTarget`** (`lib.rs`) with
+  `answer_tool_call(&self, turn_id: TurnId, value: String)`, mirroring `NativeGateResolver` exactly so the
+  method is reachable on the `Arc<dyn DeliveryTarget>` the managed provider returns. `ManagedTarget`
+  implements it (`provider.rs`) by routing through the SAME serialized mailbox — no raw second writer is ever
+  exposed at the public seam.
+- **`Command::AnswerToolCall { turn_id, value, reply }` + `Actor::answer_tool_call`** (`actor.rs`), the
+  tool-channel counterpart of `Command::ResolveGate`/`resolve_gate`: it guards on a tracked `running_tool`
+  (set on `ProtocolEvent::ToolStarted`, cleared on `ToolFinished`/every terminal path alongside
+  `awaiting_gate`), correlates by `turn_id`, and calls `transport.answer_tool_call(name, value)` from within
+  the one actor task that owns the transport (single-writer invariant preserved).
+
+**Test outcome (the deliverable per the council's framing):** all 3 LIVE probes in
+`bidirectional_genericity.rs` are GREEN — `ask_wasl_via_gate_completes_when_the_actor_answers_back_single_writer`
+(gate channel works end-to-end), `ask_wasl_via_toolstarted_hangs_no_answerback_in_frozen_api` (the tool-call
+turn still hangs — that probe never calls the new `answer_tool_call`; it only proves `resolve_native_gate`
+cannot answer a `Busy{RunningTool}` turn, which remains true), and
+`answer_back_never_exposes_a_second_writer_to_callers`. The commented-out RECOMMENDED-TARGET test
+(`recommended_target_answer_tool_call_completes_the_blocked_turn`) is the one that would exercise the new
+answer path end-to-end; it is left for the TESTER to uncomment (a `tests/**` change, not code-agent
+territory). All Phase-2A tests (140, counting the growth) remain green with ZERO regression.
+
+### Coverage honesty (Phase-2C) — measured, with the new-code residual named
+`cargo llvm-cov report -p wasl-runtime --summary-only` (all behavioral suites EXCEPT the ~40 s `barrier_driven`
+stress test, per the Phase-2A methodology): TOTAL LINE **92.27%**, actor.rs 91.33%, provider.rs 89.73%,
+journal.rs 97.74%, config.rs 100%, lib.rs 95.83%. The drop from the Phase-2A 95.97% baseline is ENTIRELY the
+new answer-path code, which is currently UNEXERCISED because the only test that drives it (the commented
+recommended-target test) is intentionally not compiled:
+- `actor.rs` `answer_tool_call` handler body (the `running_tool`-guard, turn-id correlation, and the
+  `transport.answer_tool_call` call);
+- `provider.rs` `ToolCallAnswerer::answer_tool_call` mailbox send + reply;
+- `lib.rs` the default no-op trait body (line 680) — no driver overrides it and no run-through the fake reaches
+  it until the recommended-target test lands.
+These become covered the moment the tester uncomments the recommended-target test. The `running_tool` set/clear
+lines ARE covered (by `gate_and_events::tool_started_then_finished_...` and the live `ToolStarted` probe). The
+pre-existing Phase-2A residuals (causation re-check, journal dedupe, provider actor-died arms) are unchanged.
+`--fail-under-lines 100` still exits 1 for these documented, genuinely-not-yet-exercised-by-a-live-test lines.
