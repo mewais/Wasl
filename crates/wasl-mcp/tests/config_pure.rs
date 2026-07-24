@@ -9,7 +9,7 @@
 
 use wasl_mcp::{
     A2aConfig, AdapterConfig, AdapterKind, AuditConfig, Config, ConfigError, GateConfig,
-    IdentityConfig, OperatorConfig, PeerEntry,
+    IdentityConfig, OperatorConfig, PeerEntry, RuntimeConfig,
 };
 
 /// The complete example from the spec: every section, every key, two peers.
@@ -64,6 +64,7 @@ fn full_parse_every_field_exact() {
             bind: Some("127.0.0.1:4243".to_string()),
         },
         gate: GateConfig::default(),
+        runtime: RuntimeConfig::default(),
         audit: AuditConfig {
             path: "/var/lib/wasl/audit.jsonl".to_string(),
         },

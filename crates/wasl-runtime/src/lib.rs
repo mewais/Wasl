@@ -32,10 +32,12 @@ use serde::{Deserialize, Serialize};
 // Phase-2A logic modules (the actor / journal / config / providers).
 mod actor;
 mod config;
+mod ephemeral;
 mod journal;
 mod provider;
 
 pub use config::ManagedConfig;
+pub use ephemeral::EphemeralRuntimeProvider;
 pub use provider::WaslManagedRuntimeProvider;
 
 // `wasl_proto` owns the shared vocabulary (`AgentId`/`RequestId`/`GateDecision`

@@ -35,6 +35,7 @@ pub struct Config {
     pub gate: GateConfig,
     pub audit: AuditConfig,
     pub adapter: AdapterConfig,
+    pub runtime: RuntimeConfig,
     pub peers: Vec<PeerEntry>,
 }
 
@@ -78,6 +79,17 @@ pub struct AdapterConfig {
     pub bin: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeConfig {
+    pub kind: RuntimeKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeKind {
+    Ephemeral,
+    Managed,
+}
+
 /// The adapter selector. W7 (`docs/specs/adapter-codex.md`) adds `Codex`
 /// alongside the original `Claude`; W8′b (`docs/specs/adapter-antigravity.md`)
 /// adds `Antigravity`; W9 (`docs/specs/adapter-opencode.md`) adds `Opencode`.
@@ -113,7 +125,16 @@ impl Default for Config {
                 kind: AdapterKind::Claude,
                 bin: None,
             },
+            runtime: RuntimeConfig::default(),
             peers: Vec::new(),
+        }
+    }
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        RuntimeConfig {
+            kind: RuntimeKind::Ephemeral,
         }
     }
 }
@@ -132,6 +153,8 @@ pub enum ConfigError {
     Toml(String),
     /// `adapter.kind` is not a known adapter.
     UnknownAdapterKind(String),
+    /// `runtime.kind` is not a known runtime kind.
+    UnknownRuntimeKind(String),
     /// `gate.authority` is not one of the four known authorities.
     UnknownGateAuthority(String),
     /// A peer url is not an absolute http/https URL.
@@ -156,6 +179,7 @@ impl fmt::Display for ConfigError {
             ConfigError::Read { path, detail } => write!(f, "read config {path}: {detail}"),
             ConfigError::Toml(detail) => write!(f, "invalid config TOML: {detail}"),
             ConfigError::UnknownAdapterKind(kind) => write!(f, "unknown adapter kind: {kind}"),
+            ConfigError::UnknownRuntimeKind(kind) => write!(f, "unknown runtime kind: {kind}"),
             ConfigError::UnknownGateAuthority(v) => write!(f, "unknown gate authority: {v}"),
             ConfigError::MalformedPeerUrl {
                 agent_id,
@@ -193,6 +217,7 @@ struct RawConfig {
     gate: RawGate,
     audit: RawAudit,
     adapter: RawAdapter,
+    runtime: RawRuntime,
     peers: Vec<RawPeer>,
 }
 
@@ -263,6 +288,20 @@ impl Default for RawAdapter {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+struct RawRuntime {
+    kind: String,
+}
+
+impl Default for RawRuntime {
+    fn default() -> Self {
+        RawRuntime {
+            kind: "ephemeral".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawPeer {
     agent_id: String,
@@ -325,6 +364,12 @@ impl Config {
             other => return Err(ConfigError::UnknownAdapterKind(other.to_string())),
         };
 
+        let runtime_kind = match raw.runtime.kind.as_str() {
+            "ephemeral" => RuntimeKind::Ephemeral,
+            "managed" => RuntimeKind::Managed,
+            other => return Err(ConfigError::UnknownRuntimeKind(other.to_string())),
+        };
+
         let authority = match raw.gate.authority.as_str() {
             "elicitation" => GateAuthority::Elicitation,
             "elicitation-first" => GateAuthority::ElicitationFirst,
@@ -371,6 +416,7 @@ impl Config {
                 kind,
                 bin: raw.adapter.bin,
             },
+            runtime: RuntimeConfig { kind: runtime_kind },
             peers,
         })
     }
@@ -536,8 +582,9 @@ impl wasl_adapter::AgentAdapter for NodeAdapter {
 /// exhaustive match on `AdapterKind` so adding a kind (W7 codex, W8′b
 /// antigravity, W9 opencode) forces a decision here.
 pub fn build_adapter(cfg: &AdapterConfig) -> NodeAdapter {
+    let adapter_bin = cfg.bin.clone();
     match cfg.kind {
-        AdapterKind::Claude => match &cfg.bin {
+        AdapterKind::Claude => match &adapter_bin {
             None => NodeAdapter::Claude(wasl_adapter_claude::ClaudeAdapter::new(
                 wasl_adapter_claude::ProcessCliInvoker,
             )),
@@ -546,7 +593,7 @@ pub fn build_adapter(cfg: &AdapterConfig) -> NodeAdapter {
                 bin.clone(),
             )),
         },
-        AdapterKind::Codex => match &cfg.bin {
+        AdapterKind::Codex => match &adapter_bin {
             None => NodeAdapter::Codex(wasl_adapter_codex::CodexAdapter::new(
                 wasl_adapter_codex::ProcessCliInvoker,
             )),
@@ -555,7 +602,7 @@ pub fn build_adapter(cfg: &AdapterConfig) -> NodeAdapter {
                 bin.clone(),
             )),
         },
-        AdapterKind::Antigravity => match &cfg.bin {
+        AdapterKind::Antigravity => match &adapter_bin {
             None => NodeAdapter::Antigravity(wasl_adapter_antigravity::AntigravityAdapter::new(
                 wasl_adapter_antigravity::ProcessCliInvoker,
             )),
@@ -566,7 +613,7 @@ pub fn build_adapter(cfg: &AdapterConfig) -> NodeAdapter {
                 ))
             }
         },
-        AdapterKind::Opencode => match &cfg.bin {
+        AdapterKind::Opencode => match &adapter_bin {
             None => NodeAdapter::Opencode(wasl_adapter_opencode::OpencodeAdapter::new(
                 wasl_adapter_opencode::ProcessCliInvoker,
             )),

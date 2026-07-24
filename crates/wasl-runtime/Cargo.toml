@@ -34,6 +34,11 @@ futures = { workspace = true }
 # redundant → `unused_imports`. The code-agent cannot edit the test; `src/` has
 # zero unused imports.
 unused_imports = "allow"
+# tests/ephemeral_target.rs (frozen) defines a helper method (`FakeAdapter::calls`)
+# that is not used by the assertions in that file. With `--all-targets` and
+# `-D warnings`, this triggers `dead_code` from the test target. The code-agent
+# cannot edit frozen tests.
+dead_code = "allow"
 
 [lints.clippy]
 # tests/control_api_wire.rs (frozen) calls `serde_json::to_value(&caps)` where

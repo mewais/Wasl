@@ -25,6 +25,7 @@ use wasl_procrunner::ProcessRunner;
 pub use config::{
     build_adapter, registry_from_peers, A2aConfig, AdapterConfig, AdapterKind, AuditConfig, Config,
     ConfigError, EnvOverrides, GateConfig, IdentityConfig, NodeAdapter, OperatorConfig, PeerEntry,
+    RuntimeConfig, RuntimeKind,
 };
 pub use gating::{detect_caps, ledger_decision_of, proto_action, select_mode, GateAuthority};
 pub use handle::{resolve_and_dispatch, HandleError, ToolCall, ToolCtx, ToolReply};

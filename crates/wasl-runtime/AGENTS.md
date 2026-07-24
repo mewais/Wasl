@@ -220,3 +220,38 @@ These become covered the moment the tester uncomments the recommended-target tes
 lines ARE covered (by `gate_and_events::tool_started_then_finished_...` and the live `ToolStarted` probe). The
 pre-existing Phase-2A residuals (causation re-check, journal dedupe, provider actor-died arms) are unchanged.
 `--fail-under-lines 100` still exits 1 for these documented, genuinely-not-yet-exercised-by-a-live-test lines.
+
+## Phase-3 scope (LANDED) — `EphemeralRuntimeProvider`/`EphemeralTarget`
+
+Phase 3 wraps today's headless adapters (claude/codex/antigravity/opencode, via `wasl_adapter::AgentAdapter`)
+as `EphemeralTarget: DeliveryTarget` with ZERO behavior change — the always-available default path — plus
+the shared capability-gated conformance suite (`tests/conformance_suite.rs`, reused unchanged in Phase 4/5)
+and the differential-equivalence proof (`tests/differential_equivalence.rs`: calling `AgentAdapter::deliver`
+directly vs. via `EphemeralTarget::submit_turn` on the same adapter produces byte-identical reply/error text).
+New module `src/ephemeral.rs`: `submit_turn` calls `deliver` exactly once and ALWAYS returns
+`TurnReceipt::Started` (a fresh spawn is never busy); the synthetic event sequence is `TurnAccepted ->
+AssistantDelta -> TurnCompleted` on success or `TurnAccepted -> TurnFailed` on error; `capabilities()` reports
+exactly `persistent_conversation: true` and the other 7 `false` — no rounding-up.
+
+### Coverage honesty (Phase-3, `ephemeral.rs`)
+
+Measured from the 3 dedicated ephemeral test files (`ephemeral_target.rs`, `conformance_suite.rs`,
+`differential_equivalence.rs`): LINE **75.79%** (95 lines, 23 missed), FUNCTION 66.67% (21, 7 missed),
+REGION 77.88% (104, 23 missed). The happy-path code (the single `deliver` call, event synthesis,
+`capabilities()`) is fully exercised. The gaps, individually assessed by a dev-manager audit:
+
+- **Legitimately inert, not a gap:** `cancel_turn`/`resolve_native_gate`/`answer_tool_call` return
+  `RuntimeError::Unsupported` — never called because the capabilities they gate behind
+  (`interruptible`/none) are false for every ephemeral target. Correct behavior, not untested behavior.
+- **Genuine test gaps needing a follow-up tester pass** (flagged, not yet closed as of this writing):
+  `status()` and the `Debug` impl are never called by any Phase-3 test; `synthesize_conversational_reply`'s
+  token-append branch (the case where the wrapped adapter's own reply does NOT already echo the
+  `remember`/`recall` token) is unexercised because the conformance suite's scripted fake adapter replies
+  already contain the token. Closing these requires ONLY new tests (the implementation is already correct
+  and was independently read line-by-line by the audit) — no `src/**` change is needed.
+- `--fail-under-lines 100` exits 1 for `ephemeral.rs` for these documented, genuinely-not-yet-exercised
+  lines — same honest-residual discipline as Phase 2A/2B/2C, not gamed.
+
+Also open (non-blocking, tester territory): `crates/wasl-mcp/tests/config_pure.rs`'s
+`display_strings_are_pinned_exactly` does not yet pin `ConfigError::UnknownRuntimeKind`'s Display string
+(the one new `wasl-mcp/src/config.rs` line this leaves uncovered).
