@@ -175,3 +175,55 @@ Coder-owned `#[cfg(test)]` unit tests in `src/claude_stream.rs` pin byte-exact m
 wire rows and document the intentional, spec-cited residual gaps: `assistant.tool_use` and `user.tool_result`
 remain unmapped (`vec![]`) until a follow-up real tool/gate capture exists (`runtime-protocol.md` §2.1 ASSUMED
 rows).
+
+## Phase-5 scope (LANDED) — `OpenCodeAcpProtocol` (real opencode `acp` JSON-RPC-over-stdio driver)
+
+Phase-5 added `src/opencode_acp.rs` plus crate-root export wiring in `src/lib.rs`
+(`mod opencode_acp; pub use opencode_acp::OpenCodeAcpProtocol;`).
+
+The landed driver intentionally mirrors the same supervision architecture used by
+`FakeLineProtocol`/`ClaudeStreamProtocol` (stderr drain task, event mpsc channel, kill-request channel,
+bounded interrupt→TERM→KILL escalation with `wait_for_exit`/`best_effort_signal`, hang watchdog, benign
+`BrokenPipe`/`WriteZero` turn-write handling, reap-on-drop), while applying ACP-specific wire semantics.
+
+What landed:
+- **Capabilities locked to §3.1:**
+  `persistent_process=true`, `persistent_conversation=true`, `structured_turns=true`,
+  `streaming_output=true`, `attachable=true`, `interruptible=false`,
+  `structured_provenance=true`, `resumable=true`.
+- **Synchronous handshake inside `spawn`/`resume`:** writes `initialize` (id=1), reads+validates response;
+  then writes `session/new` (spawn) or `session/load` (resume) (id=2), reads+validates response, and extracts
+  native `sessionId` before creating the supervisor/transport split.
+- **First observable event:** supervisor emits `SessionReady{native: Some(session_id)}` as the first event,
+  then enters the normal read/map loop on the remaining lines.
+- **Turn request ids:** handshake consumes ids 1 and 2; turn requests start at id 3 and increment per turn.
+- **Accumulation design split (intentional):**
+  `map_acp_line` stays pure/stateless (`agent_message_chunk -> AssistantDelta`, `result.stopReason ->
+  TurnCompleted{reply:""}`), while `OpenCodeAcpTransport::next_event` performs stateful accumulation
+  (`AssistantDelta` appends to `accumulated_reply`; `TurnCompleted` replaces empty reply with
+  `mem::take(&mut accumulated_reply)`).
+- **ASSUMED tool/gate rows remain intentionally unmapped:** non-`agent_message_chunk` updates (including
+  tool/gate-shaped updates) are ignored until real captures pin concrete shapes.
+
+Honest residual gap:
+- **`resume` RPC shape is ASSUMED, not spike-captured.** Spike 0′ captured resume capability advertisement but
+  did not exercise a resume round-trip. This landing uses `session/load {sessionId,cwd,mcpServers}` as the
+  documented counterpart to `session/new`, with fallback to the requested native id when response omits
+  `result.sessionId`. Follow-up live capture is required before calling this fully verified.
+
+Verification summary for this landing:
+- `cargo test -p wasl-runtime-protocol`: green.
+- `cargo test -p wasl-runtime-protocol --features live-cli --no-run`: compile-clean (no live execution).
+- `cargo build --workspace`: clean.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+- `cargo fmt --check`: clean.
+
+Coverage honesty (`cargo llvm-cov -p wasl-runtime-protocol --summary-only`):
+- `opencode_acp.rs`: **27.54% lines / 26.38% regions**.
+- This low default-run coverage is expected and honest: the uncovered area is predominantly spawn/handshake/
+  supervise/escalation plumbing, which is only meaningfully exercised by deferred live-cli runs; mapping logic
+  is covered by byte-exact unit fixtures in `#[cfg(test)]`.
+
+Genericity assertion still holds:
+- **No new `ProtocolEvent` variants and no new `TargetStatus` variants were required.**
+- `crates/wasl-runtime/src/lib.rs` remained untouched in Phase-5.

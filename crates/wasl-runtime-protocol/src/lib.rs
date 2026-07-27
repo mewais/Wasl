@@ -28,9 +28,11 @@
 
 mod claude_stream;
 mod fake_line;
+mod opencode_acp;
 
 pub use claude_stream::ClaudeStreamProtocol;
 pub use fake_line::{FakeLineProtocol, SupervisionTimeouts};
+pub use opencode_acp::OpenCodeAcpProtocol;
 
 // The R1-owned generic driver contract every R2 driver implements/maps onto.
 // Re-surfaced here to make the R2 → R1 edge explicit.
