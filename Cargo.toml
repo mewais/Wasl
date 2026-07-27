@@ -25,6 +25,7 @@ members = [
     "crates/wasl-runtime",
     "crates/wasl-runtime-protocol",
     "crates/wasl-session",
+    "crates/wasl-runtime-control",
 ]
 
 [workspace.package]
@@ -58,6 +59,7 @@ wasl-server = { path = "crates/wasl-server" }
 wasl-runtime = { path = "crates/wasl-runtime" }
 wasl-runtime-protocol = { path = "crates/wasl-runtime-protocol" }
 wasl-session = { path = "crates/wasl-session" }
+wasl-runtime-control = { path = "crates/wasl-runtime-control" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"

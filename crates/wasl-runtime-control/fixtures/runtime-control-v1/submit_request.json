@@ -1,0 +1,8 @@
+{
+  "delivery": { "context_id": "ctx-42", "from": "human", "kind": "message",
+                "text": "remember token VIOLET-7F29", "data": [] },
+  "source": { "type": "local_human" },
+  "idempotency_key": "opt-key-1",
+  "busy_policy": { "type": "queue", "max_wait_ms": 30000 },
+  "causation": { "root_request": "req-1", "parent_request": null, "path": [], "hop": 0 }
+}

@@ -26,6 +26,8 @@
 
 use wasl_proto::GateDecision;
 
+pub mod client;
+
 /// The `wasl session gate <target> approve|deny [--reason]` argument (session.md
 /// §gate). This is the PUBLIC vocabulary the CLI expresses over R4 — not a
 /// control-plane action (that is Phase-2).

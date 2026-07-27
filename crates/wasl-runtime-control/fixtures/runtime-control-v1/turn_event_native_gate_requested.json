@@ -1,0 +1,1 @@
+{ "type": "native_gate_requested", "turn_id": "turn-7", "detail": { "summary": "write access", "preview": "rm -rf /tmp/x" } }

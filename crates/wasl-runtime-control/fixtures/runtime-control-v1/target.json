@@ -1,0 +1,13 @@
+{
+  "target_id": "tgt-1",
+  "key": "ctx-42",
+  "capabilities": {
+    "persistent_process": true, "persistent_conversation": true, "structured_turns": true,
+    "streaming_output": false, "attachable": true, "interruptible": false,
+    "structured_provenance": true, "resumable": true
+  },
+  "status": { "type": "idle", "since": "2026-07-02T12:00:00.000Z" },
+  "last_seq": 12,
+  "queued": 0,
+  "native_session_id": "…"
+}
