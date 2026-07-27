@@ -99,16 +99,36 @@ fn a2a_turn(context_id: &str, text: &str) -> TurnRequest {
     }
 }
 
-async fn drain_all(stream: wasl_runtime::TurnEventStream) -> Vec<TurnEvent> {
-    stream
-        .filter_map(|item| async move {
-            match item {
-                StreamItem::Event { event, .. } => Some(event),
-                StreamItem::Truncated { .. } => None,
-            }
-        })
-        .collect()
-        .await
+/// Drain `stream` until `done(&events_so_far)` is true, or `bound` elapses (a
+/// hang-guard). **Bug fix, found by actually running this against a real
+/// driver:** a real managed target's `events()` is a genuinely LIVE tail that
+/// never ends while the target is alive — the original `drain_all` used
+/// `.collect()` (wait for stream END), which hangs FOREVER against it. See
+/// the identical fix in `crates/wasl-runtime/tests/conformance_suite.rs` /
+/// `tests/claude_conformance.rs`.
+async fn drain_until(
+    mut stream: wasl_runtime::TurnEventStream,
+    bound: Duration,
+    mut done: impl FnMut(&[TurnEvent]) -> bool,
+) -> Vec<TurnEvent> {
+    let mut out = Vec::new();
+    let deadline = tokio::time::Instant::now() + bound;
+    loop {
+        if done(&out) {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, stream.next()).await {
+            Ok(Some(StreamItem::Event { event, .. })) => out.push(event),
+            Ok(Some(StreamItem::Truncated { .. })) => continue,
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    out
 }
 
 fn completed_reply_for(events: &[TurnEvent], turn_id: &TurnId) -> Option<String> {
@@ -152,7 +172,12 @@ async fn same_pid_and_native_session_serves_a_human_send_and_an_a2a_consult() {
         other => panic!("expected Started for the human turn, got {other:?}"),
     };
 
-    let events_after_1 = drain_all(target.events(EventSeq(0)).await).await;
+    let events_after_1 = drain_until(
+        target.events(EventSeq(0)).await,
+        Duration::from_secs(60),
+        |evs| completed_reply_for(evs, &turn1_id).is_some(),
+    )
+    .await;
     let observed_native = events_after_1.iter().find_map(|e| match e {
         TurnEvent::SessionReady { native } => native.clone(),
         _ => None,
@@ -187,7 +212,12 @@ async fn same_pid_and_native_session_serves_a_human_send_and_an_a2a_consult() {
     };
     assert_ne!(turn1_id, turn2_id, "the two turns must have distinct ids");
 
-    let events_after_2 = drain_all(target.events(EventSeq(0)).await).await;
+    let events_after_2 = drain_until(
+        target.events(EventSeq(0)).await,
+        Duration::from_secs(60),
+        |evs| completed_reply_for(evs, &turn2_id).is_some(),
+    )
+    .await;
     let reply2 = completed_reply_for(&events_after_2, &turn2_id)
         .expect("no TurnCompleted correlated to the A2A turn's OWN turn_id");
     assert!(
@@ -272,7 +302,15 @@ async fn busy_policy_queues_a_second_turn_behind_an_active_one() {
     };
     assert_ne!(turn1_id, turn2_id, "the two turns must have distinct ids");
 
-    let events = drain_all(target.events(EventSeq(0)).await).await;
+    let events = drain_until(
+        target.events(EventSeq(0)).await,
+        Duration::from_secs(90),
+        |evs| {
+            completed_reply_for(evs, &turn1_id).is_some()
+                && completed_reply_for(evs, &turn2_id).is_some()
+        },
+    )
+    .await;
     let reply1 = completed_reply_for(&events, &turn1_id).expect("turn 1 must complete");
     let reply2 = completed_reply_for(&events, &turn2_id).expect("turn 2 must complete");
     assert!(

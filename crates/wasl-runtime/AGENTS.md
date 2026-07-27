@@ -221,6 +221,23 @@ lines ARE covered (by `gate_and_events::tool_started_then_finished_...` and the 
 pre-existing Phase-2A residuals (causation re-check, journal dedupe, provider actor-died arms) are unchanged.
 `--fail-under-lines 100` still exits 1 for these documented, genuinely-not-yet-exercised-by-a-live-test lines.
 
+## Post-landing fix (found by actually running a Phase-4 live-cli test to completion)
+
+`tests/conformance_suite.rs`'s `drain_events` (`stream.filter_map(...).collect().await`) only ever worked
+against `EphemeralTarget` because `EphemeralTarget::events()` returns a FINITE, always-terminating
+`Vec`-backed stream. A REAL managed target's `events()` (the journal's broadcast-live-tail, §4.3/§5.1) is
+designed to NEVER end while the target is alive (that is the whole point, for `attach`) — `.collect()`
+against it hangs FOREVER waiting for a stream-end that never comes. This was never caught in-sandbox because
+the sandboxed tool session's `claude`/`opencode` CLIs kept crashing (a Bun memory issue, unrelated) before a
+live-cli test ever ran far enough to hit it; the user's first real, unconstrained run of
+`claude_conformance.rs` hung on exactly this. Fixed by replacing `drain_events` with `drain_until(stream,
+bound, done)` — bounded by a hang-guard timeout, stopping as soon as the caller's predicate (typically "the
+turn(s) of interest have a `TurnCompleted`/`TurnFailed`") is satisfied — which works correctly for BOTH a
+finite ephemeral stream and an infinite live managed one. Mirrored identically into the two R2 copies
+(`wasl-runtime-protocol/tests/claude_conformance.rs`, `opencode_acp_conformance.rs`) and into the two
+`drain_all`-using live e2e test files (`claude_live_pid_and_queueing.rs`,
+`opencode_acp_live_streaming_and_queueing.rs`), which had the identical bug.
+
 ## Phase-3 scope (LANDED) — `EphemeralRuntimeProvider`/`EphemeralTarget`
 
 Phase 3 wraps today's headless adapters (claude/codex/antigravity/opencode, via `wasl_adapter::AgentAdapter`)

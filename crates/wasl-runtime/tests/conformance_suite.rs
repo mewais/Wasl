@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::StreamExt;
 
@@ -78,16 +79,44 @@ fn sample_request(context_id: String, text: String) -> TurnRequest {
     }
 }
 
-async fn drain_events(stream: wasl_runtime::TurnEventStream) -> Vec<TurnEvent> {
-    stream
-        .filter_map(|item| async move {
-            match item {
-                StreamItem::Event { event, .. } => Some(event),
-                StreamItem::Truncated { .. } => None,
-            }
-        })
-        .collect()
-        .await
+/// Drain `stream` until `done(&events_so_far)` is true, or `bound` elapses (a
+/// hang-guard, never the normal exit path for a well-behaved driver).
+///
+/// A REAL managed target's `events()` is a genuinely LIVE tail (per
+/// `runtime.md` §5.1 / the R1 journal's broadcast-live-tail design) — it is
+/// designed to NEVER end while the target is alive (that is the whole point,
+/// for `attach`). `EphemeralTarget`'s `events()` happens to be a finite,
+/// always-terminating `Vec`-backed stream, so a naive `.collect()` (which
+/// waits for the stream to END) only ever worked here BY ACCIDENT of which
+/// target this suite was run against in Phase 3 — it hangs FOREVER against
+/// any real managed driver (Phase 4/5), since the live tail never yields
+/// `None`. This bounded, predicate-driven drain is the fix: it stops as soon
+/// as the caller-supplied condition is satisfied (typically "the turn(s) we
+/// care about have a `TurnCompleted`/`TurnFailed`"), working correctly for
+/// BOTH a finite ephemeral stream and an infinite live managed one.
+async fn drain_until(
+    mut stream: wasl_runtime::TurnEventStream,
+    bound: Duration,
+    mut done: impl FnMut(&[TurnEvent]) -> bool,
+) -> Vec<TurnEvent> {
+    let mut out = Vec::new();
+    let deadline = tokio::time::Instant::now() + bound;
+    loop {
+        if done(&out) {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, stream.next()).await {
+            Ok(Some(StreamItem::Event { event, .. })) => out.push(event),
+            Ok(Some(StreamItem::Truncated { .. })) => continue,
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    out
 }
 
 /// Extract the reply of the `TurnCompleted` event belonging SPECIFICALLY to
@@ -119,7 +148,12 @@ async fn conformance(target: &dyn DeliveryTarget) {
             TurnReceipt::Started { turn_id, .. } => turn_id,
             other => panic!("expected Started for 'remember' turn, got {other:?}"),
         };
-        let remember_events = drain_events(target.events(EventSeq(0)).await).await;
+        let remember_events = drain_until(
+            target.events(EventSeq(0)).await,
+            Duration::from_secs(60),
+            |evs| completed_reply_for(evs, &remember_turn_id).is_some(),
+        )
+        .await;
         let remember_reply = completed_reply_for(&remember_events, &remember_turn_id)
             .expect("no TurnCompleted correlated to the 'remember' turn_id");
         assert!(
@@ -133,7 +167,12 @@ async fn conformance(target: &dyn DeliveryTarget) {
             TurnReceipt::Started { turn_id, .. } => turn_id,
             other => panic!("expected Started for 'recall' turn, got {other:?}"),
         };
-        let recall_events = drain_events(target.events(EventSeq(0)).await).await;
+        let recall_events = drain_until(
+            target.events(EventSeq(0)).await,
+            Duration::from_secs(60),
+            |evs| completed_reply_for(evs, &recall_turn_id).is_some(),
+        )
+        .await;
         let recall_reply = completed_reply_for(&recall_events, &recall_turn_id).expect(
             "no TurnCompleted correlated to the 'recall' turn_id (NOT the 'remember' turn's)",
         );
