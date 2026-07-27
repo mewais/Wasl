@@ -336,7 +336,9 @@ impl<P: InteractiveProtocol + 'static> WaslManagedRuntimeProvider<P> {
 
     async fn create_target(&self, key: &TargetKey) -> Result<Arc<ManagedTarget>, RuntimeError> {
         let caps = self.protocol.capabilities();
-        let opts = SpawnOptions::default();
+        let opts = SpawnOptions {
+            target_key: Some(key.clone()),
+        };
         let transport = self.protocol.spawn(&opts).await?;
 
         let shared = Arc::new(Shared {

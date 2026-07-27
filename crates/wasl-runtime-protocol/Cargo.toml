@@ -39,12 +39,31 @@ doc_lazy_continuation = "allow"
 # has no redundant closures.
 redundant_closure = "allow"
 
+[features]
+# Real-CLI tests are gated behind this cargo feature (NOT `#[ignore]`), per
+# `docs/specs/runtime-protocol.md` §"`--features live-cli` discipline" and the
+# `wasl-adapter-claude`/`wasl-adapter-opencode` `tests/live.rs` precedent —
+# default CI never spends tokens; the orchestrator asserts these RAN in
+# explicit verification passes: `cargo test -p wasl-runtime-protocol --features
+# live-cli`.
+live-cli = []
+
 [dependencies]
 wasl-runtime = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["process", "io-util", "io-std", "time", "sync", "macros", "rt", "rt-multi-thread", "signal"] }
+# Phase 4 (`ClaudeStreamProtocol`): mints a byte-stable UUIDv5 session id from a
+# context id, EXACTLY as `wasl-adapter-claude::session_uuid` does — same
+# UUIDv5 scheme AND the SAME literal namespace value (`2441e851-1801-440d-
+# a8e9-214d1df08e6e`), so a context_id maps to the SAME native claude session
+# whether delivered via the ephemeral adapter or the managed runtime. The
+# constant is independently DECLARED here (no cross-crate dependency on
+# `wasl-adapter-claude`, per this crate's own dependency direction), not
+# imported, but is bit-for-bit identical by design; see
+# `crates/wasl-runtime-protocol/AGENTS.md` Phase-4 section.
+uuid = { version = "1", features = ["v5"] }
 
 [dev-dependencies]
 tokio = { workspace = true }

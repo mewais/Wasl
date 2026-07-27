@@ -26,8 +26,10 @@
 
 #![forbid(unsafe_code)]
 
+mod claude_stream;
 mod fake_line;
 
+pub use claude_stream::ClaudeStreamProtocol;
 pub use fake_line::{FakeLineProtocol, SupervisionTimeouts};
 
 // The R1-owned generic driver contract every R2 driver implements/maps onto.

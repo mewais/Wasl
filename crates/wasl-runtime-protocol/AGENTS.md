@@ -147,3 +147,31 @@ because the two new command branches add well-formed-only-driven arms + the `too
 whose missing-field fallbacks the tester's well-formed `req_ask_wasl_*` builders never trigger — the same
 intentionally-un-exhaustively-driven-fixture posture as Phase-2B, NOT gamed). TOTAL ~76.9% line.
 `--fail-under-lines 100` exits 1 for the same documented reasons as Phase-2B.
+
+## Phase-4 scope (LANDED) — `ClaudeStreamProtocol` (real claude `stream-json` driver)
+
+Phase-4 added `src/claude_stream.rs` and re-export wiring in `src/lib.rs` (`mod claude_stream; pub use
+claude_stream::ClaudeStreamProtocol;`). The driver launches the real claude CLI as a persistent child with the
+VERIFIED argv shape (`claude -p --input-format stream-json --output-format stream-json --verbose --session-id
+<uuid>`), maps stream-json lines to R1 `ProtocolEvent`, and owns the same IO-shell supervision discipline as
+`FakeLineProtocol` (stderr drain, watchdog, bounded interrupt→TERM→KILL escalation, EPIPE/WriteZero-benign stdin
+write policy, reap-on-drop).
+
+Key behavioral pins that landed:
+- **Native id minting:** `spawn` requires `SpawnOptions::target_key()` and derives `--session-id` via UUIDv5 with
+  the SAME namespace literal as `wasl-adapter-claude` (`2441e851-1801-440d-a8e9-214d1df08e6e`), declared
+  independently in this crate to keep dependency direction clean.
+- **`resume`:** re-attaches using the supplied `NativeSessionId` bytes verbatim (`--session-id <native>`), not
+  re-derived from `SpawnOptions`.
+- **`send_turn`:** emits one JSON-escaped NDJSON user message line via `serde_json` + newline + flush.
+- **Event mapping:** `system/init -> SessionReady`, `assistant.text -> AssistantDelta` (one per text block),
+  `result{is_error:false,result} -> TurnCompleted`, `result{is_error:true,error?} -> TurnFailed` with the
+  fixed missing-error fallback string. Malformed/unknown lines are ignored (framing continues).
+- **First-turn-only `SessionReady` normalization:** claude emits repeated `system/init`; transport-level
+  `session_ready_seen` suppresses all repeats after the first, so R1's public `TurnEvent::SessionReady` remains
+  first-turn-only.
+
+Coder-owned `#[cfg(test)]` unit tests in `src/claude_stream.rs` pin byte-exact mapping fixtures for captured
+wire rows and document the intentional, spec-cited residual gaps: `assistant.tool_use` and `user.tool_result`
+remain unmapped (`vec![]`) until a follow-up real tool/gate capture exists (`runtime-protocol.md` §2.1 ASSUMED
+rows).

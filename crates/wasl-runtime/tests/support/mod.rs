@@ -384,6 +384,12 @@ pub struct ScriptedProtocol {
     /// `spawn` naturally has such a yield point; the scripted double is otherwise
     /// synchronous, which would close the race window.
     slow_spawn: std::sync::atomic::AtomicBool,
+    /// The `SpawnOptions::target_key()` seen on the MOST RECENT `spawn`/`resume`
+    /// call (Phase-4 wiring proof: `runtime.md` §6 line 547 documents
+    /// `target_key` as a `SpawnOptions` field; `create_target` must populate it
+    /// so a real driver like `ClaudeStreamProtocol` can derive a context-scoped
+    /// native identity). `None` until the first `spawn`/`resume`.
+    last_spawn_target_key: Mutex<Option<TargetKey>>,
 }
 
 struct PreparedTransport {
@@ -428,6 +434,7 @@ impl ScriptedProtocol {
             order_counter: Arc::new(AtomicU64::new(0)),
             spawn_failures: Mutex::new(std::collections::HashSet::new()),
             slow_spawn: std::sync::atomic::AtomicBool::new(false),
+            last_spawn_target_key: Mutex::new(None),
         })
     }
 
@@ -436,6 +443,13 @@ impl ScriptedProtocol {
     /// concurrent-`target_for` test; harmless (a single-op no-op) otherwise.
     pub fn enable_slow_spawn(&self) {
         self.slow_spawn.store(true, Ordering::SeqCst);
+    }
+
+    /// The `SpawnOptions::target_key()` observed on the most recent `spawn`/
+    /// `resume` call, if any — the Phase-4 wiring proof (see the struct field
+    /// doc). `None` before any call.
+    pub fn last_spawn_target_key(&self) -> Option<TargetKey> {
+        self.last_spawn_target_key.lock().unwrap().clone()
     }
 
     /// The global order counter shared with a [`RecordingSink`] so
@@ -488,23 +502,28 @@ impl InteractiveProtocol for ScriptedProtocol {
         if self.slow_spawn.load(Ordering::SeqCst) {
             tokio::task::yield_now().await;
         }
-        // `SpawnOptions` fields are private in the frozen surface; the scripted
-        // protocol keys off install-order when it cannot read the target key.
-        // The coder's Phase-2A `SpawnOptions` MUST expose the target key to a
-        // driver (runtime.md §6 line 547: "target_key" is a documented field) —
-        // when it does, this pops the exact key; until then it pops any pending
-        // script FIFO (single-target tests are unaffected).
-        let _ = opts;
-        let key = self
-            .scripts
-            .lock()
-            .unwrap()
-            .keys()
-            .next()
-            .cloned()
-            .ok_or_else(|| RuntimeError::SpawnFailed {
-                detail: "no scripted transport installed".into(),
-            })?;
+        // Phase-4 closed the FROZEN-SURFACE GAP this comment used to describe:
+        // `SpawnOptions` now exposes `target_key()` (runtime.md §6 line 547),
+        // populated by `create_target`. Record it (the wiring proof
+        // `spawn_options_target_key.rs` inspects via `last_spawn_target_key()`),
+        // then prefer the EXACT keyed script when one was installed under that
+        // key; fall back to install-order FIFO otherwise (every pre-Phase-4 test
+        // installs one script per call and never relies on ordering across
+        // distinct keys, so this fallback keeps them unaffected).
+        *self.last_spawn_target_key.lock().unwrap() = opts.target_key().cloned();
+        let key = {
+            let scripts = self.scripts.lock().unwrap();
+            match opts.target_key() {
+                Some(k) if scripts.contains_key(&k.0) => k.0.clone(),
+                _ => scripts
+                    .keys()
+                    .next()
+                    .cloned()
+                    .ok_or_else(|| RuntimeError::SpawnFailed {
+                        detail: "no scripted transport installed".into(),
+                    })?,
+            }
+        };
         if self.spawn_failures.lock().unwrap().contains(&key) {
             return Err(RuntimeError::SpawnFailed {
                 detail: format!("scripted spawn failure for {key}"),

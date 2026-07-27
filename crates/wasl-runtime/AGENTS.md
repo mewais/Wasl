@@ -255,3 +255,14 @@ REGION 77.88% (104, 23 missed). The happy-path code (the single `deliver` call, 
 Also open (non-blocking, tester territory): `crates/wasl-mcp/tests/config_pure.rs`'s
 `display_strings_are_pinned_exactly` does not yet pin `ConfigError::UnknownRuntimeKind`'s Display string
 (the one new `wasl-mcp/src/config.rs` line this leaves uncovered).
+
+## Phase-4 addendum (LANDED) — `SpawnOptions.target_key` un-opaqued for real drivers
+
+Phase-4 made the minimal planned surface extension in `src/lib.rs`: `SpawnOptions` now carries
+`pub(crate) target_key: Option<TargetKey>` plus a read-only accessor `target_key(&self) -> Option<&TargetKey>`.
+This preserves backward compatibility (`#[derive(Default)]` unchanged, so existing `SpawnOptions::default()`
+callers still get `None`) while enabling the first real driver that genuinely needs context-scoped identity
+minting (`ClaudeStreamProtocol` UUIDv5 session-id derivation) to read the context id without widening the rest
+of the options surface. `provider.rs::create_target` now populates this field (`Some(key.clone())`) before
+`protocol.spawn(&opts)`. No other `SpawnOptions` fields were introduced in this phase, and existing runtime
+behavior/tests remained unchanged apart from the new accessor contract.

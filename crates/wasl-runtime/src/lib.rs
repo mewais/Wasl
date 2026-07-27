@@ -745,8 +745,18 @@ pub enum ProtocolEvent {
 /// drivers construct/read them.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SpawnOptions {
-    // Private: bin, model, env pairs, target_key, native (for resume). Kept
-    // opaque for Phase-1; R2 populates these behind constructors it owns.
+    pub(crate) target_key: Option<TargetKey>,
+}
+
+impl SpawnOptions {
+    /// The target key (`TargetKey == context_id`) this spawn/resume is for, if
+    /// the provider populated one. R2 drivers that need to derive a
+    /// context-scoped native identity (e.g. `ClaudeStreamProtocol`'s UUIDv5
+    /// minting) read this; drivers that mint their own arbitrary native id
+    /// (e.g. `FakeLineProtocol`) may ignore it.
+    pub fn target_key(&self) -> Option<&TargetKey> {
+        self.target_key.as_ref()
+    }
 }
 
 /// The prompt the actor hands the transport — the model-visible provenance
@@ -896,3 +906,13 @@ impl std::fmt::Display for RuntimeError {
 }
 
 impl std::error::Error for RuntimeError {}
+
+#[cfg(test)]
+mod tests {
+    use super::SpawnOptions;
+
+    #[test]
+    fn spawn_options_default_has_no_target_key() {
+        assert!(SpawnOptions::default().target_key().is_none());
+    }
+}
