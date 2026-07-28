@@ -46,6 +46,32 @@ impl Default for SupervisionTimeouts {
 
 const POLL_IDLE: Duration = Duration::from_millis(500);
 
+/// Compute how long `pull_one` should block on the next event.
+///
+/// While a turn is in flight, wait the FULL remaining hang-watchdog budget (so a
+/// real but slow event — e.g. claude's `system/init`, which lands seconds after
+/// `send_turn` on a cold invocation — is always retrieved, never lost to the
+/// generic R1 actor's park-on-`None` race). NEVER cap this at `poll_idle`: the
+/// bug this guards against was capping the in-flight wait at the short `poll_idle`
+/// breather, so a `None` was returned before the real event arrived; the actor
+/// then parked on its mailbox with no re-poll timer and the event was lost
+/// forever. When idle (no turn), a `poll_idle` breather is correct — nothing is
+/// coming until the next `send_turn`, so the actor SHOULD park.
+fn next_wait(
+    turn_in_flight: bool,
+    elapsed: Duration,
+    hang_watchdog: Duration,
+    poll_idle: Duration,
+) -> Duration {
+    if turn_in_flight {
+        hang_watchdog
+            .saturating_sub(elapsed)
+            .max(Duration::from_millis(1))
+    } else {
+        poll_idle
+    }
+}
+
 pub struct ClaudeStreamProtocol {
     bin: PathBuf,
     timeouts: SupervisionTimeouts,
@@ -274,13 +300,28 @@ impl ClaudeStreamTransport {
             Err(mpsc::error::TryRecvError::Empty) => {}
         }
 
-        let wait = if self.turn_in_flight {
-            let elapsed = self.last_event_at.elapsed();
-            let remaining = self.timeouts.hang_watchdog.saturating_sub(elapsed);
-            POLL_IDLE.min(remaining.max(Duration::from_millis(1)))
-        } else {
-            POLL_IDLE
-        };
+        // While a turn is in flight, BLOCK for the full remaining hang-watchdog
+        // budget on the next real event — do NOT return `None` on a mere
+        // `POLL_IDLE` breather. The generic R1 actor, on a `None` from an active
+        // turn, parks purely on its mailbox with NO re-poll timer (actor.rs
+        // `run`: `None if self.active.is_some() => self.mailbox.recv().await`); it
+        // is only re-woken by a `Poke`, which `events()` sends ONCE at subscribe.
+        // A real event that arrives AFTER the actor has parked (e.g. claude's
+        // `system/init`, which on a cold invocation lands seconds later — well
+        // past `POLL_IDLE` — because of MCP-server connection time) would sit
+        // unretrieved in the channel FOREVER. Waiting the full watchdog budget
+        // here means an in-flight event is always delivered whenever it arrives
+        // (bounded by the watchdog), never lost to that park race. When idle (no
+        // turn in flight) a `POLL_IDLE` `None` breather is still correct: nothing
+        // is coming until the next `send_turn`, so the actor SHOULD park. Tradeoff:
+        // while in-flight, mailbox-only control messages (e.g. cancel/shutdown)
+        // can be delayed until this wait returns (real event or watchdog expiry).
+        let wait = next_wait(
+            self.turn_in_flight,
+            self.last_event_at.elapsed(),
+            self.timeouts.hang_watchdog,
+            POLL_IDLE,
+        );
 
         match tokio::time::timeout(wait, self.events.recv()).await {
             Ok(Some(ev)) => Some(ev),
@@ -636,5 +677,75 @@ mod tests {
         let c = session_uuid("ctx-2");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    // =================================================================
+    // Regression guard for the in-flight `next_wait` bug (the pure
+    // wait-duration policy `pull_one` calls). The bug: while a turn was in
+    // flight the wait was capped at the short `POLL_IDLE` (500ms) breather
+    // REGARDLESS of the real hang-watchdog budget, so `pull_one` returned a
+    // spurious `None` after 500ms; the generic R1 actor then parked on its
+    // mailbox with no re-poll timer and a real event arriving later (e.g.
+    // claude's `system/init`, 3-7s in) was LOST FOREVER. The fix waits the FULL
+    // remaining watchdog budget while in flight. These table-driven cases pin
+    // that policy; reverting `next_wait` to the old `POLL_IDLE.min(...)` body
+    // makes the first case FAIL (proven fail-before/pass-after).
+    // =================================================================
+
+    const WATCHDOG: Duration = Duration::from_secs(60);
+    const IDLE: Duration = Duration::from_millis(500);
+
+    #[test]
+    fn next_wait_in_flight_uses_full_watchdog_not_poll_idle() {
+        // In flight, only 10ms elapsed of a 60s budget: the wait MUST be ~60s
+        // (the full remaining budget), NOT capped at the 500ms POLL_IDLE. This
+        // is the exact case the bug got wrong.
+        let w = next_wait(true, Duration::from_millis(10), WATCHDOG, IDLE);
+        assert_eq!(
+            w,
+            WATCHDOG - Duration::from_millis(10),
+            "in-flight wait must be the full remaining watchdog budget, not POLL_IDLE"
+        );
+        assert!(
+            w > IDLE,
+            "the in-flight wait must exceed POLL_IDLE ({IDLE:?}); got {w:?} \
+             (the old bug capped it at POLL_IDLE and lost slow real events)"
+        );
+    }
+
+    #[test]
+    fn next_wait_in_flight_near_watchdog_returns_small_remainder() {
+        // 59.9s elapsed of a 60s budget → ~100ms remaining. Still the true
+        // remainder (NOT POLL_IDLE.min(remainder), which the old buggy body
+        // would ALSO have returned here — so this case alone does not
+        // distinguish; it pins the boundary behavior correctly regardless).
+        let elapsed = Duration::from_millis(59_900);
+        let w = next_wait(true, elapsed, WATCHDOG, IDLE);
+        assert_eq!(
+            w,
+            Duration::from_millis(100),
+            "near the watchdog, the wait is the small true remainder"
+        );
+    }
+
+    #[test]
+    fn next_wait_in_flight_past_watchdog_clamps_to_one_millisecond() {
+        // Elapsed >= watchdog → saturating_sub is zero, clamped up to 1ms so the
+        // timeout still fires (and `pull_one` then trips the watchdog terminal).
+        let w = next_wait(true, WATCHDOG + Duration::from_secs(5), WATCHDOG, IDLE);
+        assert_eq!(w, Duration::from_millis(1));
+    }
+
+    #[test]
+    fn next_wait_idle_is_exactly_poll_idle_regardless_of_elapsed() {
+        // Not in flight → always exactly POLL_IDLE, no matter the elapsed value.
+        assert_eq!(
+            next_wait(false, Duration::from_millis(0), WATCHDOG, IDLE),
+            IDLE
+        );
+        assert_eq!(
+            next_wait(false, Duration::from_secs(120), WATCHDOG, IDLE),
+            IDLE
+        );
     }
 }

@@ -176,6 +176,47 @@ wire rows and document the intentional, spec-cited residual gaps: `assistant.too
 remain unmapped (`vec![]`) until a follow-up real tool/gate capture exists (`runtime-protocol.md` §2.1 ASSUMED
 rows).
 
+## Post-Phase-5 fix — the in-flight `pull_one` event-loss bug (found by the first real end-to-end run)
+
+The very first real, end-to-end execution of `ClaudeStreamProtocol` against the actual `claude` CLI (by a
+human, outside the sandboxed dev session — every earlier attempt crashed on an unrelated Bun memory issue
+before reaching this code path) found a genuine, always-reproducing bug: `pull_one`'s in-flight wait was
+capped at `POLL_IDLE` (500ms) regardless of the real hang-watchdog budget. `wasl-runtime`'s generic actor
+(`actor.rs::run`, `PumpNext::Pump`) calls `transport.next_event().await` as a STANDALONE await; a spurious
+`None` while a turn is active makes the actor park purely on its mailbox, re-woken only by a one-shot `Poke`
+sent at subscribe. claude's real `system/init` lands 3-7s in (MCP-server connection time) — well past
+500ms — so it was lost FOREVER every single time, hanging the turn until the watchdog eventually killed the
+child. Fixed in both `claude_stream.rs` and `opencode_acp.rs`: `pull_one` now extracts its wait-duration
+calculation into a pure `next_wait(...)` helper that, while a turn is in flight, waits the FULL remaining
+hang-watchdog budget (not a short breather) — proven with `#[cfg(test)]` table-driven unit tests, fail-before/
+pass-after verified live by an independent audit (reverting `next_wait` to the old `poll_idle.min(...)` body
+reproducibies the bug's signature: `left: 500ms, right: 59.99s`).
+
+**Investigated and correctly NOT applied to `fake_line.rs`:** the identical buggy pattern exists there too,
+but applying the same fix regresses `tests/bidirectional_genericity.rs` (4 tests) — that suite's
+`resolve_native_gate`/`answer_tool_call` mailbox commands, sent while a turn is active, depend on the actor
+periodically returning from `next_event()` (via the short `POLL_IDLE` breather) to service its mailbox;
+blocking for the full 60s watchdog starves them (their probe timeouts are ~3s, far shorter). `fake_line.rs`
+was left unchanged; this was independently re-derived and confirmed by audit, not just asserted.
+
+**Why the claude/opencode fix is safe today despite this:** neither `map_claude_line` nor `map_acp_line` ever
+produces `ProtocolEvent::NativeGateRequested` or `ProtocolEvent::ToolStarted` (both drivers deliberately leave
+every tool/gate wire shape ASSUMED-unmapped, per their own pure-mapping test suites) — so neither driver can
+put the actor into `AwaitingGate`/`RunningTool`, and the `fake_line.rs` starvation scenario is structurally
+impossible for them today. The one REAL, still-live residual: `cancel_turn`/`shutdown` also route through the
+same mailbox and can now be delayed (bounded by the watchdog, never infinite) while a turn is in flight —
+documented explicitly in both files' `pull_one` doc comments, not hidden.
+
+**Required follow-up (gating, not optional) before either driver's mapping is EVER extended to cover a real
+gate/tool wire shape (a Phase-0'-follow-up capture is already a documented prerequisite for that, per
+`runtime-protocol.md` §2.1/§3.1):** the generic actor's `actor.rs::run` `PumpNext::Pump` arm must race
+`next_event()` against `mailbox.recv()` (e.g. via `tokio::select!`) instead of a standalone await, so a
+mailbox command preempts a blocking `next_event()` without needing it to return first — while preserving the
+existing "never cancelled mid-event" invariant (a `select!` must only accept the mailbox branch when
+`next_event()` genuinely hasn't produced anything yet, not cancel an in-flight event). Once that lands,
+`fake_line.rs`'s `pull_one` should also be lifted to the same full-watchdog-budget policy for consistency
+across all three drivers.
+
 ## Phase-5 scope (LANDED) — `OpenCodeAcpProtocol` (real opencode `acp` JSON-RPC-over-stdio driver)
 
 Phase-5 added `src/opencode_acp.rs` plus crate-root export wiring in `src/lib.rs`
