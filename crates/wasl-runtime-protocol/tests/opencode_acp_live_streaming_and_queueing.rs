@@ -128,6 +128,34 @@ fn completed_reply_for(events: &[TurnEvent], turn_id: &TurnId) -> Option<String>
     })
 }
 
+/// Diagnostic summary of what `drain_until` actually saw before giving up
+/// (either the predicate was satisfied, or the hang-guard bound elapsed) --
+/// so a failure tells us WHERE the pipeline got stuck (never even got
+/// SessionReady? got deltas but no terminal? something else entirely?)
+/// instead of just "no TurnCompleted correlated."
+fn describe_events(events: &[TurnEvent]) -> String {
+    if events.is_empty() {
+        return "<no events observed at all>".to_string();
+    }
+    events
+        .iter()
+        .map(|e| match e {
+            TurnEvent::SessionReady { native } => format!("SessionReady{{native:{native:?}}}"),
+            TurnEvent::TurnAccepted { turn_id, .. } => format!("TurnAccepted{{{turn_id:?}}}"),
+            TurnEvent::AssistantDelta { turn_id, text } => {
+                format!("AssistantDelta{{{turn_id:?}, {} chars}}", text.len())
+            }
+            TurnEvent::TurnCompleted { turn_id, .. } => format!("TurnCompleted{{{turn_id:?}}}"),
+            TurnEvent::TurnFailed { turn_id, error, .. } => {
+                format!("TurnFailed{{{turn_id:?}, {error}}}")
+            }
+            TurnEvent::ProcessExited { code } => format!("ProcessExited{{code:{code:?}}}"),
+            other => format!("{other:?}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// §5.3: same PID/native-session-id serves a human `send` and a follow-up
 /// A2A `consult` -- NOT a fresh spawn. Unlike claude (whose native id is
 /// client-minted, byte-stable independent of the CLI), opencode's native id
@@ -156,7 +184,7 @@ async fn same_pid_and_native_session_serves_a_human_send_and_an_a2a_consult() {
 
     let events_after_1 = drain_until(
         target.events(EventSeq(0)).await,
-        Duration::from_secs(60),
+        Duration::from_secs(240),
         |evs| completed_reply_for(evs, &turn1_id).is_some(),
     )
     .await;
@@ -166,14 +194,27 @@ async fn same_pid_and_native_session_serves_a_human_send_and_an_a2a_consult() {
             TurnEvent::SessionReady { native } => native.clone(),
             _ => None,
         })
-        .expect("no SessionReady observed after turn 1");
+        .unwrap_or_else(|| {
+            panic!(
+                "no SessionReady observed after turn 1 (turn_id {:?}) within the 240s \
+                 hang-guard bound. Events actually observed: {}",
+                turn1_id,
+                describe_events(&events_after_1)
+            )
+        });
     assert!(
         native_1.0.starts_with("ses_"),
         "opencode-minted session ids are VERIFIED to start with ses_, got {:?}",
         native_1.0
     );
-    let reply1 = completed_reply_for(&events_after_1, &turn1_id)
-        .expect("no TurnCompleted correlated to the human turn's OWN turn_id");
+    let reply1 = completed_reply_for(&events_after_1, &turn1_id).unwrap_or_else(|| {
+        panic!(
+            "no TurnCompleted correlated to the human turn's OWN turn_id ({:?}) within the \
+             240s hang-guard bound. Events actually observed: {}",
+            turn1_id,
+            describe_events(&events_after_1)
+        )
+    });
     assert!(
         reply1.contains("PING_OK"),
         "human turn's own reply did not contain PING_OK: {reply1:?}"
@@ -196,12 +237,18 @@ async fn same_pid_and_native_session_serves_a_human_send_and_an_a2a_consult() {
 
     let events_after_2 = drain_until(
         target.events(EventSeq(0)).await,
-        Duration::from_secs(60),
+        Duration::from_secs(240),
         |evs| completed_reply_for(evs, &turn2_id).is_some(),
     )
     .await;
-    let reply2 = completed_reply_for(&events_after_2, &turn2_id)
-        .expect("no TurnCompleted correlated to the A2A turn's OWN turn_id");
+    let reply2 = completed_reply_for(&events_after_2, &turn2_id).unwrap_or_else(|| {
+        panic!(
+            "no TurnCompleted correlated to the A2A turn's OWN turn_id ({:?}) within the \
+             240s hang-guard bound. Events actually observed: {}",
+            turn2_id,
+            describe_events(&events_after_2)
+        )
+    });
     assert!(
         reply2.contains("PING_OK"),
         "the SAME process must recall the human turn's token on the A2A turn \
@@ -255,7 +302,7 @@ async fn assistant_delta_streams_and_turn_completed_carries_the_full_accumulated
 
     let events = drain_until(
         target.events(EventSeq(0)).await,
-        Duration::from_secs(60),
+        Duration::from_secs(240),
         |evs| completed_reply_for(evs, &turn_id).is_some(),
     )
     .await;
@@ -273,8 +320,14 @@ async fn assistant_delta_streams_and_turn_completed_carries_the_full_accumulated
          turn's OWN turn_id"
     );
 
-    let reply = completed_reply_for(&events, &turn_id)
-        .expect("no TurnCompleted correlated to this turn's OWN turn_id");
+    let reply = completed_reply_for(&events, &turn_id).unwrap_or_else(|| {
+        panic!(
+            "no TurnCompleted correlated to this turn's OWN turn_id ({:?}) within the \
+             240s hang-guard bound. Events actually observed: {}",
+            turn_id,
+            describe_events(&events)
+        )
+    });
     assert!(
         reply.contains("STREAM_OK"),
         "TurnCompleted.reply must carry the FULL accumulated text even though \
@@ -336,15 +389,29 @@ async fn busy_policy_queues_a_second_turn_behind_an_active_one() {
 
     let events = drain_until(
         target.events(EventSeq(0)).await,
-        Duration::from_secs(90),
+        Duration::from_secs(300),
         |evs| {
             completed_reply_for(evs, &turn1_id).is_some()
                 && completed_reply_for(evs, &turn2_id).is_some()
         },
     )
     .await;
-    let reply1 = completed_reply_for(&events, &turn1_id).expect("turn 1 must complete");
-    let reply2 = completed_reply_for(&events, &turn2_id).expect("turn 2 must complete");
+    let reply1 = completed_reply_for(&events, &turn1_id).unwrap_or_else(|| {
+        panic!(
+            "turn 1 must complete: no TurnCompleted correlated to turn 1's OWN turn_id ({:?}) \
+             within the 300s hang-guard bound. Events actually observed: {}",
+            turn1_id,
+            describe_events(&events)
+        )
+    });
+    let reply2 = completed_reply_for(&events, &turn2_id).unwrap_or_else(|| {
+        panic!(
+            "turn 2 must complete: no TurnCompleted correlated to turn 2's OWN turn_id ({:?}) \
+             within the 300s hang-guard bound. Events actually observed: {}",
+            turn2_id,
+            describe_events(&events)
+        )
+    });
     assert!(
         reply1.contains("ONE"),
         "turn 1's OWN reply did not contain ONE: {reply1:?}"

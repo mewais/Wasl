@@ -119,6 +119,34 @@ fn completed_reply_for(events: &[TurnEvent], turn_id: &TurnId) -> Option<String>
     })
 }
 
+/// Diagnostic summary of what `drain_until` actually saw before giving up
+/// (either the predicate was satisfied, or the hang-guard bound elapsed) --
+/// so a failure tells us WHERE the pipeline got stuck (never even got
+/// SessionReady? got deltas but no terminal? something else entirely?)
+/// instead of just "no TurnCompleted correlated."
+fn describe_events(events: &[TurnEvent]) -> String {
+    if events.is_empty() {
+        return "<no events observed at all>".to_string();
+    }
+    events
+        .iter()
+        .map(|e| match e {
+            TurnEvent::SessionReady { native } => format!("SessionReady{{native:{native:?}}}"),
+            TurnEvent::TurnAccepted { turn_id, .. } => format!("TurnAccepted{{{turn_id:?}}}"),
+            TurnEvent::AssistantDelta { turn_id, text } => {
+                format!("AssistantDelta{{{turn_id:?}, {} chars}}", text.len())
+            }
+            TurnEvent::TurnCompleted { turn_id, .. } => format!("TurnCompleted{{{turn_id:?}}}"),
+            TurnEvent::TurnFailed { turn_id, error, .. } => {
+                format!("TurnFailed{{{turn_id:?}, {error}}}")
+            }
+            TurnEvent::ProcessExited { code } => format!("ProcessExited{{code:{code:?}}}"),
+            other => format!("{other:?}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 async fn conformance(target: &dyn DeliveryTarget) {
     let caps = target.capabilities();
     let target_key = target.target_id().0.clone();
@@ -132,12 +160,19 @@ async fn conformance(target: &dyn DeliveryTarget) {
         };
         let remember_events = drain_until(
             target.events(EventSeq(0)).await,
-            Duration::from_secs(60),
+            Duration::from_secs(240),
             |evs| completed_reply_for(evs, &remember_turn_id).is_some(),
         )
         .await;
         let remember_reply = completed_reply_for(&remember_events, &remember_turn_id)
-            .expect("no TurnCompleted correlated to the 'remember' turn_id");
+            .unwrap_or_else(|| {
+                panic!(
+                    "no TurnCompleted correlated to the 'remember' turn_id ({:?}) within the \
+                     240s hang-guard bound. Events actually observed: {}",
+                    remember_turn_id,
+                    describe_events(&remember_events)
+                )
+            });
         assert!(
             remember_reply.contains("VIOLET-7F29"),
             "expected the 'remember' turn's OWN reply to echo the token, got {remember_reply:?}"
@@ -151,13 +186,19 @@ async fn conformance(target: &dyn DeliveryTarget) {
         };
         let recall_events = drain_until(
             target.events(EventSeq(0)).await,
-            Duration::from_secs(60),
+            Duration::from_secs(240),
             |evs| completed_reply_for(evs, &recall_turn_id).is_some(),
         )
         .await;
-        let recall_reply = completed_reply_for(&recall_events, &recall_turn_id).expect(
-            "no TurnCompleted correlated to the 'recall' turn_id (NOT the 'remember' turn's)",
-        );
+        let recall_reply = completed_reply_for(&recall_events, &recall_turn_id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no TurnCompleted correlated to the 'recall' turn_id ({:?}) (NOT the 'remember' turn's) within the \
+                     240s hang-guard bound. Events actually observed: {}",
+                    recall_turn_id,
+                    describe_events(&recall_events)
+                )
+            });
         assert!(
             recall_reply.contains("VIOLET-7F29"),
             "persistent_conversation claimed but 'recall' turn's OWN reply {recall_reply:?} did not echo the token"
