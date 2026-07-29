@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use std::io;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -76,6 +77,111 @@ impl Default for SupervisionTimeouts {
 /// instead, the "still held" signal). This is a bounded wait for a REAL child's
 /// timing, per the §1.4 CONSTRAINTS, not a sleep driving logic.
 const POLL_IDLE: Duration = Duration::from_millis(500);
+/// Hard cap for one stdout line from the child (84.4).
+const MAX_STDOUT_LINE_BYTES: usize = 4 * 1024 * 1024;
+/// Generous bounded queue for driveractor events (84.4).
+const EVENT_CHANNEL_CAPACITY: usize = 4096;
+
+enum BoundedLineRead {
+    Line(String),
+    Eof,
+    TooLong,
+}
+
+async fn discard_until_newline<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<()> {
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
+            reader.consume(pos + 1);
+            return Ok(());
+        }
+        let len = chunk.len();
+        reader.consume(len);
+    }
+}
+
+/// Consume and discard exactly one line (bounded the same way as
+/// [`read_bounded_line`]) WITHOUT ever allocating its content into a `String`.
+/// Used for drains whose content is thrown away regardless (stderr, §4.4) —
+/// building a `String` per line there is pure overhead for content nobody
+/// reads, and under a high-volume flood that overhead is exactly the kind of
+/// per-line cost this fix should not be adding. Returns `Ok(true)` if a line
+/// (or an EOF-terminated partial line) was consumed, `Ok(false)` on a clean
+/// EOF with nothing pending.
+async fn discard_one_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<bool> {
+    let mut seen = 0usize;
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return Ok(seen > 0);
+        }
+        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
+            reader.consume(pos + 1);
+            return Ok(true);
+        }
+        let len = chunk.len();
+        seen = seen.saturating_add(len);
+        reader.consume(len);
+        if seen > max_bytes {
+            discard_until_newline(reader).await?;
+            return Ok(true);
+        }
+    }
+}
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<BoundedLineRead> {
+    let mut line = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            if line.is_empty() {
+                return Ok(BoundedLineRead::Eof);
+            }
+            return Ok(BoundedLineRead::Line(
+                String::from_utf8_lossy(&line).to_string(),
+            ));
+        }
+
+        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
+            let take = pos + 1;
+            if line.len().saturating_add(take) > max_bytes {
+                reader.consume(take);
+                return Ok(BoundedLineRead::TooLong);
+            }
+            line.extend_from_slice(&chunk[..take]);
+            reader.consume(take);
+            if line.last() == Some(&b'\n') {
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+            }
+            return Ok(BoundedLineRead::Line(
+                String::from_utf8_lossy(&line).to_string(),
+            ));
+        }
+
+        if line.len().saturating_add(chunk.len()) > max_bytes {
+            let len = chunk.len();
+            reader.consume(len);
+            discard_until_newline(reader).await?;
+            return Ok(BoundedLineRead::TooLong);
+        }
+
+        line.extend_from_slice(chunk);
+        let len = chunk.len();
+        reader.consume(len);
+    }
+}
 
 /// Compute how long `pull_one` should block on the next event.
 ///
@@ -182,14 +288,22 @@ impl FakeLineProtocol {
         // discards the bytes (they are audit-noise for the fake) but MUST keep
         // reading so the pipe never fills.
         let stderr_task = tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(_line)) = lines.next_line().await {
+            // Bounded the same way as stdout (§4.4): an unbounded
+            // `BufReader::lines()` here would let a pathological single
+            // stderr line (a runaway tool dumping a huge stack trace/blob)
+            // grow this drain's buffer without limit — the exact bug the
+            // stdout fix closed, just on the other pipe. Uses the
+            // allocation-free discard variant (the content is thrown away
+            // either way, so there's no reason to build a `String` per line).
+            let mut reader = BufReader::new(stderr);
+            while let Ok(true) = discard_one_bounded_line(&mut reader, MAX_STDOUT_LINE_BYTES).await
+            {
                 // drain — never block the child on a full stderr pipe.
             }
         });
 
         // The event channel the supervisor pushes mapped `ProtocolEvent`s into.
-        let (ev_tx, ev_rx) = mpsc::unbounded_channel::<ProtocolEvent>();
+        let (ev_tx, ev_rx) = mpsc::channel::<ProtocolEvent>(EVENT_CHANNEL_CAPACITY);
         // The kill-request channel: the transport (or watchdog) asks the
         // supervisor to run the escalation ladder now. Dropping the sender (on
         // transport drop) is itself the request.
@@ -251,7 +365,7 @@ impl InteractiveProtocol for FakeLineProtocol {
 /// The live connection to ONE running fake-agent process.
 struct FakeLineTransport {
     stdin: Option<ChildStdin>,
-    events: mpsc::UnboundedReceiver<ProtocolEvent>,
+    events: mpsc::Receiver<ProtocolEvent>,
     kill_tx: Option<mpsc::Sender<()>>,
     supervisor: Option<JoinHandle<()>>,
     pid: Option<u32>,
@@ -517,25 +631,25 @@ fn best_effort_signal(target: i32, sig: Signal) {
 async fn supervise(
     mut child: tokio::process::Child,
     stdout: tokio::process::ChildStdout,
-    ev_tx: mpsc::UnboundedSender<ProtocolEvent>,
+    ev_tx: mpsc::Sender<ProtocolEvent>,
     mut kill_rx: mpsc::Receiver<()>,
     stderr_task: JoinHandle<()>,
     timeouts: SupervisionTimeouts,
 ) {
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = BufReader::new(stdout);
     let pid = child.id();
     let signal_target = pid.and_then(|p| i32::try_from(p).ok()).map(|p| -p);
 
     loop {
         tokio::select! {
             // A stdout line, EOF, or a read error.
-            line = lines.next_line() => {
+            line = read_bounded_line(&mut lines, MAX_STDOUT_LINE_BYTES) => {
                 match line {
-                    Ok(Some(line)) => {
+                    Ok(BoundedLineRead::Line(line)) => {
                         if let Some(ev) = map_event_line(&line) {
                             // If the receiver is gone the transport was dropped —
                             // stop pushing; the kill branch / drop handles reaping.
-                            if ev_tx.send(ev).is_err() {
+                            if ev_tx.send(ev).await.is_err() {
                                 break;
                             }
                         }
@@ -545,18 +659,31 @@ async fn supervise(
                     // EOF (or a read error): stdout can close while the child is
                     // still alive. Do NOT block in an unbounded wait: keep
                     // servicing kill requests and perform only bounded exit polls.
-                    Ok(None) | Err(_) => {
+                    Ok(BoundedLineRead::TooLong) => {
+                        let _ = ev_tx
+                            .send(ProtocolEvent::TurnFailed {
+                                error: format!(
+                                    "fake agent stdout line exceeded {} bytes",
+                                    MAX_STDOUT_LINE_BYTES
+                                ),
+                            })
+                            .await;
+                        let code = escalate(&mut child, signal_target, timeouts).await;
+                        let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
+                        break;
+                    }
+                    Ok(BoundedLineRead::Eof) | Err(_) => {
                         loop {
                             tokio::select! {
                                 msg = kill_rx.recv() => {
                                     let _ = msg;
                                     let code = escalate(&mut child, signal_target, timeouts).await;
-                                    let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
+                                    let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                                     break;
                                 }
                                 code = wait_for_exit(&mut child, POLL_IDLE) => {
                                     if let Some(code) = code {
-                                        let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
+                                        let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                                         break;
                                     }
                                 }
@@ -570,7 +697,7 @@ async fn supervise(
             msg = kill_rx.recv() => {
                 let _ = msg; // `Some(())` explicit request or `None` sender dropped
                 let code = escalate(&mut child, signal_target, timeouts).await;
-                let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
+                let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                 break;
             }
         }

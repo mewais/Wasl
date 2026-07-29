@@ -445,6 +445,60 @@ async fn handle_request(
             let _ = out.flush().await;
             exit(code);
         }
+        "emit_giant_line" => {
+            // Hardening-4 §4.4 setup: emit ONE pathologically long stdout line —
+            // a single JSON-ish blob of `bytes` bytes with NO interior newline,
+            // terminated by a single '\n' only at the very end. This is the
+            // "unbounded per-line read buffer" adversary: a driver that reads
+            // stdout with an UNCAPPED `AsyncBufReadExt::lines()` buffers the whole
+            // multi-tens-of-MB line into memory before it ever sees the line
+            // terminator, then maps it as one ordinary event. A correct driver
+            // caps the per-line read: on a line exceeding a sane bound it fails the
+            // turn / kills the child rather than buffering unboundedly or hanging.
+            //
+            // We emit it as a valid `{"ev":"delta","text":"<huge>"}` object so that
+            // IF the buggy driver does buffer the whole thing it maps to a normal
+            // `AssistantDelta` (the observable "it swallowed tens of MB as one
+            // event" failure) — distinguishing "buffered unboundedly" from "capped
+            // and failed the turn".
+            let bytes = req.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize;
+            accepted(out).await;
+            // Build and stream the one giant line WITHOUT any interior newline.
+            // Prefix + suffix keep it valid JSON if fully reassembled; the middle
+            // is a long run of a single ASCII byte (no '\n', no '"').
+            let prefix = br#"{"ev":"delta","text":""#;
+            let suffix = br#""}"#;
+            out.write_all(prefix).await.ok();
+            // Stream the filler in modest chunks so the fake itself never allocates
+            // the whole payload at once (the ADVERSARY is the driver's buffer, not
+            // the fake's): tens of MB total, chunked at 64 KiB.
+            let chunk = vec![b'x'; 64 * 1024];
+            let mut remaining = bytes;
+            while remaining > 0 {
+                let n = remaining.min(chunk.len());
+                if out.write_all(&chunk[..n]).await.is_err() {
+                    // Driver went away (capped + killed us): stop — benign.
+                    break;
+                }
+                remaining -= n;
+            }
+            out.write_all(suffix).await.ok();
+            // The single line terminator — only NOW does a line-buffered reader
+            // see the end of this one line.
+            out.write_all(b"\n").await.ok();
+            let _ = out.flush().await;
+            // Stay alive (blocked on stdin) so the ONLY ways this turn ends are:
+            // (a) the buggy driver buffered the whole line and surfaced it as an
+            // event/terminal, or (b) the fixed driver capped the line and killed
+            // us. We never emit a `done`, so a driver that neither caps nor
+            // buffers-to-completion would hang (caught by the test's watchdog).
+            loop {
+                match reader.next_line().await {
+                    Ok(Some(_)) => continue,
+                    Ok(None) | Err(_) => return,
+                }
+            }
+        }
         "flood_stderr" => {
             // §1.4 stderr-drain: write a burst of stderr lines (enough to overflow
             // a pipe buffer), THEN complete the turn on stdout. If the driver does

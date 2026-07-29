@@ -11,9 +11,10 @@ use nix::sys::signal::{kill, Signal};
 #[cfg(unix)]
 use nix::unistd::Pid;
 use serde_json::Value;
+use std::io;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -46,6 +47,124 @@ impl Default for SupervisionTimeouts {
 }
 
 const POLL_IDLE: Duration = Duration::from_millis(500);
+const MAX_STDOUT_LINE_BYTES: usize = 4 * 1024 * 1024;
+const EVENT_CHANNEL_CAPACITY: usize = 4096;
+const ACCUMULATED_REPLY_MAX_BYTES: usize = 4 * 1024 * 1024;
+const TRUNCATION_MARKER: &str = "…[truncated]";
+
+enum BoundedLineRead {
+    Line(String),
+    Eof,
+    TooLong,
+}
+
+async fn discard_until_newline<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<()> {
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
+            reader.consume(pos + 1);
+            return Ok(());
+        }
+        let len = chunk.len();
+        reader.consume(len);
+    }
+}
+
+/// Consume and discard exactly one line (bounded the same way as
+/// [`read_bounded_line`]) WITHOUT ever allocating its content into a `String`.
+/// Used for drains whose content is thrown away regardless (stderr, §4.4) —
+/// building a `String` per line there is pure overhead for content nobody
+/// reads. Returns `Ok(true)` if a line (or an EOF-terminated partial line) was
+/// consumed, `Ok(false)` on a clean EOF with nothing pending.
+async fn discard_one_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<bool> {
+    let mut seen = 0usize;
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return Ok(seen > 0);
+        }
+        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
+            reader.consume(pos + 1);
+            return Ok(true);
+        }
+        let len = chunk.len();
+        seen = seen.saturating_add(len);
+        reader.consume(len);
+        if seen > max_bytes {
+            discard_until_newline(reader).await?;
+            return Ok(true);
+        }
+    }
+}
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<BoundedLineRead> {
+    let mut line = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            if line.is_empty() {
+                return Ok(BoundedLineRead::Eof);
+            }
+            return Ok(BoundedLineRead::Line(
+                String::from_utf8_lossy(&line).to_string(),
+            ));
+        }
+        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
+            let take = pos + 1;
+            if line.len().saturating_add(take) > max_bytes {
+                reader.consume(take);
+                return Ok(BoundedLineRead::TooLong);
+            }
+            line.extend_from_slice(&chunk[..take]);
+            reader.consume(take);
+            if line.last() == Some(&b'\n') {
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+            }
+            return Ok(BoundedLineRead::Line(
+                String::from_utf8_lossy(&line).to_string(),
+            ));
+        }
+
+        if line.len().saturating_add(chunk.len()) > max_bytes {
+            let len = chunk.len();
+            reader.consume(len);
+            discard_until_newline(reader).await?;
+            return Ok(BoundedLineRead::TooLong);
+        }
+
+        line.extend_from_slice(chunk);
+        let len = chunk.len();
+        reader.consume(len);
+    }
+}
+
+fn append_capped_reply(acc: &mut String, chunk: &str, truncated: &mut bool, max_bytes: usize) {
+    if *truncated {
+        return;
+    }
+    acc.push_str(chunk);
+    if acc.len() > max_bytes {
+        let mut boundary = max_bytes;
+        while boundary > 0 && !acc.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        acc.truncate(boundary);
+        acc.push_str(TRUNCATION_MARKER);
+        *truncated = true;
+    }
+}
 
 /// Compute how long `pull_one` should block on the next event.
 ///
@@ -140,21 +259,33 @@ impl OpenCodeAcpProtocol {
                 detail: "opencode acp: no stderr pipe".to_string(),
             })?;
 
-        let mut lines = BufReader::new(stdout).lines();
+        let mut stdout_reader = BufReader::new(stdout);
         let session_id = self
-            .perform_handshake(&mut stdin, &mut lines, session_method, requested_session_id)
+            .perform_handshake(
+                &mut stdin,
+                &mut stdout_reader,
+                session_method,
+                requested_session_id,
+            )
             .await?;
 
         let stderr_task = tokio::spawn(async move {
-            let mut err_lines = BufReader::new(stderr).lines();
-            while let Ok(Some(_line)) = err_lines.next_line().await {}
+            // Bounded the same way as stdout (§4.4): the content is discarded
+            // either way, but an unbounded `BufReader::lines()` here would let
+            // a pathological single stderr line grow this drain's buffer
+            // without limit — the exact bug the stdout fix closed, just on
+            // the other pipe.
+            let mut reader = BufReader::new(stderr);
+            while let Ok(true) = discard_one_bounded_line(&mut reader, MAX_STDOUT_LINE_BYTES).await
+            {
+            }
         });
 
-        let (ev_tx, ev_rx) = mpsc::unbounded_channel::<ProtocolEvent>();
+        let (ev_tx, ev_rx) = mpsc::channel::<ProtocolEvent>(EVENT_CHANNEL_CAPACITY);
         let (kill_tx, kill_rx) = mpsc::channel::<()>(1);
         let supervisor = tokio::spawn(supervise(
             child,
-            lines,
+            stdout_reader,
             session_id.clone(),
             ev_tx,
             kill_rx,
@@ -176,13 +307,14 @@ impl OpenCodeAcpProtocol {
             session_id,
             next_request_id: 3,
             accumulated_reply: String::new(),
+            accumulated_reply_truncated: false,
         }))
     }
 
     async fn perform_handshake(
         &self,
         stdin: &mut ChildStdin,
-        lines: &mut Lines<BufReader<ChildStdout>>,
+        reader: &mut BufReader<ChildStdout>,
         session_method: &str,
         requested_session_id: Option<&str>,
     ) -> Result<String, RuntimeError> {
@@ -202,7 +334,7 @@ impl OpenCodeAcpProtocol {
         write_jsonrpc_line(stdin, &initialize, self.timeouts.stdin_write).await?;
 
         let init_line =
-            read_handshake_line(lines, self.timeouts.handshake_timeout, "initialize").await?;
+            read_handshake_line(reader, self.timeouts.handshake_timeout, "initialize").await?;
         let init = parse_handshake_line(&init_line, 1, "initialize")?;
         ensure_no_jsonrpc_error(&init, "initialize")?;
         ensure_has_result(&init, "initialize")?;
@@ -236,7 +368,7 @@ impl OpenCodeAcpProtocol {
         write_jsonrpc_line(stdin, &session_req, self.timeouts.stdin_write).await?;
 
         let session_line =
-            read_handshake_line(lines, self.timeouts.handshake_timeout, session_method).await?;
+            read_handshake_line(reader, self.timeouts.handshake_timeout, session_method).await?;
         let session_resp = parse_handshake_line(&session_line, 2, session_method)?;
         ensure_no_jsonrpc_error(&session_resp, session_method)?;
         let result = ensure_has_result(&session_resp, session_method)?;
@@ -283,7 +415,7 @@ impl InteractiveProtocol for OpenCodeAcpProtocol {
 
 struct OpenCodeAcpTransport {
     stdin: Option<ChildStdin>,
-    events: mpsc::UnboundedReceiver<ProtocolEvent>,
+    events: mpsc::Receiver<ProtocolEvent>,
     kill_tx: Option<mpsc::Sender<()>>,
     supervisor: Option<JoinHandle<()>>,
     pid: Option<u32>,
@@ -295,6 +427,7 @@ struct OpenCodeAcpTransport {
     session_id: String,
     next_request_id: u64,
     accumulated_reply: String,
+    accumulated_reply_truncated: bool,
 }
 
 impl OpenCodeAcpTransport {
@@ -460,6 +593,7 @@ impl InteractiveTransport for OpenCodeAcpTransport {
         self.turn_terminal_seen = false;
         self.last_event_at = Instant::now();
         self.accumulated_reply.clear();
+        self.accumulated_reply_truncated = false;
 
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
@@ -492,7 +626,12 @@ impl InteractiveTransport for OpenCodeAcpTransport {
             match self.pull_one().await {
                 Some(ev) if self.is_stale_after_terminal(&ev) => continue,
                 Some(ProtocolEvent::AssistantDelta { text }) => {
-                    self.accumulated_reply.push_str(&text);
+                    append_capped_reply(
+                        &mut self.accumulated_reply,
+                        &text,
+                        &mut self.accumulated_reply_truncated,
+                        ACCUMULATED_REPLY_MAX_BYTES,
+                    );
                     let ev = ProtocolEvent::AssistantDelta { text };
                     self.observe(&ev);
                     return Some(ev);
@@ -506,6 +645,7 @@ impl InteractiveTransport for OpenCodeAcpTransport {
                 }
                 Some(ev @ ProtocolEvent::TurnFailed { .. }) => {
                     self.accumulated_reply.clear();
+                    self.accumulated_reply_truncated = false;
                     self.observe(&ev);
                     return Some(ev);
                 }
@@ -543,9 +683,9 @@ fn best_effort_signal(target: i32, sig: Signal) {
 
 async fn supervise(
     mut child: tokio::process::Child,
-    mut lines: Lines<BufReader<ChildStdout>>,
+    mut lines: BufReader<ChildStdout>,
     session_id: String,
-    ev_tx: mpsc::UnboundedSender<ProtocolEvent>,
+    ev_tx: mpsc::Sender<ProtocolEvent>,
     mut kill_rx: mpsc::Receiver<()>,
     stderr_task: JoinHandle<()>,
     timeouts: SupervisionTimeouts,
@@ -557,6 +697,7 @@ async fn supervise(
         .send(ProtocolEvent::SessionReady {
             native: Some(NativeSessionId(session_id)),
         })
+        .await
         .is_err()
     {
         let _ = child.wait().await;
@@ -566,18 +707,31 @@ async fn supervise(
 
     'outer: loop {
         tokio::select! {
-            line = lines.next_line() => {
+            line = read_bounded_line(&mut lines, MAX_STDOUT_LINE_BYTES) => {
                 match line {
-                    Ok(Some(line)) => {
+                    Ok(BoundedLineRead::Line(line)) => {
                         for ev in map_acp_line(&line) {
-                            if ev_tx.send(ev).is_err() {
+                            if ev_tx.send(ev).await.is_err() {
                                 break 'outer;
                             }
                         }
                     }
-                    Ok(None) | Err(_) => {
+                    Ok(BoundedLineRead::TooLong) => {
+                        let _ = ev_tx
+                            .send(ProtocolEvent::TurnFailed {
+                                error: format!(
+                                    "opencode acp stdout line exceeded {} bytes",
+                                    MAX_STDOUT_LINE_BYTES
+                                ),
+                            })
+                            .await;
                         let code = escalate(&mut child, signal_target, timeouts).await;
-                        let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
+                        let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
+                        break;
+                    }
+                    Ok(BoundedLineRead::Eof) | Err(_) => {
+                        let code = escalate(&mut child, signal_target, timeouts).await;
+                        let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                         break;
                     }
                 }
@@ -585,7 +739,7 @@ async fn supervise(
             msg = kill_rx.recv() => {
                 let _ = msg;
                 let code = escalate(&mut child, signal_target, timeouts).await;
-                let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
+                let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                 break;
             }
         }
@@ -670,14 +824,20 @@ async fn write_jsonrpc_line(
 }
 
 async fn read_handshake_line(
-    lines: &mut Lines<BufReader<ChildStdout>>,
+    reader: &mut BufReader<ChildStdout>,
     timeout: Duration,
     step: &str,
 ) -> Result<String, RuntimeError> {
-    match tokio::time::timeout(timeout, lines.next_line()).await {
-        Ok(Ok(Some(line))) => Ok(line),
-        Ok(Ok(None)) => Err(RuntimeError::SpawnFailed {
+    match tokio::time::timeout(timeout, read_bounded_line(reader, MAX_STDOUT_LINE_BYTES)).await {
+        Ok(Ok(BoundedLineRead::Line(line))) => Ok(line),
+        Ok(Ok(BoundedLineRead::Eof)) => Err(RuntimeError::SpawnFailed {
             detail: format!("opencode acp handshake {step}: EOF"),
+        }),
+        Ok(Ok(BoundedLineRead::TooLong)) => Err(RuntimeError::SpawnFailed {
+            detail: format!(
+                "opencode acp handshake {step}: line exceeded {} bytes",
+                MAX_STDOUT_LINE_BYTES
+            ),
         }),
         Ok(Err(e)) => Err(RuntimeError::SpawnFailed {
             detail: format!("opencode acp handshake {step}: read error: {e}"),
@@ -895,6 +1055,26 @@ mod tests {
         // notifications until a real capture pins the concrete wire shape.
         let line = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"ses_079566635ffeaDOzjr6jJ5LKa7","update":{"sessionUpdate":"tool_call_start","name":"shell"}}}"#;
         assert_eq!(m(line), vec![]);
+    }
+
+    #[test]
+    fn accumulated_reply_cap_truncates_on_utf8_boundary_and_stops_growth() {
+        let mut acc = String::new();
+        let mut truncated = false;
+
+        // 3-byte UTF-8 scalar repeated so a byte cap can bisect a codepoint.
+        append_capped_reply(&mut acc, "界".repeat(8).as_str(), &mut truncated, 10);
+        assert!(truncated, "accumulator should mark truncation once capped");
+        assert_eq!(acc, "界界界…[truncated]");
+
+        let len_after_cap = acc.len();
+        append_capped_reply(&mut acc, "SHOULD-NOT-BE-APPENDED", &mut truncated, 10);
+        assert_eq!(
+            acc.len(),
+            len_after_cap,
+            "once truncated, accumulator must stop growing on later chunks"
+        );
+        assert_eq!(acc, "界界界…[truncated]");
     }
 
     // =================================================================

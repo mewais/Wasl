@@ -269,6 +269,20 @@ pub fn req_flood_stderr(lines: usize) -> String {
     format!(r#"{{"cmd":"flood_stderr","lines":{lines}}}"#)
 }
 
+/// Hardening-4 §4.4 — emit ONE pathologically long stdout line of `bytes` bytes
+/// with NO interior newline (a single `{"ev":"delta","text":"<huge>"}` blob whose
+/// line terminator arrives only at the very end). The driver reads stdout via a
+/// line-buffered `AsyncBufReadExt::lines()` with NO per-line cap, so a buggy
+/// driver buffers the whole tens-of-MB line into memory and maps it as one normal
+/// `AssistantDelta`; a correct driver caps the per-line read and fails the turn /
+/// kills the child instead of buffering unboundedly (or hanging trying to read a
+/// never-completing line). The fake stays alive (blocked on stdin) after the line
+/// so the ONLY terminals are the buffered-then-surfaced event (bug) or the
+/// force-kill (fix).
+pub fn req_emit_giant_line(bytes: usize) -> String {
+    format!(r#"{{"cmd":"emit_giant_line","bytes":{bytes}}}"#)
+}
+
 // =====================================================================
 // Event-classification helpers (assertion sugar over ProtocolEvent).
 // =====================================================================

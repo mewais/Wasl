@@ -11,9 +11,10 @@ use nix::sys::signal::{kill, Signal};
 #[cfg(unix)]
 use nix::unistd::Pid;
 use serde_json::Value;
+use std::io;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -53,6 +54,106 @@ impl Default for SupervisionTimeouts {
 }
 
 const POLL_IDLE: Duration = Duration::from_millis(500);
+const MAX_STDOUT_LINE_BYTES: usize = 4 * 1024 * 1024;
+const EVENT_CHANNEL_CAPACITY: usize = 4096;
+
+enum BoundedLineRead {
+    Line(String),
+    Eof,
+    TooLong,
+}
+
+async fn discard_until_newline<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<()> {
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return Ok(());
+        }
+        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
+            reader.consume(pos + 1);
+            return Ok(());
+        }
+        let len = chunk.len();
+        reader.consume(len);
+    }
+}
+
+/// Consume and discard exactly one line (bounded the same way as
+/// [`read_bounded_line`]) WITHOUT ever allocating its content into a `String`.
+/// Used for drains whose content is thrown away regardless (stderr, §4.4) —
+/// building a `String` per line there is pure overhead for content nobody
+/// reads. Returns `Ok(true)` if a line (or an EOF-terminated partial line) was
+/// consumed, `Ok(false)` on a clean EOF with nothing pending.
+async fn discard_one_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<bool> {
+    let mut seen = 0usize;
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            return Ok(seen > 0);
+        }
+        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
+            reader.consume(pos + 1);
+            return Ok(true);
+        }
+        let len = chunk.len();
+        seen = seen.saturating_add(len);
+        reader.consume(len);
+        if seen > max_bytes {
+            discard_until_newline(reader).await?;
+            return Ok(true);
+        }
+    }
+}
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_bytes: usize,
+) -> io::Result<BoundedLineRead> {
+    let mut line = Vec::new();
+    loop {
+        let chunk = reader.fill_buf().await?;
+        if chunk.is_empty() {
+            if line.is_empty() {
+                return Ok(BoundedLineRead::Eof);
+            }
+            return Ok(BoundedLineRead::Line(
+                String::from_utf8_lossy(&line).to_string(),
+            ));
+        }
+        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
+            let take = pos + 1;
+            if line.len().saturating_add(take) > max_bytes {
+                reader.consume(take);
+                return Ok(BoundedLineRead::TooLong);
+            }
+            line.extend_from_slice(&chunk[..take]);
+            reader.consume(take);
+            if line.last() == Some(&b'\n') {
+                line.pop();
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+            }
+            return Ok(BoundedLineRead::Line(
+                String::from_utf8_lossy(&line).to_string(),
+            ));
+        }
+
+        if line.len().saturating_add(chunk.len()) > max_bytes {
+            let len = chunk.len();
+            reader.consume(len);
+            discard_until_newline(reader).await?;
+            return Ok(BoundedLineRead::TooLong);
+        }
+
+        line.extend_from_slice(chunk);
+        let len = chunk.len();
+        reader.consume(len);
+    }
+}
 
 /// Compute how long `pull_one` should block on the next event.
 ///
@@ -152,11 +253,18 @@ impl ClaudeStreamProtocol {
             })?;
 
         let stderr_task = tokio::spawn(async move {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(_line)) = lines.next_line().await {}
+            // Bounded the same way as stdout (§4.4): the content is discarded
+            // either way, but an unbounded `BufReader::lines()` here would let
+            // a pathological single stderr line grow this drain's buffer
+            // without limit — the exact bug the stdout fix closed, just on
+            // the other pipe.
+            let mut reader = BufReader::new(stderr);
+            while let Ok(true) = discard_one_bounded_line(&mut reader, MAX_STDOUT_LINE_BYTES).await
+            {
+            }
         });
 
-        let (ev_tx, ev_rx) = mpsc::unbounded_channel::<ProtocolEvent>();
+        let (ev_tx, ev_rx) = mpsc::channel::<ProtocolEvent>(EVENT_CHANNEL_CAPACITY);
         let (kill_tx, kill_rx) = mpsc::channel::<()>(1);
 
         let supervisor = tokio::spawn(supervise(
@@ -212,7 +320,7 @@ impl InteractiveProtocol for ClaudeStreamProtocol {
 
 struct ClaudeStreamTransport {
     stdin: Option<ChildStdin>,
-    events: mpsc::UnboundedReceiver<ProtocolEvent>,
+    events: mpsc::Receiver<ProtocolEvent>,
     kill_tx: Option<mpsc::Sender<()>>,
     supervisor: Option<JoinHandle<()>>,
     pid: Option<u32>,
@@ -457,29 +565,42 @@ fn best_effort_signal(target: i32, sig: Signal) {
 async fn supervise(
     mut child: tokio::process::Child,
     stdout: tokio::process::ChildStdout,
-    ev_tx: mpsc::UnboundedSender<ProtocolEvent>,
+    ev_tx: mpsc::Sender<ProtocolEvent>,
     mut kill_rx: mpsc::Receiver<()>,
     stderr_task: JoinHandle<()>,
     timeouts: SupervisionTimeouts,
 ) {
-    let mut lines = BufReader::new(stdout).lines();
+    let mut lines = BufReader::new(stdout);
     let pid = child.id();
     let signal_target = pid.and_then(|p| i32::try_from(p).ok()).map(|p| -p);
 
     'outer: loop {
         tokio::select! {
-            line = lines.next_line() => {
+            line = read_bounded_line(&mut lines, MAX_STDOUT_LINE_BYTES) => {
                 match line {
-                    Ok(Some(line)) => {
+                    Ok(BoundedLineRead::Line(line)) => {
                         for ev in map_claude_line(&line) {
-                            if ev_tx.send(ev).is_err() {
+                            if ev_tx.send(ev).await.is_err() {
                                 break 'outer;
                             }
                         }
                     }
-                    Ok(None) | Err(_) => {
+                    Ok(BoundedLineRead::TooLong) => {
+                        let _ = ev_tx
+                            .send(ProtocolEvent::TurnFailed {
+                                error: format!(
+                                    "claude stdout line exceeded {} bytes",
+                                    MAX_STDOUT_LINE_BYTES
+                                ),
+                            })
+                            .await;
                         let code = escalate(&mut child, signal_target, timeouts).await;
-                        let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
+                        let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
+                        break;
+                    }
+                    Ok(BoundedLineRead::Eof) | Err(_) => {
+                        let code = escalate(&mut child, signal_target, timeouts).await;
+                        let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                         break;
                     }
                 }
@@ -487,7 +608,7 @@ async fn supervise(
             msg = kill_rx.recv() => {
                 let _ = msg;
                 let code = escalate(&mut child, signal_target, timeouts).await;
-                let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
+                let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                 break;
             }
         }
