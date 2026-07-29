@@ -30,7 +30,7 @@ mod claude_stream;
 mod fake_line;
 mod opencode_acp;
 
-pub use claude_stream::ClaudeStreamProtocol;
+pub use claude_stream::{map_claude_line, ClaudeStreamProtocol, ClaudeToolTracker};
 pub use fake_line::{FakeLineProtocol, SupervisionTimeouts};
 pub use opencode_acp::{
     classify_handshake_line, map_acp_line_correlated, HandshakeLineClass, OpenCodeAcpProtocol,

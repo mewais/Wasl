@@ -1,6 +1,7 @@
 //! `ClaudeStreamProtocol` — maps the real claude `stream-json` duplex onto R1's
 //! generic [`wasl_runtime::ProtocolEvent`].
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -571,6 +572,7 @@ async fn supervise(
     timeouts: SupervisionTimeouts,
 ) {
     let mut lines = BufReader::new(stdout);
+    let mut tool_tracker = ClaudeToolTracker::new();
     let pid = child.id();
     let signal_target = pid.and_then(|p| i32::try_from(p).ok()).map(|p| -p);
 
@@ -579,7 +581,7 @@ async fn supervise(
             line = read_bounded_line(&mut lines, MAX_STDOUT_LINE_BYTES) => {
                 match line {
                     Ok(BoundedLineRead::Line(line)) => {
-                        for ev in map_claude_line(&line) {
+                        for ev in tool_tracker.observe_line(&line) {
                             if ev_tx.send(ev).await.is_err() {
                                 break 'outer;
                             }
@@ -658,15 +660,39 @@ async fn wait_for_exit(child: &mut tokio::process::Child, bound: Duration) -> Op
     }
 }
 
-fn map_claude_line(line: &str) -> Vec<ProtocolEvent> {
+fn parse_line_value(line: &str) -> Option<Value> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
-        return vec![];
+        return None;
     }
-    let v: Value = match serde_json::from_str(trimmed) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
+    serde_json::from_str(trimmed).ok()
+}
+
+fn message_content_array(v: &Value) -> Option<&[Value]> {
+    v.get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+}
+
+fn tool_use_entries(content: &[Value]) -> impl Iterator<Item = (&str, &str)> {
+    content.iter().filter_map(|block| {
+        if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+            return None;
+        }
+        let id = block.get("id").and_then(Value::as_str)?;
+        let name = block.get("name").and_then(Value::as_str)?;
+        Some((id, name))
+    })
+}
+
+fn tool_result_blocks(content: &[Value]) -> impl Iterator<Item = &Value> {
+    content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+}
+
+fn map_claude_value(v: &Value) -> Vec<ProtocolEvent> {
     let Some(kind) = v.get("type").and_then(Value::as_str) else {
         return vec![];
     };
@@ -684,21 +710,27 @@ fn map_claude_line(line: &str) -> Vec<ProtocolEvent> {
             vec![]
         }
         "assistant" => {
-            let Some(content) = v
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(Value::as_array)
-            else {
+            let Some(content) = message_content_array(v) else {
                 return vec![];
             };
             let mut out = Vec::new();
             for block in content {
-                if block.get("type").and_then(Value::as_str) == Some("text") {
-                    if let Some(text) = block.get("text").and_then(Value::as_str) {
-                        out.push(ProtocolEvent::AssistantDelta {
-                            text: text.to_string(),
-                        });
+                match block.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(text) = block.get("text").and_then(Value::as_str) {
+                            out.push(ProtocolEvent::AssistantDelta {
+                                text: text.to_string(),
+                            });
+                        }
                     }
+                    Some("tool_use") => {
+                        if let Some(name) = block.get("name").and_then(Value::as_str) {
+                            out.push(ProtocolEvent::ToolStarted {
+                                name: name.to_string(),
+                            });
+                        }
+                    }
+                    _ => {}
                 }
             }
             out
@@ -720,6 +752,88 @@ fn map_claude_line(line: &str) -> Vec<ProtocolEvent> {
             vec![]
         }
         _ => vec![],
+    }
+}
+
+/// PURE per-line map of claude stream-json lines.
+///
+/// This function intentionally carries no cross-line state. It can therefore map
+/// `tool_use` (name is present in the same line) but not `tool_result`
+/// (name absent; only `tool_use_id` is present).
+pub fn map_claude_line(line: &str) -> Vec<ProtocolEvent> {
+    let Some(v) = parse_line_value(line) else {
+        return vec![];
+    };
+    map_claude_value(&v)
+}
+
+/// Stateful tool-call correlator for claude `stream-json`.
+#[derive(Debug, Default)]
+pub struct ClaudeToolTracker {
+    tool_names_by_id: HashMap<String, String>,
+}
+
+impl ClaudeToolTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn observe_line(&mut self, line: &str) -> Vec<ProtocolEvent> {
+        let Some(v) = parse_line_value(line) else {
+            return vec![];
+        };
+        let Some(kind) = v.get("type").and_then(Value::as_str) else {
+            return vec![];
+        };
+
+        if kind == "assistant" {
+            if let Some(content) = message_content_array(&v) {
+                for (id, name) in tool_use_entries(content) {
+                    self.tool_names_by_id
+                        .insert(id.to_string(), name.to_string());
+                }
+            }
+            return map_claude_value(&v);
+        }
+
+        if kind == "user" {
+            let Some(content) = message_content_array(&v) else {
+                return vec![];
+            };
+            let mut out = Vec::new();
+            for block in tool_result_blocks(content) {
+                let Some(tool_use_id) = block.get("tool_use_id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(name) = self.tool_names_by_id.remove(tool_use_id) else {
+                    continue;
+                };
+                // Only successful `tool_result` rows are spike-captured so far.
+                // We default to success unless `is_error: true` is present on the
+                // block. A future failing capture may reveal additional error
+                // marker fields this derivation should include.
+                let ok = !block
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                out.push(ProtocolEvent::ToolFinished { name, ok });
+            }
+            return out;
+        }
+
+        if kind == "result" {
+            // Turn boundary: drop any tool_use ids whose tool_result never
+            // arrived (e.g. the turn was cancelled/crashed mid-tool-call).
+            // Without this, an interrupted tool call would leak one small
+            // entry per turn for the life of the session — the same class of
+            // unbounded-growth concern this crate's own resource-bounds
+            // hardening (event channel / line-read / accumulator caps)
+            // closed elsewhere; a turn's own id namespace should not outlive
+            // the turn.
+            self.tool_names_by_id.clear();
+        }
+
+        map_claude_value(&v)
     }
 }
 
@@ -784,13 +898,15 @@ mod tests {
     }
 
     #[test]
-    fn tool_use_and_tool_result_are_intentionally_unmapped_for_now() {
-        // runtime-protocol.md §2.1 marks both rows as ASSUMED (not spike-captured
-        // yet), so Phase-4 intentionally does not map them until a real tool/gate
-        // capture pins the concrete wire shape.
+    fn tool_use_maps_but_pure_tool_result_stays_unmapped_without_state() {
         let tool_use = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Task"}]},"session_id":"405bb438-3cd5-4f5e-b682-a5e336d6b0c1"}"#;
         let tool_result = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"ok"}]},"session_id":"405bb438-3cd5-4f5e-b682-a5e336d6b0c1"}"#;
-        assert_eq!(m(tool_use), vec![]);
+        assert_eq!(
+            m(tool_use),
+            vec![ProtocolEvent::ToolStarted {
+                name: "Task".to_string()
+            }]
+        );
         assert_eq!(m(tool_result), vec![]);
     }
 
