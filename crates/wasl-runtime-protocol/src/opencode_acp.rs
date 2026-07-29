@@ -14,6 +14,8 @@ use serde_json::Value;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
@@ -31,6 +33,11 @@ struct SupervisionTimeouts {
     hang_watchdog: Duration,
     handshake_timeout: Duration,
     stdin_write: Duration,
+}
+
+struct SupervisionState {
+    timeouts: SupervisionTimeouts,
+    outstanding_request_id: Arc<AtomicU64>,
 }
 
 impl Default for SupervisionTimeouts {
@@ -259,16 +266,6 @@ impl OpenCodeAcpProtocol {
                 detail: "opencode acp: no stderr pipe".to_string(),
             })?;
 
-        let mut stdout_reader = BufReader::new(stdout);
-        let session_id = self
-            .perform_handshake(
-                &mut stdin,
-                &mut stdout_reader,
-                session_method,
-                requested_session_id,
-            )
-            .await?;
-
         let stderr_task = tokio::spawn(async move {
             // Bounded the same way as stdout (§4.4): the content is discarded
             // either way, but an unbounded `BufReader::lines()` here would let
@@ -281,8 +278,19 @@ impl OpenCodeAcpProtocol {
             }
         });
 
+        let mut stdout_reader = BufReader::new(stdout);
+        let session_id = self
+            .perform_handshake(
+                &mut stdin,
+                &mut stdout_reader,
+                session_method,
+                requested_session_id,
+            )
+            .await?;
+
         let (ev_tx, ev_rx) = mpsc::channel::<ProtocolEvent>(EVENT_CHANNEL_CAPACITY);
         let (kill_tx, kill_rx) = mpsc::channel::<()>(1);
+        let outstanding_request_id = Arc::new(AtomicU64::new(0));
         let supervisor = tokio::spawn(supervise(
             child,
             stdout_reader,
@@ -290,7 +298,10 @@ impl OpenCodeAcpProtocol {
             ev_tx,
             kill_rx,
             stderr_task,
-            self.timeouts,
+            SupervisionState {
+                timeouts: self.timeouts,
+                outstanding_request_id: Arc::clone(&outstanding_request_id),
+            },
         ));
 
         Ok(Box::new(OpenCodeAcpTransport {
@@ -306,6 +317,7 @@ impl OpenCodeAcpProtocol {
             turn_terminal_seen: false,
             session_id,
             next_request_id: 3,
+            outstanding_request_id,
             accumulated_reply: String::new(),
             accumulated_reply_truncated: false,
         }))
@@ -318,6 +330,8 @@ impl OpenCodeAcpProtocol {
         session_method: &str,
         requested_session_id: Option<&str>,
     ) -> Result<String, RuntimeError> {
+        let deadline = Instant::now() + self.timeouts.handshake_timeout;
+
         let initialize = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -331,11 +345,17 @@ impl OpenCodeAcpProtocol {
                 }
             }
         });
-        write_jsonrpc_line(stdin, &initialize, self.timeouts.stdin_write).await?;
+        write_jsonrpc_line(
+            stdin,
+            &initialize,
+            self.timeouts.stdin_write,
+            deadline,
+            "initialize",
+        )
+        .await?;
 
-        let init_line =
-            read_handshake_line(reader, self.timeouts.handshake_timeout, "initialize").await?;
-        let init = parse_handshake_line(&init_line, 1, "initialize")?;
+        let init_line = read_expected_handshake_line(reader, 1, "initialize", deadline).await?;
+        let init = parse_handshake_line(&init_line, "initialize")?;
         ensure_no_jsonrpc_error(&init, "initialize")?;
         ensure_has_result(&init, "initialize")?;
 
@@ -365,11 +385,18 @@ impl OpenCodeAcpProtocol {
             "method": session_method,
             "params": session_params
         });
-        write_jsonrpc_line(stdin, &session_req, self.timeouts.stdin_write).await?;
+        write_jsonrpc_line(
+            stdin,
+            &session_req,
+            self.timeouts.stdin_write,
+            deadline,
+            session_method,
+        )
+        .await?;
 
         let session_line =
-            read_handshake_line(reader, self.timeouts.handshake_timeout, session_method).await?;
-        let session_resp = parse_handshake_line(&session_line, 2, session_method)?;
+            read_expected_handshake_line(reader, 2, session_method, deadline).await?;
+        let session_resp = parse_handshake_line(&session_line, session_method)?;
         ensure_no_jsonrpc_error(&session_resp, session_method)?;
         let result = ensure_has_result(&session_resp, session_method)?;
         let native = result
@@ -426,6 +453,7 @@ struct OpenCodeAcpTransport {
     turn_terminal_seen: bool,
     session_id: String,
     next_request_id: u64,
+    outstanding_request_id: Arc<AtomicU64>,
     accumulated_reply: String,
     accumulated_reply_truncated: bool,
 }
@@ -505,10 +533,12 @@ impl OpenCodeAcpTransport {
             ProtocolEvent::TurnCompleted { .. } | ProtocolEvent::TurnFailed { .. } => {
                 self.turn_in_flight = false;
                 self.turn_terminal_seen = true;
+                self.outstanding_request_id.store(0, Ordering::Release);
             }
             ProtocolEvent::ProcessExited { .. } => {
                 self.turn_in_flight = false;
                 self.ended = true;
+                self.outstanding_request_id.store(0, Ordering::Release);
             }
             _ => {}
         }
@@ -597,6 +627,8 @@ impl InteractiveTransport for OpenCodeAcpTransport {
 
         let request_id = self.next_request_id;
         self.next_request_id = self.next_request_id.saturating_add(1);
+        self.outstanding_request_id
+            .store(request_id, Ordering::Release);
 
         let line = serde_json::json!({
             "jsonrpc": "2.0",
@@ -616,7 +648,13 @@ impl InteractiveTransport for OpenCodeAcpTransport {
             detail: format!("opencode acp send_turn serialization: {e}"),
         })?;
 
-        self.write_stdin_line(&payload).await
+        match self.write_stdin_line(&payload).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.outstanding_request_id.store(0, Ordering::Release);
+                Err(err)
+            }
+        }
     }
 
     async fn next_event(&mut self) -> Option<ProtocolEvent> {
@@ -688,7 +726,7 @@ async fn supervise(
     ev_tx: mpsc::Sender<ProtocolEvent>,
     mut kill_rx: mpsc::Receiver<()>,
     stderr_task: JoinHandle<()>,
-    timeouts: SupervisionTimeouts,
+    supervision: SupervisionState,
 ) {
     let pid = child.id();
     let signal_target = pid.and_then(|p| i32::try_from(p).ok()).map(|p| -p);
@@ -710,7 +748,8 @@ async fn supervise(
             line = read_bounded_line(&mut lines, MAX_STDOUT_LINE_BYTES) => {
                 match line {
                     Ok(BoundedLineRead::Line(line)) => {
-                        for ev in map_acp_line(&line) {
+                        let expected_id = supervision.outstanding_request_id.load(Ordering::Acquire);
+                        for ev in map_acp_line_correlated(&line, expected_id) {
                             if ev_tx.send(ev).await.is_err() {
                                 break 'outer;
                             }
@@ -725,12 +764,12 @@ async fn supervise(
                                 ),
                             })
                             .await;
-                        let code = escalate(&mut child, signal_target, timeouts).await;
+                        let code = escalate(&mut child, signal_target, supervision.timeouts).await;
                         let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                         break;
                     }
                     Ok(BoundedLineRead::Eof) | Err(_) => {
-                        let code = escalate(&mut child, signal_target, timeouts).await;
+                        let code = escalate(&mut child, signal_target, supervision.timeouts).await;
                         let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                         break;
                     }
@@ -738,14 +777,14 @@ async fn supervise(
             }
             msg = kill_rx.recv() => {
                 let _ = msg;
-                let code = escalate(&mut child, signal_target, timeouts).await;
+                let code = escalate(&mut child, signal_target, supervision.timeouts).await;
                 let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                 break;
             }
         }
     }
 
-    let _ = wait_for_exit(&mut child, timeouts.kill_after).await;
+    let _ = wait_for_exit(&mut child, supervision.timeouts.kill_after).await;
     stderr_task.abort();
 }
 
@@ -793,41 +832,56 @@ async fn write_jsonrpc_line(
     stdin: &mut ChildStdin,
     value: &Value,
     stdin_write_timeout: Duration,
+    handshake_deadline: Instant,
+    step: &str,
 ) -> Result<(), RuntimeError> {
     let payload = serde_json::to_string(value).map_err(|e| RuntimeError::SpawnFailed {
         detail: format!("opencode acp handshake serialize: {e}"),
     })?;
     let mut line = payload.into_bytes();
     line.push(b'\n');
-    tokio::time::timeout(stdin_write_timeout, stdin.write_all(&line))
+    let write_bound = remaining_handshake_time(handshake_deadline, step)?.min(stdin_write_timeout);
+    tokio::time::timeout(write_bound, stdin.write_all(&line))
         .await
         .map_err(|_| RuntimeError::SpawnFailed {
             detail: format!(
-                "opencode acp handshake write: timed out after {:?}",
-                stdin_write_timeout
+                "opencode acp handshake {step}: write timed out after {:?}",
+                write_bound
             ),
         })?
         .map_err(|e| RuntimeError::SpawnFailed {
-            detail: format!("opencode acp handshake write: {e}"),
+            detail: format!("opencode acp handshake {step}: write: {e}"),
         })?;
-    tokio::time::timeout(stdin_write_timeout, stdin.flush())
+    let flush_bound = remaining_handshake_time(handshake_deadline, step)?.min(stdin_write_timeout);
+    tokio::time::timeout(flush_bound, stdin.flush())
         .await
         .map_err(|_| RuntimeError::SpawnFailed {
             detail: format!(
-                "opencode acp handshake flush: timed out after {:?}",
-                stdin_write_timeout
+                "opencode acp handshake {step}: flush timed out after {:?}",
+                flush_bound
             ),
         })?
         .map_err(|e| RuntimeError::SpawnFailed {
-            detail: format!("opencode acp handshake flush: {e}"),
+            detail: format!("opencode acp handshake {step}: flush: {e}"),
         })
+}
+
+fn remaining_handshake_time(deadline: Instant, step: &str) -> Result<Duration, RuntimeError> {
+    let now = Instant::now();
+    if now >= deadline {
+        return Err(RuntimeError::SpawnFailed {
+            detail: format!("opencode acp handshake {step}: timed out"),
+        });
+    }
+    Ok(deadline.saturating_duration_since(now))
 }
 
 async fn read_handshake_line(
     reader: &mut BufReader<ChildStdout>,
-    timeout: Duration,
+    deadline: Instant,
     step: &str,
 ) -> Result<String, RuntimeError> {
+    let timeout = remaining_handshake_time(deadline, step)?;
     match tokio::time::timeout(timeout, read_bounded_line(reader, MAX_STDOUT_LINE_BYTES)).await {
         Ok(Ok(BoundedLineRead::Line(line))) => Ok(line),
         Ok(Ok(BoundedLineRead::Eof)) => Err(RuntimeError::SpawnFailed {
@@ -844,26 +898,54 @@ async fn read_handshake_line(
         }),
         Err(_) => Err(RuntimeError::SpawnFailed {
             detail: format!(
-                "opencode acp handshake {step}: timed out after {}s",
-                timeout.as_secs()
+                "opencode acp handshake {step}: timed out after {:?} (remaining handshake budget)",
+                timeout
             ),
         }),
     }
 }
 
-fn parse_handshake_line(line: &str, expected_id: i64, step: &str) -> Result<Value, RuntimeError> {
+/// Cap an anomalous/error line embedded in a diagnostic message: the line
+/// itself may legally be up to [`MAX_STDOUT_LINE_BYTES`] (4 MiB), and a
+/// `RuntimeError::SpawnFailed` detail string that size is pure waste for an
+/// error/log path nobody needs the full payload for.
+fn truncate_for_diagnostic(line: &str) -> &str {
+    const MAX_DIAGNOSTIC_CHARS: usize = 512;
+    let mut boundary = line.len().min(MAX_DIAGNOSTIC_CHARS);
+    while boundary > 0 && !line.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    &line[..boundary]
+}
+
+async fn read_expected_handshake_line(
+    reader: &mut BufReader<ChildStdout>,
+    expected_id: u64,
+    step: &str,
+    deadline: Instant,
+) -> Result<String, RuntimeError> {
+    loop {
+        let line = read_handshake_line(reader, deadline, step).await?;
+        match classify_handshake_line(&line, expected_id) {
+            HandshakeLineClass::Notification => continue,
+            HandshakeLineClass::ExpectedResponse => return Ok(line),
+            HandshakeLineClass::Anomaly => {
+                return Err(RuntimeError::SpawnFailed {
+                    detail: format!(
+                        "opencode acp handshake {step}: protocol anomaly while awaiting id \
+                         {expected_id}: {}",
+                        truncate_for_diagnostic(&line)
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn parse_handshake_line(line: &str, step: &str) -> Result<Value, RuntimeError> {
     let v: Value = serde_json::from_str(line).map_err(|e| RuntimeError::SpawnFailed {
         detail: format!("opencode acp handshake {step}: malformed JSON: {e}"),
     })?;
-    let got_id = v.get("id").and_then(Value::as_i64);
-    if got_id != Some(expected_id) {
-        return Err(RuntimeError::SpawnFailed {
-            detail: format!(
-                "opencode acp handshake {step}: expected id {expected_id}, got {:?}",
-                got_id
-            ),
-        });
-    }
     Ok(v)
 }
 
@@ -940,6 +1022,98 @@ fn map_acp_line(line: &str) -> Vec<ProtocolEvent> {
     vec![ProtocolEvent::AssistantDelta {
         text: text.to_string(),
     }]
+}
+
+/// Classification of one JSON-RPC line read during the handshake, relative to
+/// the request id currently being awaited (hardening-plan §4.6).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandshakeLineClass {
+    /// A JSON-RPC notification (has `method`, no `id`). A real ACP server may
+    /// legally send one at any time, including mid-handshake; ignore it and
+    /// keep reading — it is never the handshake response.
+    Notification,
+    /// The response we are waiting for: `id` matches `expected_id` AND the
+    /// line carries `result` or `error`. Either satisfies the handshake step
+    /// (an `error` still ends the read; the caller surfaces it separately).
+    ExpectedResponse,
+    /// Neither of the above: a response tagged with a DIFFERENT id, a
+    /// malformed/non-JSON line, or a line with no `id` and no `method`. A real
+    /// protocol anomaly to surface — never silently treated the same as a
+    /// benign `Notification`.
+    Anomaly,
+}
+
+/// Classify one handshake line against the request id currently awaited
+/// (hardening-plan §4.6). Pure — no IO, no async. `perform_handshake` loops
+/// reading lines (bounded by ONE overall handshake deadline, not a fresh
+/// timeout per skipped line) and acts on the classification: skip
+/// `Notification`s, accept `ExpectedResponse`, fail the handshake on
+/// `Anomaly`.
+pub fn classify_handshake_line(line: &str, expected_id: u64) -> HandshakeLineClass {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return HandshakeLineClass::Anomaly;
+    }
+
+    let v: Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return HandshakeLineClass::Anomaly,
+    };
+
+    if v.get("method").is_some() && v.get("id").is_none() {
+        return HandshakeLineClass::Notification;
+    }
+
+    let Some(id) = v.get("id").and_then(Value::as_u64) else {
+        return HandshakeLineClass::Anomaly;
+    };
+
+    if v.get("result").is_some() || v.get("error").is_some() {
+        return if id == expected_id {
+            HandshakeLineClass::ExpectedResponse
+        } else {
+            HandshakeLineClass::Anomaly
+        };
+    }
+
+    HandshakeLineClass::Anomaly
+}
+
+/// Map one opencode ACP wire line to zero or more [`ProtocolEvent`]s, gating a
+/// terminal (`result{stopReason}`/`error`) by JSON-RPC id (hardening-plan
+/// §4.8): a terminal whose `id` does not match `expected_id` (or carries none
+/// at all) is DROPPED (`vec![]`) rather than misrouted into the current turn
+/// — the actor's single-writer invariant makes this structurally rare in
+/// practice, but the id check is explicit defense-in-depth rather than an
+/// unstated "at most one prompt outstanding" assumption. Id-less notifications
+/// (streaming deltas) are unaffected by `expected_id`, since they carry no id
+/// to correlate. Delegates to [`map_acp_line`] once the id gate passes.
+pub fn map_acp_line_correlated(line: &str, expected_id: u64) -> Vec<ProtocolEvent> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return vec![];
+    }
+
+    let v: Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let is_terminal_response = v.get("error").is_some()
+        || v.get("result")
+            .and_then(|result| result.get("stopReason"))
+            .is_some();
+
+    if is_terminal_response {
+        let Some(id) = v.get("id").and_then(Value::as_u64) else {
+            return vec![];
+        };
+        if id != expected_id {
+            return vec![];
+        }
+    }
+
+    map_acp_line(trimmed)
 }
 
 #[cfg(test)]
