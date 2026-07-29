@@ -88,6 +88,27 @@ struct TrackedTurn {
     certainty: DeliveryCertainty,
 }
 
+/// Cancellation state for the currently active turn.
+///
+/// `cancel_turn(active)` is intentionally split into two phases:
+/// 1) acknowledge the caller promptly and request transport interruption, then
+/// 2) WAIT for the cancelled turn's own terminal transport event before clearing
+///    `active` and promoting the queue.
+///
+/// This avoids misattributing a late terminal from the old turn to a newly
+/// activated queued turn on the same transport.
+struct PendingCancellation {
+    turn_id: TurnId,
+    reason: CancelReason,
+    /// Runtime-clock instant when we entered "interrupting and awaiting
+    /// terminal confirmation".
+    since: std::time::Instant,
+    /// Some callers/tests rely on `cancel_turn` surfacing a cancellation event
+    /// promptly even though interruption is best-effort. We emit once and track
+    /// whether finalization still needs to emit it.
+    emitted_turn_cancelled: bool,
+}
+
 /// The shared, lock-free-ish state `events()`/`status()` read without the mailbox.
 pub(crate) struct Shared {
     pub(crate) journal: Mutex<Journal>,
@@ -143,6 +164,9 @@ pub(crate) struct Actor {
     /// to answer a mid-turn `ToolStarted`-shaped bidirectional callback with the
     /// tool's own name.
     running_tool: Option<String>,
+    /// Active-turn cancellation is in progress and we are waiting for that SAME
+    /// turn's terminal transport event before queue promotion.
+    cancelling: Option<PendingCancellation>,
     /// Turn-lifecycle events pumped while idle (before the owning turn was
     /// submitted), replayed once the turn becomes active (§7.4).
     pending_events: VecDeque<ProtocolEvent>,
@@ -212,6 +236,7 @@ impl Actor {
             draining: false,
             awaiting_gate: false,
             running_tool: None,
+            cancelling: None,
             pending_events: VecDeque::new(),
             idle_parked: false,
             idle_drained: false,
@@ -544,6 +569,17 @@ impl Actor {
         if self.terminal || self.active.is_none() {
             return;
         }
+        if let Some(cancel) = self.cancelling.as_ref() {
+            if self.clock.now().saturating_duration_since(cancel.since) >= WATCHDOG_GUARD_TIMEOUT {
+                // While waiting for cancel confirmation, never silently activate
+                // queued work on the same transport after a timeout. Without
+                // protocol-level turn ids, a late terminal from the old turn is
+                // indistinguishable from the next turn's terminal signal.
+                self.transport_terminating = true;
+                self.on_process_exited(None);
+                return;
+            }
+        }
         if self
             .clock
             .now()
@@ -837,12 +873,18 @@ impl Actor {
                 }
             }
             ProtocolEvent::TurnAccepted { .. } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
                 // The public TurnAccepted was emitted at admission; move phase.
                 if self.active.is_some() {
                     self.set_busy(BusyPhase::Generating);
                 }
             }
             ProtocolEvent::AssistantDelta { text } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
                 if let Some(a) = self.active.as_ref() {
                     let turn_id = a.id.clone();
                     let text = self.cap_delta(text);
@@ -851,6 +893,9 @@ impl Actor {
                 }
             }
             ProtocolEvent::ToolStarted { name } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
                 if let Some(a) = self.active.as_ref() {
                     let turn_id = a.id.clone();
                     // Track the running tool so a mid-turn `ToolStarted`-shaped
@@ -861,6 +906,9 @@ impl Actor {
                 }
             }
             ProtocolEvent::ToolFinished { name, ok } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
                 if let Some(a) = self.active.as_ref() {
                     let turn_id = a.id.clone();
                     self.running_tool = None;
@@ -869,6 +917,9 @@ impl Actor {
                 }
             }
             ProtocolEvent::NativeGateRequested { detail } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
                 if let Some(a) = self.active.as_ref() {
                     let turn_id = a.id.clone();
                     self.awaiting_gate = true;
@@ -880,9 +931,17 @@ impl Actor {
                 }
             }
             ProtocolEvent::TurnCompleted { reply } => {
+                if self.is_cancelling_active() {
+                    self.finalize_cancelled_active().await;
+                    return;
+                }
                 self.complete_active(reply).await;
             }
             ProtocolEvent::TurnFailed { error } => {
+                if self.is_cancelling_active() {
+                    self.finalize_cancelled_active().await;
+                    return;
+                }
                 self.fail_active(DeliveryCertainty::Completed, error).await;
             }
             ProtocolEvent::ProcessExited { code } => {
@@ -916,6 +975,7 @@ impl Actor {
         });
         self.awaiting_gate = false;
         self.running_tool = None;
+        self.cancelling = None;
         self.advance_after_terminal().await;
     }
 
@@ -944,6 +1004,7 @@ impl Actor {
         });
         self.awaiting_gate = false;
         self.running_tool = None;
+        self.cancelling = None;
     }
 
     async fn fail_active(&mut self, certainty: DeliveryCertainty, error: String) {
@@ -1004,6 +1065,7 @@ impl Actor {
         self.transport_terminating = false;
         self.awaiting_gate = false;
         self.running_tool = None;
+        self.cancelling = None;
         self.shared.set_status(TargetStatus::Faulted {
             error: "process exited".to_string(),
             recoverable: false,
@@ -1094,6 +1156,11 @@ impl Actor {
         // Active turn?
         if let Some(active) = self.active.as_ref() {
             if active.id == turn_id {
+                if self.is_cancelling_active() {
+                    // Idempotent re-cancel while already interrupting this same
+                    // active turn.
+                    return Ok(());
+                }
                 if !self.caps().interruptible {
                     return Err(RuntimeError::Unsupported {
                         operation: "cancel_turn (target is not interruptible)".to_string(),
@@ -1106,13 +1173,22 @@ impl Actor {
                 });
                 self.emit_status();
                 let _ = self.transport_mut().interrupt().await;
-                // The interrupt resolves the active turn.
-                let _ = self.active.take();
+                self.cancelling = Some(PendingCancellation {
+                    turn_id: turn_id.clone(),
+                    reason,
+                    since: self.clock.now(),
+                    emitted_turn_cancelled: false,
+                });
+                // Emit cancellation promptly (optimistic) for API responsiveness,
+                // but keep the active turn pinned until its REAL terminal event
+                // arrives from the transport.
                 self.emit(TurnEvent::TurnCancelled {
                     turn_id: turn_id.clone(),
                     reason,
                 });
-                self.advance_after_terminal().await;
+                if let Some(cancel) = self.cancelling.as_mut() {
+                    cancel.emitted_turn_cancelled = true;
+                }
                 return Ok(());
             }
         }
@@ -1137,6 +1213,11 @@ impl Actor {
         }
         match mode {
             ShutdownMode::Immediate => {
+                // Already-cancelling-and-awaiting-confirmation: `cancel()`
+                // already emitted a `TurnCancelled` (with its own reason) for
+                // this exact turn; do not emit a second one with `Shutdown` as
+                // the reason for the same turn.
+                let already_cancelled = self.is_cancelling_active();
                 if let Some(turn) = self.active.take() {
                     // An injected-but-unfinished `command` at shutdown is
                     // OutcomeUnknown (§7.3); audit it so the durable evidence is
@@ -1149,11 +1230,14 @@ impl Actor {
                         turn.certainty
                     };
                     self.audit(RuntimeTurnPhase::Failed, certainty, &turn.id);
-                    self.emit(TurnEvent::TurnCancelled {
-                        turn_id: turn.id,
-                        reason: CancelReason::Shutdown,
-                    });
+                    if !already_cancelled {
+                        self.emit(TurnEvent::TurnCancelled {
+                            turn_id: turn.id,
+                            reason: CancelReason::Shutdown,
+                        });
+                    }
                 }
+                self.cancelling = None;
                 let queued: Vec<TrackedTurn> = self.queue.drain(..).collect();
                 for t in queued {
                     self.emit(TurnEvent::TurnExpired { turn_id: t.id });
@@ -1186,6 +1270,7 @@ impl Actor {
         self.draining = false;
         self.awaiting_gate = false;
         self.running_tool = None;
+        self.cancelling = None;
         self.emit(TurnEvent::ProcessExited { code: None });
         self.shared.set_status(TargetStatus::Stopped);
         self.emit_status();
@@ -1231,7 +1316,13 @@ impl Actor {
             GateDecision::Approve => "approve".to_string(),
             GateDecision::Deny { reason } => format!("deny: {reason}"),
         });
-        let _ = self.transport_mut().send_turn(&answer).await;
+        if let Err(err) = self.transport_mut().send_turn(&answer).await {
+            if matches!(err, RuntimeError::TransportOutcomeUnknown { .. }) {
+                self.transport_terminating = true;
+                self.on_process_exited(None);
+            }
+            return Err(err);
+        }
         self.awaiting_gate = false;
         self.emit(TurnEvent::NativeGateResolved { turn_id, decision });
         // Back to Busy (the turn proceeds).
@@ -1444,5 +1535,39 @@ impl Actor {
 
     fn close_broadcast(&self) {
         self.shared.journal.lock().unwrap().close();
+    }
+
+    fn is_cancelling_active(&self) -> bool {
+        let Some(cancel) = self.cancelling.as_ref() else {
+            return false;
+        };
+        matches!(self.active.as_ref(), Some(a) if a.id == cancel.turn_id)
+    }
+
+    async fn finalize_cancelled_active(&mut self) {
+        let Some(cancel) = self.cancelling.take() else {
+            return;
+        };
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        if active.id != cancel.turn_id {
+            self.cancelling = Some(cancel);
+            return;
+        }
+
+        let _ = self.active.take();
+        self.awaiting_gate = false;
+        // Hardening-3 §0.1 item 1: clear tool-running belief when cancellation is
+        // confirmed (same transition where active is cleared) so a later
+        // `answer_tool_call` cannot route to the wrong turn.
+        self.running_tool = None;
+        if !cancel.emitted_turn_cancelled {
+            self.emit(TurnEvent::TurnCancelled {
+                turn_id: cancel.turn_id,
+                reason: cancel.reason,
+            });
+        }
+        self.advance_after_terminal().await;
     }
 }
