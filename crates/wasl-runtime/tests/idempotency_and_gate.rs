@@ -313,7 +313,19 @@ async fn resolving_native_gate_approve_transitions_out_and_completes() {
     );
     let clock = TestClock::new();
     let sink = sink_arc(RecordingSink::default());
-    let prov = provider(proto, tight_config(), clock, sink);
+    // A larger `journal_capacity` than `tight_config()`'s default (8): this
+    // test re-subscribes from `EventSeq(0)` multiple times (full replays),
+    // and the total event count (including an optional intervening
+    // `StatusChanged{Idle}`/`TurnQueued` per §7.1 row 582's `Starting`-phase
+    // handling) can exceed 8 — this test's actual intent (resolving a gate)
+    // has nothing to do with exercising journal eviction/truncation, so give
+    // it enough room rather than pinning to the tight, truncation-prone
+    // default.
+    let config = wasl_runtime::ManagedConfig {
+        journal_capacity: 32,
+        ..tight_config()
+    };
+    let prov = provider(proto, config, clock, sink);
     let target: Arc<dyn DeliveryTarget> =
         prov.target_for(&key("ctx-gate-ok")).await.expect("target");
 

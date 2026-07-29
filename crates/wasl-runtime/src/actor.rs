@@ -13,8 +13,9 @@
 //! mailbox — so they work even while the actor is mid-pump.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -91,6 +92,9 @@ struct TrackedTurn {
 pub(crate) struct Shared {
     pub(crate) journal: Mutex<Journal>,
     pub(crate) status: Mutex<TargetStatus>,
+    /// True while the actor is parked on mailbox receive and a `Poke` can wake
+    /// it to re-poll transport events.
+    pub(crate) poke_needed: AtomicBool,
 }
 
 impl Shared {
@@ -123,6 +127,10 @@ pub(crate) struct Actor {
     native: Option<crate::NativeSessionId>,
     /// The transport is dead / target terminal — stop pumping.
     terminal: bool,
+    /// True once termination has been initiated for the current transport and a
+    /// terminal event is pending. While set, command handling rejects ordinary
+    /// mailbox mutations instead of racing teardown.
+    transport_terminating: bool,
     /// Draining (finish active, admit nothing).
     draining: bool,
     /// Awaiting a native gate.
@@ -140,6 +148,9 @@ pub(crate) struct Actor {
     /// The transport has been drained to `None` while idle (no active turn): an
     /// idle session is quiescent, so wait on the mailbox only — do not spin.
     idle_drained: bool,
+    /// Last observed transport progress (event pump or successful injection), in
+    /// runtime-clock time so deterministic tests can drive watchdog behavior.
+    last_transport_progress: std::time::Instant,
 }
 
 /// Which pump outcome the loop should take next.
@@ -149,6 +160,8 @@ enum PumpNext {
     /// Idle / terminal — only service the mailbox.
     Wait,
 }
+
+const WATCHDOG_GUARD_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Actor {
     #[allow(clippy::too_many_arguments)]
@@ -182,12 +195,14 @@ impl Actor {
             ready: false,
             native: None,
             terminal: false,
+            transport_terminating: false,
             draining: false,
             awaiting_gate: false,
             running_tool: None,
             pending_events: VecDeque::new(),
             idle_parked: false,
             idle_drained: false,
+            last_transport_progress: epoch,
         }
     }
 
@@ -195,33 +210,132 @@ impl Actor {
     pub(crate) async fn run(mut self) {
         loop {
             match self.pump_mode() {
-                PumpNext::Pump => {
-                    // Pump one transport event (standalone await — never cancelled
-                    // mid-event, so a popped scripted step is never lost).
-                    match self.transport.next_event().await {
-                        Some(ev) => {
-                            // Real activity: keep pumping.
-                            self.idle_drained = false;
-                            self.on_pumped_event(ev).await;
+                PumpNext::Pump if !self.ready => {
+                    self.shared.poke_needed.store(false, Ordering::Release);
+                    // Still `Starting` (§7.1 row 582 / §7.4 row 612): bias
+                    // TOWARD the transport when both branches are
+                    // simultaneously ready. This restores a deterministic
+                    // "SessionReady is always observed before an admission
+                    // decision that races it" ordering (which every existing
+                    // caller/test implicitly depends on) WITHOUT sacrificing
+                    // mailbox responsiveness: `biased` only affects which
+                    // branch wins when BOTH are ready at once — it does not
+                    // stop `mailbox.recv()` from being polled/serviced whenever
+                    // `next_event()` is genuinely still pending (the normal
+                    // case for a real driver's handshake/startup). This is
+                    // safe against Issue B's own busy-loop failure mode (a
+                    // biased branch that is `Ready` FOREVER, e.g. a scripted
+                    // transport whose steps are exhausted) because that
+                    // precondition requires an ACTIVE turn to persist
+                    // indefinitely; `Starting` has no active turn by
+                    // definition and is always a brief, one-time window that
+                    // ends the moment `SessionReady`/`ProcessExited` is
+                    // observed (`self.ready` flips, or `self.terminal` does).
+                    tokio::select! {
+                        biased;
+                        ev = self.transport.next_event() => {
+                            match ev {
+                                Some(ev) => {
+                                    self.idle_drained = false;
+                                    self.transport_terminating = false;
+                                    self.last_transport_progress = self.clock.now();
+                                    self.on_pumped_event(ev).await;
+                                }
+                                None => {
+                                    // A real driver's own idle-poll timeout (NOT
+                                    // "nothing is ever coming" — see
+                                    // `pump_mode`'s doc comment). Deliberately do
+                                    // NOT set `idle_drained` here: that flag may
+                                    // only ever park the actor once `self.ready`,
+                                    // never before.
+                                    //
+                                    // Explicitly drain the mailbox here rather
+                                    // than relying on `select!`'s branch
+                                    // fairness: under `biased`, `next_event()`
+                                    // is ALWAYS tried first, so if it keeps
+                                    // resolving `Ready` (even `None`) with no
+                                    // internal await point — e.g. a scripted
+                                    // test double whose script is exhausted
+                                    // before ever reaching `.ready()` — the
+                                    // mailbox branch would NEVER be polled at
+                                    // all, starving every command
+                                    // indefinitely. A direct, non-blocking
+                                    // `try_recv()` here cannot itself be
+                                    // cancelled mid-flight and guarantees a
+                                    // pending command is always found.
+                                    if self.drain_one_ready_command().await {
+                                        break;
+                                    }
+                                }
+                            }
                         }
-                        None if self.active.is_some() => {
-                            // A turn is in flight but nothing pending right now.
-                            // BLOCK purely on the mailbox — a `Poke` (sent by
-                            // `events()` on every subscribe) or a command wakes us
-                            // to re-poll for a late `push_event`. No timer, no
-                            // busy-spin: a quiescent long-lived turn consumes ZERO
-                            // CPU, so it never steals cycles from unrelated tasks'
-                            // timers (critical on a single-core executor).
-                            match self.mailbox.recv().await {
+                        cmd = self.mailbox.recv() => {
+                            match cmd {
                                 Some(c) => self.on_command(c).await,
                                 None => break,
                             }
                         }
-                        None => {
-                            // Idle and the transport is quiescent: an idle session
-                            // produces nothing until a turn is submitted, so PARK
-                            // on the mailbox (no spin) rather than re-poll.
-                            self.idle_drained = true;
+                    }
+                }
+                PumpNext::Pump => {
+                    self.shared.poke_needed.store(false, Ordering::Release);
+                    // Race transport pumping against mailbox commands so control
+                    // paths are serviced even while a slow event wait is in
+                    // flight.
+                    tokio::select! {
+                        ev = self.transport.next_event() => {
+                            match ev {
+                                Some(ev) => {
+                                    // Real activity: keep pumping.
+                                    self.idle_drained = false;
+                                    self.transport_terminating = false;
+                                    self.last_transport_progress = self.clock.now();
+                                    self.on_pumped_event(ev).await;
+                                }
+                                None if self.active.is_some() => {
+                                    // A turn is in flight but the transport produced
+                                    // nothing this poll. Do NOT block here on a nested,
+                                    // un-raced `mailbox.recv().await` — that would
+                                    // reintroduce Issue B one level deeper.
+                                    //
+                                    // Also do NOT simply "loop back and let the next
+                                    // `select!` iteration's own fairness sort it
+                                    // out": VERIFIED EMPIRICALLY (a real bug found
+                                    // implementing this fix, via
+                                    // `cancel_and_crash.rs`'s `busy_forever_script()`
+                                    // tests) that `tokio::select!`'s per-invocation
+                                    // "random" branch choice does NOT reliably give
+                                    // the mailbox branch a fair chance when
+                                    // `next_event()` keeps resolving `Ready` (even
+                                    // `None`) with no internal await point — 85,000+
+                                    // iterations were observed with ZERO mailbox
+                                    // commands ever serviced. This is a real,
+                                    // legitimate scenario (a scripted test double
+                                    // whose script is exhausted while a turn stays
+                                    // active — "busy forever" — not just a
+                                    // hypothetical). Explicitly, unconditionally
+                                    // drain one ready mailbox command here via a
+                                    // direct, non-blocking `try_recv()` (which cannot
+                                    // itself be cancelled mid-flight) so a pending
+                                    // command is NEVER missed regardless of
+                                    // `select!`'s internal fairness heuristics.
+                                    if self.drain_one_ready_command().await {
+                                        break;
+                                    }
+                                }
+                                None => {
+                                    // Idle and the transport is quiescent: an idle session
+                                    // produces nothing until a turn is submitted, so PARK
+                                    // on the mailbox (no spin) rather than re-poll.
+                                    self.idle_drained = true;
+                                }
+                            }
+                        }
+                        cmd = self.mailbox.recv() => {
+                            match cmd {
+                                Some(c) => self.on_command(c).await,
+                                None => break,
+                            }
                         }
                     }
                 }
@@ -229,12 +343,42 @@ impl Actor {
                     // Idle-parked / idle-drained / terminal: only the mailbox makes
                     // progress. A submit resets `idle_drained` so the actor pumps
                     // the newly-injected turn's events.
+                    self.shared.poke_needed.store(true, Ordering::Release);
                     match self.mailbox.recv().await {
                         Some(c) => self.on_command(c).await,
                         None => break,
                     }
                 }
             }
+        }
+    }
+
+    /// Drain at most one already-ready mailbox command via a non-blocking
+    /// `try_recv()`. Used from the `next_event() == None` arms of the pump
+    /// `select!`s as a GUARANTEED safety net that does not depend on
+    /// `tokio::select!`'s branch-fairness heuristics (verified empirically to
+    /// be unreliable here — see the call sites' doc comments): a plain
+    /// `try_recv()` cannot itself be cancelled mid-flight and always finds an
+    /// already-buffered command regardless of how `select!` would have
+    /// scheduled the two branches. Returns `true` if the mailbox is closed
+    /// (all `Sender`s dropped) and the actor's run loop must exit.
+    async fn drain_one_ready_command(&mut self) -> bool {
+        match self.mailbox.try_recv() {
+            Ok(cmd) => {
+                self.on_command(cmd).await;
+                false
+            }
+            Err(mpsc::error::TryRecvError::Empty) => {
+                // Genuinely nothing to do yet. Yield so a transport that
+                // keeps saying `None` (a scripted "busy forever" test double,
+                // or in principle a slow real driver) cooperates with the
+                // scheduler instead of pinning the executor at 100% CPU and
+                // starving sibling tasks — notably whichever task is about to
+                // send the very command this loop exists to catch.
+                tokio::task::yield_now().await;
+                false
+            }
+            Err(mpsc::error::TryRecvError::Disconnected) => true,
         }
     }
 
@@ -250,6 +394,28 @@ impl Actor {
             return PumpNext::Wait;
         }
         if self.active.is_some() {
+            return PumpNext::Pump;
+        }
+        if !self.ready {
+            // Still `Starting`: NEVER park here. In practice `idle_drained`
+            // cannot yet be true at this point (the `run()` loop's biased
+            // `!self.ready` branch deliberately never sets it — see its doc
+            // comment), so this is belt-and-suspenders defense-in-depth
+            // against the same real bug that motivated that change: a `None`
+            // from `next_event()` before `SessionReady` is a real driver's own
+            // internal idle-poll timeout (see `claude_stream.rs`/
+            // `opencode_acp.rs`'s `pull_one` doc comments: a real
+            // `system/init` can legitimately land several seconds after that
+            // poll interval, due to the CLI's own MCP-server connection
+            // time), NOT a signal that the transport will never produce
+            // anything else. Treating it the same as the post-ready idle case
+            // would park the actor on the mailbox FOREVER, structurally
+            // unable to ever observe the real `SessionReady`/`ProcessExited`
+            // that eventually arrives (nothing resets `idle_drained` while
+            // `!self.ready`, since a submit during `Starting` is queued, not
+            // started — it never calls `start_turn`, the only other place
+            // that clears the flag). Verified by
+            // `tests/starting_phase_idle_timeout.rs`.
             return PumpNext::Pump;
         }
         // Idle: park (wait on the mailbox) once the transport is drained or a
@@ -302,6 +468,12 @@ impl Actor {
     // ---------------------------------------------------------------
 
     async fn on_command(&mut self, cmd: Command) {
+        self.shared.poke_needed.store(false, Ordering::Release);
+        self.maybe_mark_stalled_transport_fault();
+        if self.transport_terminating {
+            self.reject_during_termination(cmd);
+            return;
+        }
         match cmd {
             Command::Submit {
                 req,
@@ -347,6 +519,41 @@ impl Actor {
         }
     }
 
+    fn maybe_mark_stalled_transport_fault(&mut self) {
+        if self.terminal || self.active.is_none() {
+            return;
+        }
+        if self
+            .clock
+            .now()
+            .saturating_duration_since(self.last_transport_progress)
+            >= WATCHDOG_GUARD_TIMEOUT
+        {
+            self.transport_terminating = true;
+            self.on_process_exited(None);
+        }
+    }
+
+    fn reject_during_termination(&mut self, cmd: Command) {
+        let status = self.shared.status.lock().unwrap().clone();
+        match cmd {
+            Command::Submit { reply, .. } => {
+                let _ = reply.send(crate::TurnReceipt::RejectedUnavailable {
+                    status: status.clone(),
+                });
+            }
+            Command::Cancel { reply, .. }
+            | Command::Shutdown { reply, .. }
+            | Command::ResolveGate { reply, .. }
+            | Command::AnswerToolCall { reply, .. } => {
+                let _ = reply.send(Err(RuntimeError::Unavailable {
+                    status: status.clone(),
+                }));
+            }
+            Command::Poke => {}
+        }
+    }
+
     /// The atomic admission decision (§7.1) evaluated against authoritative state.
     async fn admit(
         &mut self,
@@ -370,6 +577,23 @@ impl Actor {
             };
         }
 
+        // Starting (session not yet ready, §7.1 row 582): the target has no
+        // active turn to be "busy" with yet — a raw session isn't `Idle` until
+        // its `SessionReady` is observed. Hold the submit in the queue
+        // unconditionally (regardless of `policy`; there is nothing to
+        // Reject/relate-to yet) and let it be promoted the moment `SessionReady`
+        // arrives (`on_protocol_event`'s `SessionReady` arm pops the queue via
+        // `advance_after_terminal`, mirroring row 612's "if Starting → Idle").
+        // `self.ready` only ever flips false→true once (never resets), so
+        // `!self.ready` implies `self.active.is_none()` by construction.
+        if !self.ready {
+            debug_assert!(
+                self.active.is_none(),
+                "admit: !ready implies no active turn (ready never resets)"
+            );
+            return self.enqueue(req, turn_id, None);
+        }
+
         // Busy? (active turn present). Extract the identity + root up front so the
         // immutable borrow does not outlive the `&mut self` enqueue call.
         let active_info = self
@@ -386,11 +610,11 @@ impl Actor {
                     return TurnReceipt::RejectedBusy { active_turn };
                 }
                 BusyPolicy::Queue { .. } => {
-                    return self.enqueue(req, turn_id, active_turn);
+                    return self.enqueue(req, turn_id, Some(active_turn));
                 }
                 BusyPolicy::QueueRelated { .. } => {
                     if active_root == req.causation.root_request {
-                        return self.enqueue(req, turn_id, active_turn);
+                        return self.enqueue(req, turn_id, Some(active_turn));
                     }
                     return TurnReceipt::RejectedBusy { active_turn };
                 }
@@ -401,11 +625,17 @@ impl Actor {
         self.start_turn(req, turn_id).await
     }
 
+    /// Enqueue a submit that cannot start immediately. `active_turn` is the
+    /// currently-running turn to report in a bounds-exceeded `RejectedBusy`, or
+    /// `None` when the target is still `Starting` (no active turn exists yet) —
+    /// in which case bounds-exceeded instead reports the current (advisory)
+    /// status via `RejectedUnavailable`, since there is no active turn id to
+    /// attach to `RejectedBusy`.
     fn enqueue(
         &mut self,
         req: TurnRequest,
         turn_id: TurnId,
-        active_turn: TurnId,
+        active_turn: Option<TurnId>,
     ) -> crate::TurnReceipt {
         use crate::TurnReceipt;
         // Bounds: queue length + bytes (§11).
@@ -413,7 +643,12 @@ impl Actor {
         let bytes: usize =
             self.queue.iter().map(|t| t.prompt.0.len()).sum::<usize>() + prompt.0.len();
         if self.queue.len() >= self.config.queue_max_len || bytes > self.config.queue_max_bytes {
-            return TurnReceipt::RejectedBusy { active_turn };
+            return match active_turn {
+                Some(active_turn) => TurnReceipt::RejectedBusy { active_turn },
+                None => TurnReceipt::RejectedUnavailable {
+                    status: self.shared.status.lock().unwrap().clone(),
+                },
+            };
         }
         let position = self.queue.len();
         let tracked = TrackedTurn {
@@ -477,7 +712,12 @@ impl Actor {
                 // Injection failed: emit the turn's terminal failure and advance.
                 self.emit_failed_terminal(certainty, error);
                 self.idle_parked = false;
-                self.advance_after_terminal().await;
+                if certainty == DeliveryCertainty::OutcomeUnknown {
+                    self.transport_terminating = true;
+                    self.on_process_exited(None);
+                } else {
+                    self.advance_after_terminal().await;
+                }
             }
         }
 
@@ -526,6 +766,7 @@ impl Actor {
         // Actually inject.
         match self.transport.send_turn(&prompt).await {
             Ok(()) => {
+                self.last_transport_progress = self.clock.now();
                 if let Some(a) = self.active.as_mut() {
                     a.certainty = DeliveryCertainty::Injected;
                 }
@@ -540,10 +781,14 @@ impl Actor {
                 }
                 Ok(())
             }
-            Err(e) => Err((
-                DeliveryCertainty::FailedBeforeInjection,
-                format!("transport error before injection: {e}"),
-            )),
+            Err(e) => {
+                let certainty = if matches!(e, RuntimeError::TransportOutcomeUnknown { .. }) {
+                    DeliveryCertainty::OutcomeUnknown
+                } else {
+                    DeliveryCertainty::FailedBeforeInjection
+                };
+                Err((certainty, format!("transport error before injection: {e}")))
+            }
         }
     }
 
@@ -557,7 +802,18 @@ impl Actor {
                 self.native = native.clone();
                 self.ready = true;
                 self.emit(TurnEvent::SessionReady { native });
-                self.refresh_status();
+                if self.active.is_none() {
+                    // §7.1 row 582 / §7.4 row 612: "if Starting → Idle". Any
+                    // turn submitted while still `Starting` was held in the
+                    // queue (`admit`'s `!self.ready` branch); promote it now.
+                    // `advance_after_terminal` also handles the empty-queue
+                    // case correctly (→ `go_idle`, emitting the required
+                    // `StatusChanged`), so this is the single call needed
+                    // either way.
+                    self.advance_after_terminal().await;
+                } else {
+                    self.refresh_status();
+                }
             }
             ProtocolEvent::TurnAccepted { .. } => {
                 // The public TurnAccepted was emitted at admission; move phase.
@@ -722,8 +978,8 @@ impl Actor {
         for t in queued {
             self.emit(TurnEvent::TurnExpired { turn_id: t.id });
         }
-        self.emit(TurnEvent::ProcessExited { code });
         self.terminal = true;
+        self.transport_terminating = false;
         self.awaiting_gate = false;
         self.running_tool = None;
         self.shared.set_status(TargetStatus::Faulted {
@@ -731,6 +987,7 @@ impl Actor {
             recoverable: false,
         });
         self.emit_status();
+        self.emit(TurnEvent::ProcessExited { code });
         self.close_broadcast();
     }
 
@@ -789,6 +1046,11 @@ impl Actor {
                 Err((certainty, error)) => {
                     // Injection failed: emit terminal + loop to the next queued.
                     self.emit_failed_terminal(certainty, error);
+                    if certainty == DeliveryCertainty::OutcomeUnknown {
+                        self.transport_terminating = true;
+                        self.on_process_exited(None);
+                        return;
+                    }
                     continue;
                 }
             }
@@ -897,6 +1159,7 @@ impl Actor {
 
     fn stop(&mut self) {
         self.terminal = true;
+        self.transport_terminating = false;
         self.draining = false;
         self.awaiting_gate = false;
         self.running_tool = None;
@@ -1107,7 +1370,11 @@ impl Actor {
 
     fn cap_delta(&self, mut text: String) -> String {
         if text.len() > self.config.delta_max_bytes {
-            text.truncate(self.config.delta_max_bytes);
+            let mut boundary = self.config.delta_max_bytes;
+            while boundary > 0 && !text.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            text.truncate(boundary);
             text.push_str("…[truncated]");
         }
         text

@@ -70,6 +70,26 @@ impl Default for SupervisionTimeouts {
 /// timing, per the §1.4 CONSTRAINTS, not a sleep driving logic.
 const POLL_IDLE: Duration = Duration::from_millis(500);
 
+/// Compute how long `pull_one` should block on the next event.
+///
+/// Cancellation-safety audit note: actor-level mailbox responsiveness is now
+/// provided by racing mailbox commands against `next_event`; while a turn is in
+/// flight this transport should wait the full remaining watchdog budget.
+fn next_wait(
+    turn_in_flight: bool,
+    elapsed: Duration,
+    hang_watchdog: Duration,
+    poll_idle: Duration,
+) -> Duration {
+    if turn_in_flight {
+        hang_watchdog
+            .saturating_sub(elapsed)
+            .max(Duration::from_millis(1))
+    } else {
+        poll_idle
+    }
+}
+
 /// The `FakeLineProtocol` driver: spawns the given fake-agent binary and maps its
 /// line wire onto [`ProtocolEvent`].
 pub struct FakeLineProtocol {
@@ -354,19 +374,15 @@ impl FakeLineTransport {
             Err(mpsc::error::TryRecvError::Empty) => {}
         }
 
-        // Nothing buffered right now. Wait a bounded slice for the next event:
-        //   * on an in-flight turn, no more than the remaining hang-watchdog
-        //     budget (so a hung turn is surfaced as a terminal, never a spurious
-        //     `None`), capped at POLL_IDLE so the generic actor can breathe;
-        //   * when idle (no turn), just POLL_IDLE — long enough that the first
-        //     `SessionReady` is observed, short enough that the actor parks.
-        let wait = if self.turn_in_flight {
-            let elapsed = self.last_event_at.elapsed();
-            let remaining = self.timeouts.hang_watchdog.saturating_sub(elapsed);
-            POLL_IDLE.min(remaining.max(Duration::from_millis(1)))
-        } else {
-            POLL_IDLE
-        };
+        // Nothing buffered right now. While a turn is in flight, wait the full
+        // remaining watchdog budget; mailbox responsiveness is handled at actor
+        // level by racing mailbox commands against `next_event`.
+        let wait = next_wait(
+            self.turn_in_flight,
+            self.last_event_at.elapsed(),
+            self.timeouts.hang_watchdog,
+            POLL_IDLE,
+        );
 
         match tokio::time::timeout(wait, self.events.recv()).await {
             Ok(Some(ev)) => Some(ev),
@@ -409,6 +425,8 @@ impl InteractiveTransport for FakeLineTransport {
     }
 
     async fn next_event(&mut self) -> Option<ProtocolEvent> {
+        // Cancellation-safety audit: once `pull_one()` resolves with a concrete
+        // event, this method performs no further awaits before returning it.
         // Pull events, DROPPING any that reference an already-completed turn
         // (duplicate `done`, `delta`-after-`done`, §1.3 / R1 §7.4) — never a
         // re-emitted terminal, never a spurious late delta. `ProcessExited` always

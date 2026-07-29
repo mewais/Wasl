@@ -660,6 +660,16 @@ pub trait InteractiveTransport: Send {
 
     /// Pull the next NORMALIZED protocol event. Ends with `ProcessExited` when
     /// the session dies.
+    ///
+    /// # Cancellation-safety requirement (MUST)
+    ///
+    /// Actor pumping races `next_event()` against mailbox commands via
+    /// `tokio::select!`; therefore this future may be dropped at an await point
+    /// and polled again by a subsequent call. Every implementor MUST guarantee
+    /// that such cancellation never loses a normalized event and never corrupts
+    /// driver-internal framing state. In particular: once an internal queue read
+    /// resolves to an event, no further `.await` may occur before that event is
+    /// returned from `next_event()`.
     async fn next_event(&mut self) -> Option<ProtocolEvent>;
 
     /// Best-effort interrupt of the active turn (only if `capabilities().
@@ -827,6 +837,13 @@ pub enum RuntimeError {
         /// The failure detail.
         detail: String,
     },
+    /// The transport failed after bytes MAY already have been injected (for
+    /// example a timed-out `write_all` where a partial frame may have reached
+    /// the child). Callers must treat delivery certainty as `OutcomeUnknown`.
+    TransportOutcomeUnknown {
+        /// The failure detail.
+        detail: String,
+    },
     /// The target is Offline/Faulted/Stopped for the requested operation.
     Unavailable {
         /// The status that made the target unavailable.
@@ -876,6 +893,9 @@ impl std::fmt::Display for RuntimeError {
             }
             RuntimeError::Transport { detail } => {
                 write!(f, "transport error: {detail}")
+            }
+            RuntimeError::TransportOutcomeUnknown { detail } => {
+                write!(f, "transport error (outcome unknown): {detail}")
             }
             RuntimeError::Unavailable { status } => {
                 write!(f, "target unavailable: {status:?}")

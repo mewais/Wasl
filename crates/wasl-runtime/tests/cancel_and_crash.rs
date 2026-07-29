@@ -320,15 +320,19 @@ async fn command_process_exit_after_injection_is_outcome_unknown_no_retry() {
 #[tokio::test]
 async fn transport_error_before_injection_is_failed_before_injection() {
     let proto = ScriptedProtocol::new();
-    // The FIRST send_turn fails (fail_next_send), so the turn never injects.
-    let handle = proto.install(
-        "ctx-preinject",
-        ProtocolScript::new()
-            .ready(Some("ses-1"))
-            .fail_next_send(RuntimeError::Transport {
-                detail: "broken pipe before accept".into(),
-            }),
-    );
+    // The FIRST send_turn fails, so the turn never injects. Armed directly
+    // and synchronously on the shared transport handle (NOT via
+    // `ProtocolScript::fail_next_send`, which only takes effect once a
+    // `ScriptStep::FailNextSend` is popped by `next_event()` pumping): a
+    // submit racing `SessionReady` may (§7.1 row 582) be queued then
+    // promoted-and-injected synchronously as part of handling THAT SAME
+    // `SessionReady` event, with no intervening `next_event()` call to pop a
+    // scripted step first. Arming here guarantees the failure is in effect
+    // before ANY `send_turn` call, regardless of that race's outcome.
+    let handle = proto.install("ctx-preinject", ProtocolScript::new().ready(Some("ses-1")));
+    handle.shared.arm_fail_next_send(RuntimeError::Transport {
+        detail: "broken pipe before accept".into(),
+    });
     let clock = TestClock::new();
     let sink = sink_arc(RecordingSink::default());
     let prov = provider(proto, tight_config(), clock, sink);

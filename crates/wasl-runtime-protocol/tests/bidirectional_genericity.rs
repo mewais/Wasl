@@ -340,8 +340,12 @@ async fn ask_wasl_via_gate_completes_when_the_actor_answers_back_single_writer()
         )
         .await;
     let turn_id: TurnId = match started {
-        TurnReceipt::Started { turn_id, .. } => turn_id,
-        other => panic!("first submit must Start the turn, got {other:?}"),
+        TurnReceipt::Started { turn_id, .. } | TurnReceipt::Queued { turn_id, .. } => turn_id,
+        // A submit racing the transport's SessionReady may legitimately
+        // land either Started or Queued-then-promoted (runtime.md §7.1 row 582)
+        // -- both are correct; this is a REAL process (FakeLineProtocol
+        // spawns wasl-fake-agent), so the race is common, not an edge case.
+        other => panic!("expected Started or Queued, got {other:?}"),
     };
 
     // The actor observes the mid-turn gate — using the EXISTING enum. And the
@@ -406,8 +410,12 @@ async fn ask_wasl_via_toolstarted_hangs_no_answerback_in_frozen_api() {
         )
         .await;
     let turn_id: TurnId = match started {
-        TurnReceipt::Started { turn_id, .. } => turn_id,
-        other => panic!("first submit must Start the turn, got {other:?}"),
+        TurnReceipt::Started { turn_id, .. } | TurnReceipt::Queued { turn_id, .. } => turn_id,
+        // A submit racing the transport's SessionReady may legitimately
+        // land either Started or Queued-then-promoted (runtime.md §7.1 row 582)
+        // -- both are correct; this is a REAL process (FakeLineProtocol
+        // spawns wasl-fake-agent), so the race is common, not an edge case.
+        other => panic!("expected Started or Queued, got {other:?}"),
     };
 
     // The actor observes ToolStarted mid-turn — the EXISTING enum carries the
@@ -493,8 +501,12 @@ async fn answer_back_never_exposes_a_second_writer_to_callers() {
         )
         .await;
     let turn_id = match started {
-        TurnReceipt::Started { turn_id, .. } => turn_id,
-        other => panic!("expected Started, got {other:?}"),
+        TurnReceipt::Started { turn_id, .. } | TurnReceipt::Queued { turn_id, .. } => turn_id,
+        // A submit racing the transport's SessionReady may legitimately
+        // land either Started or Queued-then-promoted (runtime.md §7.1 row 582)
+        // -- both are correct; this is a REAL process (FakeLineProtocol
+        // spawns wasl-fake-agent), so the race is common, not an edge case.
+        other => panic!("expected Started or Queued, got {other:?}"),
     };
     let _ = drain_events(&target, 8).await;
 
@@ -575,8 +587,12 @@ async fn recommended_target_answer_tool_call_completes_the_blocked_turn() {
         )
         .await;
     let turn_id = match started {
-        TurnReceipt::Started { turn_id, .. } => turn_id,
-        other => panic!("expected Started, got {other:?}"),
+        TurnReceipt::Started { turn_id, .. } | TurnReceipt::Queued { turn_id, .. } => turn_id,
+        // A submit racing the transport's SessionReady may legitimately
+        // land either Started or Queued-then-promoted (runtime.md §7.1 row 582)
+        // -- both are correct; this is a REAL process (FakeLineProtocol
+        // spawns wasl-fake-agent), so the race is common, not an edge case.
+        other => panic!("expected Started or Queued, got {other:?}"),
     };
 
     // The actor observes the mid-turn ToolStarted (existing enum), and the turn is

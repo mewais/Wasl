@@ -31,6 +31,7 @@ struct SupervisionTimeouts {
     term_after: Duration,
     kill_after: Duration,
     hang_watchdog: Duration,
+    stdin_write: Duration,
 }
 
 impl Default for SupervisionTimeouts {
@@ -40,6 +41,7 @@ impl Default for SupervisionTimeouts {
             term_after: Duration::from_secs(2),
             kill_after: Duration::from_secs(2),
             hang_watchdog: Duration::from_secs(60),
+            stdin_write: Duration::from_secs(15),
         }
     }
 }
@@ -216,6 +218,17 @@ struct ClaudeStreamTransport {
 }
 
 impl ClaudeStreamTransport {
+    async fn fail_write_with_unknown_outcome(&mut self, detail: String) -> RuntimeError {
+        // A timed-out `write_all` can leave a partial frame in the pipe. Treat
+        // this transport as fatally desynced: never write again and trigger kill.
+        self.stdin = None;
+        self.turn_in_flight = false;
+        if let Some(tx) = &self.kill_tx {
+            let _ = tx.send(()).await;
+        }
+        RuntimeError::TransportOutcomeUnknown { detail }
+    }
+
     async fn write_stdin_line(&mut self, text: &str) -> Result<(), RuntimeError> {
         let Some(stdin) = self.stdin.as_mut() else {
             return Ok(());
@@ -223,9 +236,18 @@ impl ClaudeStreamTransport {
 
         let mut line = text.as_bytes().to_vec();
         line.push(b'\n');
-        match stdin.write_all(&line).await {
-            Ok(()) => {}
-            Err(e)
+        match tokio::time::timeout(self.timeouts.stdin_write, stdin.write_all(&line)).await {
+            Err(_) => {
+                let err = self
+                    .fail_write_with_unknown_outcome(format!(
+                        "claude stdin write timed out after {:?}",
+                        self.timeouts.stdin_write
+                    ))
+                    .await;
+                return Err(err);
+            }
+            Ok(Ok(())) => {}
+            Ok(Err(e))
                 if matches!(
                     e.kind(),
                     std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::WriteZero
@@ -233,15 +255,24 @@ impl ClaudeStreamTransport {
             {
                 return Ok(());
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 return Err(RuntimeError::Transport {
                     detail: format!("claude stdin write: {e}"),
-                })
+                });
             }
         }
-        match stdin.flush().await {
-            Ok(()) => Ok(()),
-            Err(e)
+        match tokio::time::timeout(self.timeouts.stdin_write, stdin.flush()).await {
+            Err(_) => {
+                let err = self
+                    .fail_write_with_unknown_outcome(format!(
+                        "claude stdin flush timed out after {:?}",
+                        self.timeouts.stdin_write
+                    ))
+                    .await;
+                Err(err)
+            }
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e))
                 if matches!(
                     e.kind(),
                     std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::WriteZero
@@ -249,7 +280,7 @@ impl ClaudeStreamTransport {
             {
                 Ok(())
             }
-            Err(e) => Err(RuntimeError::Transport {
+            Ok(Err(e)) => Err(RuntimeError::Transport {
                 detail: format!("claude stdin flush: {e}"),
             }),
         }
@@ -369,6 +400,8 @@ impl InteractiveTransport for ClaudeStreamTransport {
     }
 
     async fn next_event(&mut self) -> Option<ProtocolEvent> {
+        // Cancellation-safety audit: once `pull_one()` resolves with an event,
+        // this method does not await again before returning it.
         loop {
             match self.pull_one().await {
                 Some(ev) if self.is_stale_after_terminal(&ev) => continue,

@@ -157,7 +157,7 @@ async fn second_submit_queues_behind_a_held_turn_through_the_generic_actor() {
     use wasl_proto::{AgentId, RequestId};
     use wasl_runtime::{
         BusyPolicy, Causation, IdempotencyKey, ManagedConfig, MonotonicClock, RuntimeProvider,
-        TargetKey, TurnReceipt, TurnRequest, TurnSource, WaslManagedRuntimeProvider,
+        TargetKey, TargetStatus, TurnReceipt, TurnRequest, TurnSource, WaslManagedRuntimeProvider,
     };
 
     // A no-op sink is sufficient here — this test asserts QUEUEING, not audit.
@@ -205,18 +205,39 @@ async fn second_submit_queues_behind_a_held_turn_through_the_generic_actor() {
         },
     };
 
-    // Turn 1: a `hold` — becomes the active (busy) turn and blocks.
+    // Turn 1: a `hold` — becomes the active (busy) turn and blocks. A REAL
+    // process is spawned here (`FakeLineProtocol`), so this submit races the
+    // driver's own `SessionReady` (runtime.md §7.1 row 582): it may come back
+    // `Started` (already ready) OR `Queued` (still `Starting`, promoted the
+    // moment ready arrives) — both are spec-correct, and unlike the scripted
+    // test double, a real spawned process's startup latency makes this a
+    // COMMON outcome, not a rare edge case.
     let r1 = target
         .submit_turn(make_req(&req_hold(), "idem-1"), BusyPolicy::Reject)
         .await;
     assert!(
-        matches!(r1, TurnReceipt::Started { .. }),
-        "first submit starts (active turn), got {r1:?}"
+        matches!(r1, TurnReceipt::Started { .. } | TurnReceipt::Queued { .. }),
+        "first submit must Start or Queue, got {r1:?}"
     );
 
+    // Regardless of which receipt turn 1 got, wait for the target to
+    // actually reach `Busy` (i.e. turn 1 has been promoted and is genuinely
+    // active/held) before submitting turn 2 — this is what the test
+    // actually needs to be deterministic ("a second submit while a turn is
+    // genuinely active must queue"), not the receipt of the FIRST submit.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(target.status().await, TargetStatus::Busy { .. }) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("turn 1 must reach Busy (the fake is genuinely held) before turn 2 is submitted");
+
     // Turn 2 WHILE held: with `Queue`, it must QUEUE behind the held turn rather
-    // than start (the busy state is deterministic — the fake is genuinely blocked
-    // on `hold`, no timing race).
+    // than start (the busy state is now confirmed deterministic above).
     let r2 = target
         .submit_turn(
             make_req(&req_say("second"), "idem-2"),

@@ -285,6 +285,21 @@ impl TransportShared {
         self.calls.lock().unwrap().clone()
     }
 
+    /// Arm the NEXT `send_turn` call to fail, SYNCHRONOUSLY, independent of
+    /// the scripted `next_event()` step queue. Use this (instead of
+    /// `ProtocolScript::fail_next_send`, which only arms once a
+    /// `ScriptStep::FailNextSend` is actually POPPED via `next_event()`
+    /// pumping) when the test needs the failure guaranteed armed before ANY
+    /// `send_turn` call, regardless of exactly when/whether the actor has
+    /// pumped a particular number of transport events yet (e.g. §7.1 row 582:
+    /// a submit racing `SessionReady` may be queued then promoted-and-injected
+    /// synchronously as part of the SAME `SessionReady` handling, with no
+    /// intervening `next_event()` call to pop a scripted `FailNextSend` step
+    /// first).
+    pub fn arm_fail_next_send(&self, err: RuntimeError) {
+        *self.fail_next_send.lock().unwrap() = Some(err);
+    }
+
     /// How many `send_turn` calls occurred (the injection count — the key
     /// idempotency / no-double-inject assertion, §4.4).
     pub fn send_turn_count(&self) -> usize {
@@ -330,12 +345,45 @@ impl InteractiveTransport for ScriptedTransport {
 
     async fn next_event(&mut self) -> Option<ProtocolEvent> {
         loop {
+            // PEEK (don't pop) a `Gated` step: `InteractiveTransport::next_event`
+            // is documented as a cancellation-safety MUST — "once an internal
+            // queue read resolves to an event, no further `.await` may occur
+            // before that event is returned from `next_event()`" (lib.rs) —
+            // because actor pumping races this call against mailbox commands
+            // via `tokio::select!` and may drop it mid-await. Popping the step
+            // BEFORE awaiting the gate would violate that: a cancelled await
+            // (the mailbox branch won the race) silently discards the
+            // already-popped step forever, and every subsequent call finds the
+            // queue empty and returns `None` forever — a permanent, silent
+            // event loss that (combined with the actor's correct "no nested
+            // wait on None" busy-loop-avoidance) can starve the tokio runtime.
+            let pending_gate = match self.steps.lock().unwrap().front() {
+                Some(ScriptStep::Gated { gate, .. }) => Some(gate.clone()),
+                _ => None,
+            };
+            if let Some(gate) = pending_gate {
+                gate.notified().await;
+                // The gate has fired: pop-and-return has no further `.await`
+                // between the pop and the return, so THIS part cannot be
+                // cancelled mid-flight.
+                match self.steps.lock().unwrap().pop_front() {
+                    Some(ScriptStep::Gated { event, .. }) => return Some(event),
+                    other => {
+                        // Single-writer invariant: nothing else mutates `steps`
+                        // concurrently, so this is unreachable in practice.
+                        // Restore rather than silently drop if it ever occurs.
+                        if let Some(step) = other {
+                            self.steps.lock().unwrap().push_front(step);
+                        }
+                        continue;
+                    }
+                }
+            }
             let step = self.steps.lock().unwrap().pop_front();
             match step {
                 Some(ScriptStep::Emit(ev)) => return Some(ev),
-                Some(ScriptStep::Gated { gate, event }) => {
-                    gate.notified().await;
-                    return Some(event);
+                Some(ScriptStep::Gated { .. }) => {
+                    unreachable!("Gated steps are handled by the peek above")
                 }
                 Some(ScriptStep::FailNextSend(err)) => {
                     *self.shared.fail_next_send.lock().unwrap() = Some(err);
@@ -727,6 +775,27 @@ pub async fn drain_items(mut stream: wasl_runtime::TurnEventStream, n: usize) ->
     let mut out = Vec::new();
     for _ in 0..n {
         match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+            Ok(Some(item)) => out.push(item),
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// Like [`drain_items`], but with a caller-chosen per-item timeout instead of
+/// the 5s hang-guard. Use a SHORT `per_item_timeout` (tens/hundreds of ms) to
+/// opportunistically grab a legitimately-optional/racy extra event (e.g. a
+/// `StatusChanged` that may or may not have landed yet) without stalling the
+/// test for the full hang-guard when that event was never going to come.
+pub async fn drain_items_timeout(
+    mut stream: wasl_runtime::TurnEventStream,
+    n: usize,
+    per_item_timeout: Duration,
+) -> Vec<StreamItem> {
+    let mut out = Vec::new();
+    for _ in 0..n {
+        match tokio::time::timeout(per_item_timeout, stream.next()).await {
             Ok(Some(item)) => out.push(item),
             Ok(None) => break,
             Err(_) => break,

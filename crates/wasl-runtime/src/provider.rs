@@ -8,7 +8,7 @@
 //! sends an admission command through the actor.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::{mpsc, oneshot};
@@ -150,7 +150,9 @@ impl DeliveryTarget for ManagedTarget {
         // signal. The live receiver is already subscribed, so any resulting event
         // reaches this stream. Non-blocking: a full mailbox / stopped actor is
         // harmless (a busy actor will re-poll on its backstop anyway).
-        let _ = self.mailbox.try_send(Command::Poke);
+        if self.shared.poke_needed.load(Ordering::Acquire) {
+            let _ = self.mailbox.try_send(Command::Poke);
+        }
         handoff.into_stream(window)
     }
 
@@ -218,6 +220,13 @@ impl ToolCallAnswerer for ManagedTarget {
 
 impl ManagedTarget {
     async fn admit_via_mailbox(&self, req: TurnRequest, policy: BusyPolicy) -> TurnReceipt {
+        // Status is ADVISORY ONLY (§4.3) and must never gate admission — the
+        // actor's own `active`/`terminal`/`draining` state (checked inside
+        // `Actor::admit`, serialized through the single mailbox) is the sole
+        // authority for Busy/Unavailable rejection. A status-snapshot
+        // shortcut here would race the authoritative decision and could
+        // double-admit or wrongly reject. Always round-trip through the
+        // mailbox.
         let turn_id = self.mint_turn_id();
         let (tx, rx) = oneshot::channel();
         // The two error arms below (mailbox `send` err / reply `recv` err) are the
@@ -344,6 +353,7 @@ impl<P: InteractiveProtocol + 'static> WaslManagedRuntimeProvider<P> {
         let shared = Arc::new(Shared {
             journal: Mutex::new(Journal::new(self.config.journal_capacity)),
             status: Mutex::new(TargetStatus::Starting),
+            poke_needed: AtomicBool::new(false),
         });
         let (mtx, mrx) = mpsc::channel(self.config.mailbox_capacity.max(1));
 

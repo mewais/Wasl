@@ -23,6 +23,7 @@ struct SupervisionTimeouts {
     kill_after: Duration,
     hang_watchdog: Duration,
     handshake_timeout: Duration,
+    stdin_write: Duration,
 }
 
 impl Default for SupervisionTimeouts {
@@ -33,6 +34,7 @@ impl Default for SupervisionTimeouts {
             kill_after: Duration::from_secs(2),
             hang_watchdog: Duration::from_secs(60),
             handshake_timeout: Duration::from_secs(30),
+            stdin_write: Duration::from_secs(15),
         }
     }
 }
@@ -188,7 +190,7 @@ impl OpenCodeAcpProtocol {
                 }
             }
         });
-        write_jsonrpc_line(stdin, &initialize).await?;
+        write_jsonrpc_line(stdin, &initialize, self.timeouts.stdin_write).await?;
 
         let init_line =
             read_handshake_line(lines, self.timeouts.handshake_timeout, "initialize").await?;
@@ -222,7 +224,7 @@ impl OpenCodeAcpProtocol {
             "method": session_method,
             "params": session_params
         });
-        write_jsonrpc_line(stdin, &session_req).await?;
+        write_jsonrpc_line(stdin, &session_req, self.timeouts.stdin_write).await?;
 
         let session_line =
             read_handshake_line(lines, self.timeouts.handshake_timeout, session_method).await?;
@@ -287,6 +289,17 @@ struct OpenCodeAcpTransport {
 }
 
 impl OpenCodeAcpTransport {
+    async fn fail_write_with_unknown_outcome(&mut self, detail: String) -> RuntimeError {
+        // A timed-out `write_all` can leave a partial JSON-RPC frame. Treat the
+        // transport as fatally desynced and trigger termination.
+        self.stdin = None;
+        self.turn_in_flight = false;
+        if let Some(tx) = &self.kill_tx {
+            let _ = tx.send(()).await;
+        }
+        RuntimeError::TransportOutcomeUnknown { detail }
+    }
+
     async fn write_stdin_line(&mut self, text: &str) -> Result<(), RuntimeError> {
         let Some(stdin) = self.stdin.as_mut() else {
             return Ok(());
@@ -294,9 +307,18 @@ impl OpenCodeAcpTransport {
 
         let mut line = text.as_bytes().to_vec();
         line.push(b'\n');
-        match stdin.write_all(&line).await {
-            Ok(()) => {}
-            Err(e)
+        match tokio::time::timeout(self.timeouts.stdin_write, stdin.write_all(&line)).await {
+            Err(_) => {
+                let err = self
+                    .fail_write_with_unknown_outcome(format!(
+                        "opencode acp stdin write timed out after {:?}",
+                        self.timeouts.stdin_write
+                    ))
+                    .await;
+                return Err(err);
+            }
+            Ok(Ok(())) => {}
+            Ok(Err(e))
                 if matches!(
                     e.kind(),
                     std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::WriteZero
@@ -304,15 +326,24 @@ impl OpenCodeAcpTransport {
             {
                 return Ok(());
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 return Err(RuntimeError::Transport {
                     detail: format!("opencode acp stdin write: {e}"),
                 });
             }
         }
-        match stdin.flush().await {
-            Ok(()) => Ok(()),
-            Err(e)
+        match tokio::time::timeout(self.timeouts.stdin_write, stdin.flush()).await {
+            Err(_) => {
+                let err = self
+                    .fail_write_with_unknown_outcome(format!(
+                        "opencode acp stdin flush timed out after {:?}",
+                        self.timeouts.stdin_write
+                    ))
+                    .await;
+                Err(err)
+            }
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e))
                 if matches!(
                     e.kind(),
                     std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::WriteZero
@@ -320,7 +351,7 @@ impl OpenCodeAcpTransport {
             {
                 Ok(())
             }
-            Err(e) => Err(RuntimeError::Transport {
+            Ok(Err(e)) => Err(RuntimeError::Transport {
                 detail: format!("opencode acp stdin flush: {e}"),
             }),
         }
@@ -446,6 +477,8 @@ impl InteractiveTransport for OpenCodeAcpTransport {
     }
 
     async fn next_event(&mut self) -> Option<ProtocolEvent> {
+        // Cancellation-safety audit: once `pull_one()` resolves with an event,
+        // this method does not await again before returning it.
         loop {
             match self.pull_one().await {
                 Some(ev) if self.is_stale_after_terminal(&ev) => continue,
@@ -588,21 +621,38 @@ async fn wait_for_exit(child: &mut tokio::process::Child, bound: Duration) -> Op
     }
 }
 
-async fn write_jsonrpc_line(stdin: &mut ChildStdin, value: &Value) -> Result<(), RuntimeError> {
+async fn write_jsonrpc_line(
+    stdin: &mut ChildStdin,
+    value: &Value,
+    stdin_write_timeout: Duration,
+) -> Result<(), RuntimeError> {
     let payload = serde_json::to_string(value).map_err(|e| RuntimeError::SpawnFailed {
         detail: format!("opencode acp handshake serialize: {e}"),
     })?;
     let mut line = payload.into_bytes();
     line.push(b'\n');
-    stdin
-        .write_all(&line)
+    tokio::time::timeout(stdin_write_timeout, stdin.write_all(&line))
         .await
+        .map_err(|_| RuntimeError::SpawnFailed {
+            detail: format!(
+                "opencode acp handshake write: timed out after {:?}",
+                stdin_write_timeout
+            ),
+        })?
         .map_err(|e| RuntimeError::SpawnFailed {
             detail: format!("opencode acp handshake write: {e}"),
         })?;
-    stdin.flush().await.map_err(|e| RuntimeError::SpawnFailed {
-        detail: format!("opencode acp handshake flush: {e}"),
-    })
+    tokio::time::timeout(stdin_write_timeout, stdin.flush())
+        .await
+        .map_err(|_| RuntimeError::SpawnFailed {
+            detail: format!(
+                "opencode acp handshake flush: timed out after {:?}",
+                stdin_write_timeout
+            ),
+        })?
+        .map_err(|e| RuntimeError::SpawnFailed {
+            detail: format!("opencode acp handshake flush: {e}"),
+        })
 }
 
 async fn read_handshake_line(
