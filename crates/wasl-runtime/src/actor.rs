@@ -109,7 +109,10 @@ pub(crate) struct Actor {
     self_identity: AgentId,
     capabilities: crate::RuntimeCapabilities,
     epoch: std::time::Instant,
-    transport: Box<dyn crate::InteractiveTransport>,
+    /// Live transport owned by the actor. This is wrapped in `Option` so `stop()`
+    /// can release it immediately without requiring the actor task itself to
+    /// terminate first.
+    transport: Option<Box<dyn crate::InteractiveTransport>>,
     config: ManagedConfig,
     clock: Arc<dyn RuntimeClock>,
     sink: SinkHandle,
@@ -164,6 +167,16 @@ enum PumpNext {
 const WATCHDOG_GUARD_TIMEOUT: Duration = Duration::from_secs(60);
 
 impl Actor {
+    fn transport_mut(&mut self) -> &mut dyn crate::InteractiveTransport {
+        self.transport
+            .as_deref_mut()
+            .expect("transport must exist until stop/process-exit transitions")
+    }
+
+    fn release_transport(&mut self) {
+        self.transport = None;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         key: String,
@@ -183,7 +196,7 @@ impl Actor {
             self_identity,
             capabilities,
             epoch,
-            transport,
+            transport: Some(transport),
             config,
             clock,
             sink,
@@ -233,7 +246,11 @@ impl Actor {
                     // observed (`self.ready` flips, or `self.terminal` does).
                     tokio::select! {
                         biased;
-                        ev = self.transport.next_event() => {
+                        ev = self
+                            .transport
+                            .as_mut()
+                            .expect("transport must exist while pumping")
+                            .next_event() => {
                             match ev {
                                 Some(ev) => {
                                     self.idle_drained = false;
@@ -283,7 +300,11 @@ impl Actor {
                     // paths are serviced even while a slow event wait is in
                     // flight.
                     tokio::select! {
-                        ev = self.transport.next_event() => {
+                        ev = self
+                            .transport
+                            .as_mut()
+                            .expect("transport must exist while pumping")
+                            .next_event() => {
                             match ev {
                                 Some(ev) => {
                                     // Real activity: keep pumping.
@@ -764,7 +785,7 @@ impl Actor {
         }
 
         // Actually inject.
-        match self.transport.send_turn(&prompt).await {
+        match self.transport_mut().send_turn(&prompt).await {
             Ok(()) => {
                 self.last_transport_progress = self.clock.now();
                 if let Some(a) = self.active.as_mut() {
@@ -979,6 +1000,7 @@ impl Actor {
             self.emit(TurnEvent::TurnExpired { turn_id: t.id });
         }
         self.terminal = true;
+        self.release_transport();
         self.transport_terminating = false;
         self.awaiting_gate = false;
         self.running_tool = None;
@@ -1083,7 +1105,7 @@ impl Actor {
                     since: self.now_ts(),
                 });
                 self.emit_status();
-                let _ = self.transport.interrupt().await;
+                let _ = self.transport_mut().interrupt().await;
                 // The interrupt resolves the active turn.
                 let _ = self.active.take();
                 self.emit(TurnEvent::TurnCancelled {
@@ -1159,6 +1181,7 @@ impl Actor {
 
     fn stop(&mut self) {
         self.terminal = true;
+        self.release_transport();
         self.transport_terminating = false;
         self.draining = false;
         self.awaiting_gate = false;
@@ -1208,7 +1231,7 @@ impl Actor {
             GateDecision::Approve => "approve".to_string(),
             GateDecision::Deny { reason } => format!("deny: {reason}"),
         });
-        let _ = self.transport.send_turn(&answer).await;
+        let _ = self.transport_mut().send_turn(&answer).await;
         self.awaiting_gate = false;
         self.emit(TurnEvent::NativeGateResolved { turn_id, decision });
         // Back to Busy (the turn proceeds).
@@ -1253,7 +1276,7 @@ impl Actor {
         // Answer the tool call over the transport (single writer): the actor is
         // the sole caller, reached only through its mailbox — never a raw second
         // handle. The unidirectional drivers' default no-op simply returns Ok.
-        self.transport.answer_tool_call(&name, &value).await?;
+        self.transport_mut().answer_tool_call(&name, &value).await?;
         Ok(())
     }
 

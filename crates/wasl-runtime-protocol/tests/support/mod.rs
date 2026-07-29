@@ -193,6 +193,24 @@ pub fn req_stop_reading_stdin() -> String {
     r#"{"cmd":"stop_reading_stdin"}"#.to_string()
 }
 
+/// Hardening-2 §4.1 — the child CLOSES its stdout FD (driver observes EOF) but
+/// KEEPS RUNNING for `stay_alive_ms` before exiting on its own. Proves a driver
+/// must not do an UNBOUNDED `child.wait()` on stdout EOF (waiting `stay_alive_ms`
+/// for the natural exit); it must force-terminate via the escalation ladder
+/// within its own (much shorter) bound.
+pub fn req_close_stdout_stay_alive(stay_alive_ms: u64) -> String {
+    format!(r#"{{"cmd":"close_stdout_stay_alive","stay_alive_ms":{stay_alive_ms}}}"#)
+}
+
+/// Hardening-2 §4.9 — the fake spawns a REAL grandchild (`sleep grandchild_secs`)
+/// in its own process group, reports the grandchild PID as an `AssistantDelta`,
+/// then never exits and ignores gentle signals (forcing escalation to SIGKILL).
+/// Proves the escalation must signal the whole PROCESS GROUP (killing the
+/// grandchild too), not only the leader PID (which would orphan the grandchild).
+pub fn req_spawn_child_process(grandchild_secs: u64) -> String {
+    format!(r#"{{"cmd":"spawn_child_process","grandchild_secs":{grandchild_secs}}}"#)
+}
+
 // --- §1.3 hostile-wire emission scripts (the fake emits adversarial bytes) ---
 
 /// Emit a single valid event OBJECT split across multiple stdin reads (the fake

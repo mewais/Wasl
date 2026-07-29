@@ -19,6 +19,13 @@ use tokio::process::{ChildStdin, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+#[cfg(unix)]
+use nix::sys::signal::{kill, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 use wasl_runtime::{
     ComposedPrompt, InteractiveProtocol, InteractiveTransport, NativeGateDetail, NativeSessionId,
     ProtocolEvent, RuntimeCapabilities, RuntimeError, SpawnOptions,
@@ -133,17 +140,22 @@ impl FakeLineProtocol {
     }
 
     async fn spawn_child(&self) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        let mut child = Command::new(&self.bin)
-            .stdin(Stdio::piped())
+        let mut cmd = Command::new(&self.bin);
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Belt-and-braces: even if the supervisor task is torn down abnormally
             // the kernel SIGKILLs the child when the handle drops (no orphan).
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| RuntimeError::SpawnFailed {
-                detail: format!("spawn {}: {e}", self.bin.display()),
-            })?;
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        {
+            // Put the child in its own process group so escalation can target the
+            // whole session (leader + descendants) via a negative pid.
+            cmd.as_std_mut().process_group(0);
+        }
+        let mut child = cmd.spawn().map_err(|e| RuntimeError::SpawnFailed {
+            detail: format!("spawn {}: {e}", self.bin.display()),
+        })?;
 
         let pid = child.id();
         let stdin = child
@@ -452,7 +464,9 @@ impl InteractiveTransport for FakeLineTransport {
         // ignored-interrupt script) simply keeps running — we NEVER fabricate a
         // cancellation ack, and we NEVER hang (the send is fire-and-forget).
         if let Some(pid) = self.pid {
-            best_effort_signal(pid, "-INT");
+            if let Ok(raw_pid) = i32::try_from(pid) {
+                best_effort_signal(raw_pid, Signal::SIGINT);
+            }
         }
         Ok(())
     }
@@ -490,16 +504,11 @@ impl Drop for FakeLineTransport {
     }
 }
 
-/// Send a best-effort POSIX signal to `pid` via the `kill` command (no `unsafe`,
-/// no `libc`). Fire-and-forget: failures are ignored (the child may already be
-/// gone, which is exactly the benign case).
-fn best_effort_signal(pid: u32, sig: &str) {
-    let _ = std::process::Command::new("kill")
-        .arg(sig)
-        .arg(pid.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+/// Best-effort signal delivery via direct `kill(2)`. `target` may be a positive
+/// pid (single process) or a negative pid (process group).
+#[cfg(unix)]
+fn best_effort_signal(target: i32, sig: Signal) {
+    let _ = kill(Pid::from_raw(target), sig);
 }
 
 /// The per-child supervisor task: reads + maps stdout events, drains stderr
@@ -515,6 +524,7 @@ async fn supervise(
 ) {
     let mut lines = BufReader::new(stdout).lines();
     let pid = child.id();
+    let signal_target = pid.and_then(|p| i32::try_from(p).ok()).map(|p| -p);
 
     loop {
         tokio::select! {
@@ -532,13 +542,26 @@ async fn supervise(
                         // Non-event / malformed lines are ignored: the framing
                         // continues (§1.3 malformed-between).
                     }
-                    // EOF (or a read error): the child's stdout is done. Reap it
-                    // and surface the terminal `ProcessExited{code}` (drain-then-
-                    // exit ordering is preserved because buffered lines above were
-                    // already pushed).
+                    // EOF (or a read error): stdout can close while the child is
+                    // still alive. Do NOT block in an unbounded wait: keep
+                    // servicing kill requests and perform only bounded exit polls.
                     Ok(None) | Err(_) => {
-                        let code = child.wait().await.ok().and_then(|s| s.code());
-                        let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
+                        loop {
+                            tokio::select! {
+                                msg = kill_rx.recv() => {
+                                    let _ = msg;
+                                    let code = escalate(&mut child, signal_target, timeouts).await;
+                                    let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
+                                    break;
+                                }
+                                code = wait_for_exit(&mut child, POLL_IDLE) => {
+                                    if let Some(code) = code {
+                                        let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                         break;
                     }
                 }
@@ -546,7 +569,7 @@ async fn supervise(
             // A kill request (watchdog fired, or the transport is shutting down).
             msg = kill_rx.recv() => {
                 let _ = msg; // `Some(())` explicit request or `None` sender dropped
-                let code = escalate(&mut child, pid, timeouts).await;
+                let code = escalate(&mut child, signal_target, timeouts).await;
                 let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
                 break;
             }
@@ -555,7 +578,7 @@ async fn supervise(
 
     // Belt-and-braces reap (idempotent): ensure the child is not left a zombie
     // even if we broke out via the receiver-gone path.
-    let _ = child.wait().await;
+    let _ = wait_for_exit(&mut child, timeouts.kill_after).await;
     // Stop draining stderr — the pipe is closed now.
     stderr_task.abort();
 }
@@ -568,30 +591,39 @@ async fn supervise(
 /// death).
 async fn escalate(
     child: &mut tokio::process::Child,
-    pid: Option<u32>,
+    signal_target: Option<i32>,
     t: SupervisionTimeouts,
 ) -> Option<i32> {
     // Stage 1: gentle SIGINT.
-    if let Some(pid) = pid {
-        best_effort_signal(pid, "-INT");
+    if let Some(target) = signal_target {
+        best_effort_signal(target, Signal::SIGINT);
     }
     if let Some(code) = wait_for_exit(child, t.interrupt_ack).await {
         return code;
     }
     // Stage 2: SIGTERM.
-    if let Some(pid) = pid {
-        best_effort_signal(pid, "-TERM");
+    if let Some(target) = signal_target {
+        best_effort_signal(target, Signal::SIGTERM);
     }
     if let Some(code) = wait_for_exit(child, t.term_after).await {
         return code;
     }
-    // Stage 3: SIGKILL (the hard stop the fake cannot ignore).
+    // Stage 3: SIGKILL (the hard stop the fake cannot ignore). Signal the
+    // whole process GROUP (not just the leader, §4.9 defense-in-depth) so a
+    // grandchild that also ignored SIGINT/SIGTERM cannot survive as an
+    // orphan; `start_kill()` is kept as a direct-child backstop (e.g. if
+    // `signal_target` is unavailable) and to let tokio's own bookkeeping know
+    // a kill was issued.
+    if let Some(target) = signal_target {
+        best_effort_signal(target, Signal::SIGKILL);
+    }
     let _ = child.start_kill();
     if let Some(code) = wait_for_exit(child, t.kill_after).await {
         return code;
     }
-    // Last resort: block on the reap (a killed process WILL exit).
-    child.wait().await.ok().and_then(|s| s.code())
+    // Last resort: still bounded. A stuck reap is surfaced as `None` instead of
+    // parking supervision forever.
+    wait_for_exit(child, t.kill_after).await.flatten()
 }
 
 /// Wait up to `bound` for the child to exit; `Some(code)` if it exited in time

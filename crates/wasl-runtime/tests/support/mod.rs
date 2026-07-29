@@ -277,6 +277,14 @@ enum ScriptStep {
 pub struct TransportShared {
     pub calls: Mutex<Vec<TransportCall>>,
     fail_next_send: Mutex<Option<RuntimeError>>,
+    /// Set true when the [`ScriptedTransport`] holding this shared state is
+    /// DROPPED. This is the observable double for "the underlying process /
+    /// live handle was actually stopped" (`runtime.md` §7.3 shutdown: kill
+    /// transport; hardening-plan §3.2: `shutdown()` today never drops the
+    /// transport at all). A test inspects it via [`TransportShared::was_dropped`]
+    /// to prove `shutdown()` releases the transport rather than parking forever
+    /// still holding the live child.
+    dropped: std::sync::atomic::AtomicBool,
 }
 
 impl TransportShared {
@@ -309,6 +317,13 @@ impl TransportShared {
             .iter()
             .filter(|c| matches!(c, TransportCall::SendTurn { .. }))
             .count()
+    }
+
+    /// Whether the [`ScriptedTransport`] backed by this shared state has been
+    /// DROPPED yet (the "the live handle/process was actually released" probe;
+    /// see the `dropped` field). `false` until the transport's `Drop` runs.
+    pub fn was_dropped(&self) -> bool {
+        self.dropped.load(Ordering::SeqCst)
     }
 }
 
@@ -403,6 +418,19 @@ impl InteractiveTransport for ScriptedTransport {
             .push(TransportCall::Interrupt { order });
         self.interrupt_ack.notify_waiters();
         Ok(())
+    }
+}
+
+/// Record the transport's drop in the shared handle. A REAL driver's `Drop`
+/// kills+reaps the child (`runtime.md` §6 / hardening-plan §3.2 "both real
+/// drivers' `Drop` impls already handle correctly — killing the child and
+/// reaping it"), so dropping this scripted double is the in-memory analog of
+/// "the underlying process was actually stopped". A test asserts this flips
+/// (via [`TransportShared::was_dropped`]) after `shutdown()` — proving the actor
+/// releases the transport instead of parking forever holding it (§3.2).
+impl Drop for ScriptedTransport {
+    fn drop(&mut self) {
+        self.shared.dropped.store(true, Ordering::SeqCst);
     }
 }
 

@@ -6,7 +6,13 @@ use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+#[cfg(unix)]
+use nix::sys::signal::{kill, Signal};
+#[cfg(unix)]
+use nix::unistd::Pid;
 use serde_json::Value;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
@@ -98,18 +104,21 @@ impl OpenCodeAcpProtocol {
         session_method: &str,
         requested_session_id: Option<&str>,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        let mut child = Command::new(&self.bin)
-            .arg("acp")
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("acp")
             .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
             .env("OPENCODE_DISABLE_AUTOCOMPACT", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| RuntimeError::SpawnFailed {
-                detail: format!("spawn {} acp: {e}", self.bin.display()),
-            })?;
+            .kill_on_drop(true);
+        #[cfg(unix)]
+        {
+            cmd.as_std_mut().process_group(0);
+        }
+        let mut child = cmd.spawn().map_err(|e| RuntimeError::SpawnFailed {
+            detail: format!("spawn {} acp: {e}", self.bin.display()),
+        })?;
 
         let pid = child.id();
         let mut stdin = child
@@ -527,13 +536,9 @@ impl Drop for OpenCodeAcpTransport {
     }
 }
 
-fn best_effort_signal(pid: u32, sig: &str) {
-    let _ = std::process::Command::new("kill")
-        .arg(sig)
-        .arg(pid.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
+#[cfg(unix)]
+fn best_effort_signal(target: i32, sig: Signal) {
+    let _ = kill(Pid::from_raw(target), sig);
 }
 
 async fn supervise(
@@ -546,6 +551,7 @@ async fn supervise(
     timeouts: SupervisionTimeouts,
 ) {
     let pid = child.id();
+    let signal_target = pid.and_then(|p| i32::try_from(p).ok()).map(|p| -p);
 
     if ev_tx
         .send(ProtocolEvent::SessionReady {
@@ -570,7 +576,7 @@ async fn supervise(
                         }
                     }
                     Ok(None) | Err(_) => {
-                        let code = child.wait().await.ok().and_then(|s| s.code());
+                        let code = escalate(&mut child, signal_target, timeouts).await;
                         let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
                         break;
                     }
@@ -578,39 +584,47 @@ async fn supervise(
             }
             msg = kill_rx.recv() => {
                 let _ = msg;
-                let code = escalate(&mut child, pid, timeouts).await;
+                let code = escalate(&mut child, signal_target, timeouts).await;
                 let _ = ev_tx.send(ProtocolEvent::ProcessExited { code });
                 break;
             }
         }
     }
 
-    let _ = child.wait().await;
+    let _ = wait_for_exit(&mut child, timeouts.kill_after).await;
     stderr_task.abort();
 }
 
 async fn escalate(
     child: &mut tokio::process::Child,
-    pid: Option<u32>,
+    signal_target: Option<i32>,
     t: SupervisionTimeouts,
 ) -> Option<i32> {
-    if let Some(pid) = pid {
-        best_effort_signal(pid, "-INT");
+    if let Some(target) = signal_target {
+        best_effort_signal(target, Signal::SIGINT);
     }
     if let Some(code) = wait_for_exit(child, t.interrupt_ack).await {
         return code;
     }
-    if let Some(pid) = pid {
-        best_effort_signal(pid, "-TERM");
+    if let Some(target) = signal_target {
+        best_effort_signal(target, Signal::SIGTERM);
     }
     if let Some(code) = wait_for_exit(child, t.term_after).await {
         return code;
+    }
+    // Stage 3: SIGKILL (the hard stop). Signal the whole process GROUP (not
+    // just the leader, §4.9 defense-in-depth) so a grandchild that also
+    // ignored SIGINT/SIGTERM cannot survive as an orphan; `start_kill()` is
+    // kept as a direct-child backstop and to let tokio's own bookkeeping know
+    // a kill was issued.
+    if let Some(target) = signal_target {
+        best_effort_signal(target, Signal::SIGKILL);
     }
     let _ = child.start_kill();
     if let Some(code) = wait_for_exit(child, t.kill_after).await {
         return code;
     }
-    child.wait().await.ok().and_then(|s| s.code())
+    wait_for_exit(child, t.kill_after).await.flatten()
 }
 
 async fn wait_for_exit(child: &mut tokio::process::Child, bound: Duration) -> Option<Option<i32>> {

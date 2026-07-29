@@ -22,10 +22,14 @@
 //! `emit_then_exit`, `gate_then_exit`, `eof_without_code`) the driver maps to
 //! `ProcessExited`.
 //!
-//! No `unsafe`. Signal-ignoring (for the escalation ladder) is done via tokio's
-//! `signal` seam, never a raw `libc`/`sigaction` call.
-
-#![forbid(unsafe_code)]
+//! Signal-ignoring (for the escalation ladder) is done via tokio's `signal`
+//! seam, never a raw `libc`/`sigaction` call. The ONE narrow `unsafe` block in
+//! this FIXTURE binary is `close_stdout_stay_alive`'s std-only FD-1 close (see
+//! that command) — there is no safe stdlib API to close the process's own stdout
+//! while the process keeps running, and adding a crate (`nix`/`rustix`) is out of
+//! scope for a test fixture; the block is std-only (`OwnedFd::from_raw_fd`), no
+//! external dependency.
+#![allow(unsafe_code)]
 
 use std::collections::HashMap;
 use std::io::Write as _;
@@ -263,6 +267,100 @@ async fn handle_request(
             loop {
                 std::thread::park();
             }
+        }
+        "close_stdout_stay_alive" => {
+            // Hardening-2 §4.1 setup: the child CLOSES its stdout file descriptor
+            // (so the driver's stdout read hits EOF) but KEEPS RUNNING — it does
+            // NOT exit — for several seconds before finally exiting on its own.
+            //
+            // This reproduces the real observed misbehavior class the plan cites
+            // ("a hung cleanup handler, a wedged child"): stdout is gone but the
+            // process is still alive. A driver that, on stdout EOF, does an
+            // UNBOUNDED `child.wait()` (§4.1's bug) would then block until this
+            // child's own eventual exit, ignoring the kill channel. A test with a
+            // much SHORTER escalation bound proves the driver force-terminates the
+            // child instead of waiting `stay_alive_ms` for the natural exit.
+            let stay_alive_ms = req
+                .get("stay_alive_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(10_000);
+            // Close FD 1 so the driver's stdout reader observes EOF. We deliberately
+            // do NOT emit any tokio-stdout event here first: FD 1 is the sole
+            // reference to the stdout pipe write-end (tokio's `Stdout` writes go
+            // straight to FD 1 via the blocking pool, no dup — verified), so closing
+            // it closes the pipe and the reader sees EOF. Touching tokio's async
+            // `Stdout` and then closing FD 1 underneath it risks a blocking-pool
+            // race, so we avoid it entirely. There is no safe stdlib API to close
+            // the process's own stdout in place; `OwnedFd::from_raw_fd(1)` takes
+            // ownership of FD 1 and dropping it closes it — std-only, no external
+            // crate. SAFETY: FD 1 is this process's stdout, a valid open descriptor;
+            // we take exclusive ownership and immediately drop (close) it, and never
+            // write to stdout again afterwards.
+            {
+                use std::os::fd::FromRawFd as _;
+                let stdout_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(1) };
+                drop(stdout_fd);
+            }
+            // Stay alive (NOT exiting) so the ONLY way the driver ends this child is
+            // by force-terminating it, not by waiting for a natural exit. Use a
+            // plain blocking sleep (not tokio's) so the (now-closed-stdout) tokio
+            // runtime is not asked to do any more IO before we exit.
+            std::thread::sleep(std::time::Duration::from_millis(stay_alive_ms));
+            exit(0);
+        }
+        "spawn_child_process" => {
+            // Hardening-2 §4.9 setup: the fake spawns a REAL grandchild OS process
+            // (`sleep <grandchild_secs>`) — the analog of the real `claude` CLI
+            // spawning its own subprocess MCP servers — reports the grandchild's
+            // PID via a stdout event (a `delta`, so the turn stays active with no
+            // terminal), then NEVER exits on its own and IGNORES the gentle
+            // signals, forcing the escalation ladder all the way to SIGKILL.
+            //
+            // The grandchild inherits the fake's process group. Signalling only
+            // the LEADER pid (§4.9's bug) leaves the grandchild orphaned-and-alive;
+            // signalling the whole process group (the fix) kills it too. A test
+            // probes the grandchild's PID after the fake is force-killed and
+            // asserts the GRANDCHILD is also dead.
+            let grandchild_secs = req
+                .get("grandchild_secs")
+                .and_then(Value::as_u64)
+                .unwrap_or(30);
+            accepted(out).await;
+            let child = std::process::Command::new("sleep")
+                .arg(grandchild_secs.to_string())
+                // The grandchild must NOT hold the fake's stdout pipe (so the
+                // driver's own stdout EOF is governed purely by the fake), and it
+                // must not read the fake's stdin.
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
+            match child {
+                Ok(c) => {
+                    // Report the grandchild pid over stdout as an assistant delta
+                    // (maps to `AssistantDelta{text:"<pid>"}`), so the turn stays
+                    // active (no terminal) and the test can learn the pid.
+                    emit_delta(out, &c.id().to_string()).await;
+                    let _ = out.flush().await;
+                    // Deliberately LEAK the grandchild handle so Rust does not
+                    // reap/kill it on drop — it must survive the fake's own death
+                    // (the orphan the leader-only signal would leave behind).
+                    std::mem::forget(c);
+                }
+                Err(e) => {
+                    // If `sleep` is somehow unavailable, fail the turn loudly so a
+                    // test sees a definite signal rather than a silent hang.
+                    write_event(
+                        out,
+                        &serde_json::json!({ "ev": "failed", "error": format!("spawn sleep: {e}") }),
+                    )
+                    .await;
+                    let _ = out.flush().await;
+                }
+            }
+            // Never exit on our own; ignore SIGINT/SIGTERM so only SIGKILL ends us
+            // (forces the driver's escalation ladder to its final stage).
+            ignore_gentle_signals_forever().await;
         }
 
         // ---- §1.3 hostile-wire emission scripts ----
