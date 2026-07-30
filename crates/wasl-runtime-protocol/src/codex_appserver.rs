@@ -285,9 +285,17 @@ impl InteractiveProtocol for CodexAppServerProtocol {
         self.spawn_or_resume("thread/start", None).await
     }
 
-    /// Resume is implemented with `thread/resume`, whose schema is present in the
-    /// captured codex protocol spec, but this exact runtime round-trip remains an
-    /// ASSUMED row until a dedicated live resume capture is archived.
+    /// Resume is implemented with `thread/resume`. VERIFIED, not ASSUMED: the
+    /// request/response shape was confirmed against the authoritative schema
+    /// (`codex app-server generate-json-schema`), and the actual cross-process
+    /// round-trip — a thread started by one OS process, resumed by a genuinely
+    /// FRESH, separate OS process after the original has fully exited, still
+    /// recalling pre-exit conversational context — was proven live twice: once
+    /// by a standalone probe (`spikes/live-substrate/
+    /// codex_appserver_resume_probe.py`) and again as a permanent
+    /// regression-guarded test (`tests/codex_appserver_resume_live.rs`,
+    /// `resume_in_a_fresh_process_recalls_pre_exit_context`, passing against the
+    /// real CLI).
     async fn resume(
         &self,
         native: &NativeSessionId,
