@@ -30,15 +30,16 @@ mod claude_stream;
 mod fake_line;
 mod opencode_acp;
 
-pub use claude_stream::{map_claude_line, ClaudeStreamProtocol, ClaudeToolTracker};
+pub use claude_stream::{claude_argv, map_claude_line, ClaudeStreamProtocol, ClaudeToolTracker};
 pub use fake_line::{FakeLineProtocol, SupervisionTimeouts};
 pub use opencode_acp::{
-    classify_handshake_line, map_acp_line_correlated, HandshakeLineClass, OpenCodeAcpProtocol,
+    classify_handshake_line, map_acp_line_correlated, opencode_session_params,
+    HandshakeLineClass, OpenCodeAcpProtocol,
 };
 
 // The R1-owned generic driver contract every R2 driver implements/maps onto.
 // Re-surfaced here to make the R2 → R1 edge explicit.
 pub use wasl_runtime::{
     ComposedPrompt, InteractiveProtocol, InteractiveTransport, NativeSessionId, ProtocolEvent,
-    RuntimeCapabilities, RuntimeError, SpawnOptions,
+    RuntimeCapabilities, RuntimeError, SpawnContext, SpawnOptions,
 };

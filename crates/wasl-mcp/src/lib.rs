@@ -17,6 +17,10 @@ pub mod gating;
 pub mod handle;
 pub mod server;
 
+// Needed for the managed-runtime / runtime-control wiring in `run()`.
+use std::sync::Arc;
+use wasl_runtime::RuntimeProvider;
+
 use wasl_audit::{AuditEntry, AuditError, AuditLog, Sink};
 use wasl_filesink::FileSink;
 use wasl_operator::{HubConfig, NodeInfo, OperatorHub, TeeSink};
@@ -89,6 +93,26 @@ impl Sink for RunSink {
             RunSink::Teed(tee) => tee.append(entry),
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// 1b. build_managed_provider — IO SHELL, UNTESTED HERE
+// ---------------------------------------------------------------------
+
+/// Construct a per-protocol [`WaslManagedRuntimeProvider`] for each of the
+/// configured protocols (claude, opencode-acp) and wrap them in a
+/// [`ProtocolRoutingProvider`] so one Wasl node can serve both protocols.
+///
+/// **Body is `todo!()` — Phase-0 scaffold.** Phase-2 will fill the real
+/// construction logic (per-protocol `WaslManagedRuntimeProvider` instances
+/// wired to `ClaudeStreamProtocol`/`OpenCodeAcpProtocol`, wrapped in
+/// `ProtocolRoutingProvider`).
+fn build_managed_provider(cfg: &Config) -> Arc<dyn RuntimeProvider> {
+    todo!(
+        "construct WaslManagedRuntimeProvider<ClaudeStreamProtocol> from cfg.runtime.claude_bin, \
+         WaslManagedRuntimeProvider<OpenCodeAcpProtocol> from cfg.runtime.opencode_bin, \
+         wrap both in ProtocolRoutingProvider {{ default_protocol: cfg.runtime.default_protocol }}"
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -253,6 +277,45 @@ pub fn run() {
             None => None,
         };
         // ── end OPERATOR shell ──────────────────────────────────────────────────
+
+        // ── RUNTIME-CONTROL wiring — IO SHELL, UNTESTED HERE ──────────────────
+        //
+        // When `runtime.kind = managed` AND `runtime.control_bind` is set, spin
+        // up the runtime-control HTTP API (wasl_runtime_control::serve) backed
+        // by a ProtocolRoutingProvider that delegates to per-protocol managed
+        // WaslManagedRuntimeProvider instances. The serve body and the managed-
+        // provider constructor are COMPILE-ONLY SHELLS (`todo!()` inside
+        // `build_managed_provider`); the actual logic lands in Phase-2.
+        if matches!(cfg.runtime.kind, RuntimeKind::Managed) {
+            if let Some(bind) = cfg.runtime.control_bind.clone() {
+                match bind.parse::<std::net::SocketAddr>() {
+                    Ok(addr) => {
+                        let provider = build_managed_provider(&cfg);
+                        let hub = wasl_runtime_control::RuntimeControlHub::new(
+                            provider,
+                            cfg.identity.agent_id.clone(),
+                            cfg.identity.host_id.clone(),
+                            env!("CARGO_PKG_VERSION").to_string(),
+                            wasl_runtime_control::RuntimeKind::Managed,
+                        );
+                        tokio::spawn(async move {
+                            if let Err(err) = wasl_runtime_control::serve(hub, addr).await {
+                                eprintln!(
+                                    "wasl-mcpd: runtime-control server terminated: {err}"
+                                );
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "wasl-mcpd: WARNING: runtime.control_bind={bind:?} is not a valid \
+                             socket address ({err}); runtime-control API not started."
+                        );
+                    }
+                }
+            }
+        }
+        // ── end RUNTIME-CONTROL shell ─────────────────────────────────────────
 
         let handler = build_handler(&cfg, hub);
         match handler.serve(stdio()).await {

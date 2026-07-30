@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use wasl_runtime::{
     ComposedPrompt, InteractiveProtocol, InteractiveTransport, NativeSessionId, ProtocolEvent,
-    RuntimeCapabilities, RuntimeError, SpawnOptions,
+    RuntimeCapabilities, RuntimeError, SpawnContext, SpawnOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +199,26 @@ fn next_wait(
     }
 }
 
+/// Build the ACP `session/new` or `session/load` params object.
+///
+/// * `session_method` — `"session/new"` or `"session/load"`.
+/// * `requested_session_id` — the native session id for resume; `None` for new.
+/// * `cwd` — the working directory to pass in the params.
+///
+/// The body is `todo!()` — Phase-0 scaffold; Phase-2 fills the real JSON
+/// construction logic (currently inlined in `perform_handshake`).
+pub fn opencode_session_params(
+    _session_method: &str,
+    _requested_session_id: Option<&str>,
+    _cwd: &str,
+) -> serde_json::Value {
+    todo!(
+        "build serde_json::json!({{ \"cwd\": cwd, \"mcpServers\": [] }}) \
+         or {{ \"sessionId\": requested_session_id, \"cwd\": cwd, \"mcpServers\": [] }} \
+         depending on session_method"
+    )
+}
+
 pub struct OpenCodeAcpProtocol {
     bin: PathBuf,
     timeouts: SupervisionTimeouts,
@@ -229,8 +249,14 @@ impl OpenCodeAcpProtocol {
         &self,
         session_method: &str,
         requested_session_id: Option<&str>,
+        context: &SpawnContext,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        let mut cmd = Command::new(&self.bin);
+        let bin = context
+            .bin
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.bin.clone());
+        let mut cmd = Command::new(&bin);
         cmd.arg("acp")
             .env("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
             .env("OPENCODE_DISABLE_AUTOCOMPACT", "1")
@@ -238,12 +264,18 @@ impl OpenCodeAcpProtocol {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        if let Some(cwd) = &context.cwd {
+            cmd.current_dir(cwd);
+        }
+        for (k, v) in &context.env {
+            cmd.env(k, v);
+        }
         #[cfg(unix)]
         {
             cmd.as_std_mut().process_group(0);
         }
         let mut child = cmd.spawn().map_err(|e| RuntimeError::SpawnFailed {
-            detail: format!("spawn {} acp: {e}", self.bin.display()),
+            detail: format!("spawn {} acp: {e}", bin.display()),
         })?;
 
         let pid = child.id();
@@ -285,6 +317,7 @@ impl OpenCodeAcpProtocol {
                 &mut stdout_reader,
                 session_method,
                 requested_session_id,
+                context,
             )
             .await?;
 
@@ -329,6 +362,7 @@ impl OpenCodeAcpProtocol {
         reader: &mut BufReader<ChildStdout>,
         session_method: &str,
         requested_session_id: Option<&str>,
+        context: &SpawnContext,
     ) -> Result<String, RuntimeError> {
         let deadline = Instant::now() + self.timeouts.handshake_timeout;
 
@@ -359,12 +393,16 @@ impl OpenCodeAcpProtocol {
         ensure_no_jsonrpc_error(&init, "initialize")?;
         ensure_has_result(&init, "initialize")?;
 
-        let cwd = std::env::current_dir()
-            .map_err(|e| RuntimeError::SpawnFailed {
-                detail: format!("opencode acp handshake current_dir: {e}"),
-            })?
-            .to_string_lossy()
-            .to_string();
+        // Use context.cwd if provided; fall back to the process current dir.
+        let cwd = match &context.cwd {
+            Some(d) => d.clone(),
+            None => std::env::current_dir()
+                .map_err(|e| RuntimeError::SpawnFailed {
+                    detail: format!("opencode acp handshake current_dir: {e}"),
+                })?
+                .to_string_lossy()
+                .to_string(),
+        };
 
         let session_params = if session_method == "session/load" {
             serde_json::json!({
@@ -422,9 +460,9 @@ impl InteractiveProtocol for OpenCodeAcpProtocol {
 
     async fn spawn(
         &self,
-        _opts: &SpawnOptions,
+        opts: &SpawnOptions,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        self.spawn_or_resume("session/new", None).await
+        self.spawn_or_resume("session/new", None, opts.context()).await
     }
 
     /// Resume is implemented with ACP `session/load` as the documented
@@ -434,9 +472,9 @@ impl InteractiveProtocol for OpenCodeAcpProtocol {
     async fn resume(
         &self,
         native: &NativeSessionId,
-        _opts: &SpawnOptions,
+        opts: &SpawnOptions,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        self.spawn_or_resume("session/load", Some(&native.0)).await
+        self.spawn_or_resume("session/load", Some(&native.0), opts.context()).await
     }
 }
 

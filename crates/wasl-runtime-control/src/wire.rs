@@ -37,7 +37,10 @@ pub struct TargetsSnapshotResponse {
 #[serde(rename_all = "snake_case")]
 pub struct CreateTargetRequest {
     pub key: TargetKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
+    #[serde(default)]
+    pub context: wasl_runtime::SpawnContext,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

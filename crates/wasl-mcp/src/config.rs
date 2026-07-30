@@ -82,6 +82,16 @@ pub struct AdapterConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeConfig {
     pub kind: RuntimeKind,
+    /// Optional TCP socket address for the runtime-control API (HTTP). `None`
+    /// means the control API is not started.
+    pub control_bind: Option<String>,
+    /// Which protocol to use by default when no protocol is specified in a
+    /// `CreateTargetRequest`. Defaults to `"claude"`.
+    pub default_protocol: String,
+    /// Override the `claude` binary path. `None` means use the system `PATH`.
+    pub claude_bin: Option<String>,
+    /// Override the `opencode` binary path. `None` means use the system `PATH`.
+    pub opencode_bin: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +145,10 @@ impl Default for RuntimeConfig {
     fn default() -> Self {
         RuntimeConfig {
             kind: RuntimeKind::Ephemeral,
+            control_bind: None,
+            default_protocol: "claude".to_string(),
+            claude_bin: None,
+            opencode_bin: None,
         }
     }
 }
@@ -291,12 +305,20 @@ impl Default for RawAdapter {
 #[serde(deny_unknown_fields, default)]
 struct RawRuntime {
     kind: String,
+    control_bind: Option<String>,
+    default_protocol: String,
+    claude_bin: Option<String>,
+    opencode_bin: Option<String>,
 }
 
 impl Default for RawRuntime {
     fn default() -> Self {
         RawRuntime {
             kind: "ephemeral".to_string(),
+            control_bind: None,
+            default_protocol: "claude".to_string(),
+            claude_bin: None,
+            opencode_bin: None,
         }
     }
 }
@@ -416,7 +438,13 @@ impl Config {
                 kind,
                 bin: raw.adapter.bin,
             },
-            runtime: RuntimeConfig { kind: runtime_kind },
+            runtime: RuntimeConfig {
+                kind: runtime_kind,
+                control_bind: raw.runtime.control_bind,
+                default_protocol: raw.runtime.default_protocol,
+                claude_bin: raw.runtime.claude_bin,
+                opencode_bin: raw.runtime.opencode_bin,
+            },
             peers,
         })
     }

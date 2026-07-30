@@ -60,6 +60,10 @@ wasl-adapter-antigravity = { workspace = true }
 # NodeAdapter variant (`build_adapter` in src/config.rs).
 wasl-adapter-opencode = { workspace = true }
 wasl-node = { workspace = true }
+# Runtime-control wiring (Phase-A): managed provider + control API serve loop.
+wasl-runtime = { workspace = true }
+wasl-runtime-control = { workspace = true }
+wasl-runtime-protocol = { workspace = true }
 # NodeAdapter's `impl AgentAdapter` (src/config.rs) delegates via
 # `#[async_trait::async_trait]`, same macro the trait itself is defined with.
 async-trait = { workspace = true }

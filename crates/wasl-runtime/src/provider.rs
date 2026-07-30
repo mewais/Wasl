@@ -21,7 +21,7 @@ use crate::config::ManagedConfig;
 use crate::journal::Journal;
 use crate::{
     BusyPolicy, CancelReason, DeliveryTarget, EventSeq, IdempotencyKey, InteractiveProtocol,
-    NativeGateResolver, RuntimeCapabilities, RuntimeClock, RuntimeError, ShutdownMode,
+    NativeGateResolver, RuntimeCapabilities, RuntimeClock, RuntimeError, ShutdownMode, SpawnContext,
     SpawnOptions, TargetId, TargetKey, TargetStatus, ToolCallAnswerer, TurnEventStream, TurnId,
     TurnReceipt, TurnRequest,
 };
@@ -299,12 +299,14 @@ impl<P: InteractiveProtocol + 'static> WaslManagedRuntimeProvider<P> {
         }
     }
 
-    /// Get-or-create the target for `key` (`TargetKey == context_id`), applying
-    /// global admission control (§10). Inherent method so callers use it without
-    /// importing [`crate::RuntimeProvider`]; the trait impl forwards here.
-    pub async fn target_for(
+    /// Get-or-create the target for `key`, threading a [`SpawnContext`] to the
+    /// driver at spawn time. The real get-or-create logic lives here; the
+    /// context-less [`WaslManagedRuntimeProvider::target_for`] delegates here
+    /// with a default context so all callers share one code path.
+    pub async fn target_for_with_context(
         &self,
         key: &TargetKey,
+        context: SpawnContext,
     ) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
         // Idempotent get-or-create (§10): same key ⇒ same live target.
         {
@@ -322,7 +324,7 @@ impl<P: InteractiveProtocol + 'static> WaslManagedRuntimeProvider<P> {
                 });
             }
         }
-        let target = self.create_target(key).await?;
+        let target = self.create_target(key, context).await?;
         // Re-check under the lock (another task may have created it concurrently).
         let mut map = self.targets.lock().unwrap();
         if let Some(existing) = map.get(key) {
@@ -330,6 +332,17 @@ impl<P: InteractiveProtocol + 'static> WaslManagedRuntimeProvider<P> {
         }
         map.insert(key.clone(), target.clone());
         Ok(target as Arc<dyn DeliveryTarget>)
+    }
+
+    /// Get-or-create the target for `key` (`TargetKey == context_id`), applying
+    /// global admission control (§10). Inherent method so callers use it without
+    /// importing [`crate::RuntimeProvider`]; the trait impl forwards here.
+    /// Delegates to [`Self::target_for_with_context`] with a default context.
+    pub async fn target_for(
+        &self,
+        key: &TargetKey,
+    ) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
+        self.target_for_with_context(key, SpawnContext::default()).await
     }
 
     /// List currently-known targets (§10, R3 `list`). Inherent; the trait impl
@@ -343,10 +356,15 @@ impl<P: InteractiveProtocol + 'static> WaslManagedRuntimeProvider<P> {
             .collect()
     }
 
-    async fn create_target(&self, key: &TargetKey) -> Result<Arc<ManagedTarget>, RuntimeError> {
+    async fn create_target(
+        &self,
+        key: &TargetKey,
+        context: SpawnContext,
+    ) -> Result<Arc<ManagedTarget>, RuntimeError> {
         let caps = self.protocol.capabilities();
         let opts = SpawnOptions {
             target_key: Some(key.clone()),
+            context,
         };
         let transport = self.protocol.spawn(&opts).await?;
 
@@ -390,6 +408,14 @@ impl<P: InteractiveProtocol + 'static> WaslManagedRuntimeProvider<P> {
 impl<P: InteractiveProtocol + 'static> crate::RuntimeProvider for WaslManagedRuntimeProvider<P> {
     async fn target_for(&self, key: &TargetKey) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
         WaslManagedRuntimeProvider::target_for(self, key).await
+    }
+
+    async fn target_for_with_context(
+        &self,
+        key: &TargetKey,
+        context: SpawnContext,
+    ) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
+        WaslManagedRuntimeProvider::target_for_with_context(self, key, context).await
     }
 
     async fn list_targets(&self) -> Vec<TargetId> {
