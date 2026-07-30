@@ -54,8 +54,8 @@ use wasl_adapter::{Delivery, DeliveryKind};
 use wasl_proto::{AgentId, GateDecision, RequestId};
 use wasl_runtime::{
     BusyPolicy, CancelReason, Causation, DeliveryCertainty, EventSeq, NativeGateDetail,
-    RuntimeCapabilities, ShutdownMode, TargetId, TargetKey, TargetStatus, TurnEvent, TurnId,
-    TurnReceipt, TurnSource,
+    RuntimeCapabilities, ShutdownMode, SpawnContext, TargetId, TargetKey, TargetStatus, TurnEvent,
+    TurnId, TurnReceipt, TurnSource,
 };
 
 use wasl_runtime_control::{
@@ -166,8 +166,101 @@ fn create_target_request_matches_fixture() {
     let req = CreateTargetRequest {
         key: TargetKey("ctx-42".to_string()),
         protocol: Some("opencode-acp".to_string()),
+        context: Default::default(),
     };
     assert_matches_fixture(&req, "create_request.json");
+}
+
+/// Build the full-context `CreateTargetRequest` that matches
+/// `create_request_with_context.json`.  Factored out so both the
+/// "matches-fixture" test and the round-trip assertion can share it.
+fn sample_create_request_with_context() -> CreateTargetRequest {
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("ANTHROPIC_API_KEY".to_string(), "sk-test".to_string());
+    CreateTargetRequest {
+        key: TargetKey("ctx-42".to_string()),
+        protocol: None, // top-level protocol absent; protocol lives inside context
+        context: SpawnContext {
+            protocol: Some("claude".to_string()),
+            cwd: Some("/workspace/project".to_string()),
+            model: Some("claude-opus-4-5".to_string()),
+            posture: Some("bypassPermissions".to_string()),
+            env,
+            setup: Some("npm install".to_string()),
+            bin: Some("/usr/local/bin/claude".to_string()),
+            disallowed_tools: vec!["bash".to_string(), "computer".to_string()],
+        },
+    }
+}
+
+#[test]
+fn create_request_with_context_matches_fixture() {
+    assert_matches_fixture(
+        &sample_create_request_with_context(),
+        "create_request_with_context.json",
+    );
+}
+
+#[test]
+fn create_request_with_context_round_trips() {
+    assert_round_trips::<CreateTargetRequest>("create_request_with_context.json");
+}
+
+/// Legacy wire body `{"key":"ctx-42"}` (no `protocol`, no `context`): must
+/// deserialize successfully with `context == SpawnContext::default()`.
+#[test]
+fn legacy_create_request_no_context_deserializes() {
+    let text = r#"{"key":"ctx-42"}"#;
+    let parsed: CreateTargetRequest =
+        serde_json::from_str(text).expect("legacy body must deserialize");
+    assert_eq!(parsed.key, TargetKey("ctx-42".to_string()));
+    assert_eq!(parsed.protocol, None);
+    assert_eq!(
+        parsed.context,
+        SpawnContext::default(),
+        "absent context field must yield SpawnContext::default()"
+    );
+    // Re-serializing a default context must omit the `context` key entirely
+    // (all context fields carry skip_serializing_if = is_none / is_empty).
+    let reserialized =
+        serde_json::to_value(&parsed).expect("must serialize");
+    assert!(
+        reserialized.get("context").is_none(),
+        "default SpawnContext must be omitted from the serialized output; got: {reserialized}"
+    );
+}
+
+/// Legacy wire body `{"key":"ctx-42","protocol":"claude"}` (no `context`):
+/// must deserialize with `context == SpawnContext::default()` and the
+/// top-level `protocol` preserved.
+#[test]
+fn legacy_create_request_protocol_no_context_deserializes() {
+    let text = r#"{"key":"ctx-42","protocol":"claude"}"#;
+    let parsed: CreateTargetRequest =
+        serde_json::from_str(text).expect("legacy body must deserialize");
+    assert_eq!(parsed.key, TargetKey("ctx-42".to_string()));
+    assert_eq!(
+        parsed.protocol,
+        Some("claude".to_string()),
+        "top-level protocol must be preserved"
+    );
+    assert_eq!(
+        parsed.context,
+        SpawnContext::default(),
+        "absent context field must yield SpawnContext::default()"
+    );
+    // Re-serializing must emit `protocol` but omit `context`.
+    let reserialized =
+        serde_json::to_value(&parsed).expect("must serialize");
+    assert_eq!(
+        reserialized["protocol"],
+        serde_json::json!("claude"),
+        "top-level protocol must round-trip"
+    );
+    assert!(
+        reserialized.get("context").is_none(),
+        "default SpawnContext must be omitted from the serialized output; got: {reserialized}"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -458,6 +551,7 @@ fn info_and_frames_round_trip() {
     assert_round_trips::<TargetSnapshot>("target.json");
     assert_round_trips::<TargetsSnapshotResponse>("targets_snapshot.json");
     assert_round_trips::<CreateTargetRequest>("create_request.json");
+    assert_round_trips::<CreateTargetRequest>("create_request_with_context.json");
     assert_round_trips::<SubmitTurnRequest>("submit_request.json");
     assert_round_trips::<CancelRequest>("cancel_request.json");
     assert_round_trips::<GateRequest>("gate_request_approve.json");

@@ -1,0 +1,13 @@
+{
+  "key": "ctx-42",
+  "context": {
+    "protocol": "claude",
+    "cwd": "/workspace/project",
+    "model": "claude-opus-4-5",
+    "posture": "bypassPermissions",
+    "env": { "ANTHROPIC_API_KEY": "sk-test" },
+    "setup": "npm install",
+    "bin": "/usr/local/bin/claude",
+    "disallowed_tools": ["bash", "computer"]
+  }
+}
