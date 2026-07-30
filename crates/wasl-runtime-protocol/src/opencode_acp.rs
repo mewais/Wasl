@@ -5,18 +5,19 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use crate::bounded_io::{
+    discard_one_bounded_line, read_bounded_line, BoundedLineRead, EVENT_CHANNEL_CAPACITY,
+    MAX_STDOUT_LINE_BYTES,
+};
+use crate::json_rpc_handshake::{classify_handshake_line, HandshakeLineClass};
+use crate::process_supervision::{escalate, next_wait, wait_for_exit};
 use async_trait::async_trait;
-#[cfg(unix)]
-use nix::sys::signal::{kill, Signal};
-#[cfg(unix)]
-use nix::unistd::Pid;
 use serde_json::Value;
-use std::io;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -54,108 +55,8 @@ impl Default for SupervisionTimeouts {
 }
 
 const POLL_IDLE: Duration = Duration::from_millis(500);
-const MAX_STDOUT_LINE_BYTES: usize = 4 * 1024 * 1024;
-const EVENT_CHANNEL_CAPACITY: usize = 4096;
 const ACCUMULATED_REPLY_MAX_BYTES: usize = 4 * 1024 * 1024;
 const TRUNCATION_MARKER: &str = "…[truncated]";
-
-enum BoundedLineRead {
-    Line(String),
-    Eof,
-    TooLong,
-}
-
-async fn discard_until_newline<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<()> {
-    loop {
-        let chunk = reader.fill_buf().await?;
-        if chunk.is_empty() {
-            return Ok(());
-        }
-        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
-            reader.consume(pos + 1);
-            return Ok(());
-        }
-        let len = chunk.len();
-        reader.consume(len);
-    }
-}
-
-/// Consume and discard exactly one line (bounded the same way as
-/// [`read_bounded_line`]) WITHOUT ever allocating its content into a `String`.
-/// Used for drains whose content is thrown away regardless (stderr, §4.4) —
-/// building a `String` per line there is pure overhead for content nobody
-/// reads. Returns `Ok(true)` if a line (or an EOF-terminated partial line) was
-/// consumed, `Ok(false)` on a clean EOF with nothing pending.
-async fn discard_one_bounded_line<R: AsyncBufRead + Unpin>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> io::Result<bool> {
-    let mut seen = 0usize;
-    loop {
-        let chunk = reader.fill_buf().await?;
-        if chunk.is_empty() {
-            return Ok(seen > 0);
-        }
-        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
-            reader.consume(pos + 1);
-            return Ok(true);
-        }
-        let len = chunk.len();
-        seen = seen.saturating_add(len);
-        reader.consume(len);
-        if seen > max_bytes {
-            discard_until_newline(reader).await?;
-            return Ok(true);
-        }
-    }
-}
-
-async fn read_bounded_line<R: AsyncBufRead + Unpin>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> io::Result<BoundedLineRead> {
-    let mut line = Vec::new();
-    loop {
-        let chunk = reader.fill_buf().await?;
-        if chunk.is_empty() {
-            if line.is_empty() {
-                return Ok(BoundedLineRead::Eof);
-            }
-            return Ok(BoundedLineRead::Line(
-                String::from_utf8_lossy(&line).to_string(),
-            ));
-        }
-        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
-            let take = pos + 1;
-            if line.len().saturating_add(take) > max_bytes {
-                reader.consume(take);
-                return Ok(BoundedLineRead::TooLong);
-            }
-            line.extend_from_slice(&chunk[..take]);
-            reader.consume(take);
-            if line.last() == Some(&b'\n') {
-                line.pop();
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-            }
-            return Ok(BoundedLineRead::Line(
-                String::from_utf8_lossy(&line).to_string(),
-            ));
-        }
-
-        if line.len().saturating_add(chunk.len()) > max_bytes {
-            let len = chunk.len();
-            reader.consume(len);
-            discard_until_newline(reader).await?;
-            return Ok(BoundedLineRead::TooLong);
-        }
-
-        line.extend_from_slice(chunk);
-        let len = chunk.len();
-        reader.consume(len);
-    }
-}
 
 fn append_capped_reply(acc: &mut String, chunk: &str, truncated: &mut bool, max_bytes: usize) {
     if *truncated {
@@ -170,32 +71,6 @@ fn append_capped_reply(acc: &mut String, chunk: &str, truncated: &mut bool, max_
         acc.truncate(boundary);
         acc.push_str(TRUNCATION_MARKER);
         *truncated = true;
-    }
-}
-
-/// Compute how long `pull_one` should block on the next event.
-///
-/// While a turn is in flight, wait the FULL remaining hang-watchdog budget (so a
-/// real but slow event — e.g. opencode's ACP updates on a cold invocation — is
-/// always retrieved, never lost to the generic R1 actor's park-on-`None` race).
-/// NEVER cap this at `poll_idle`: the bug this guards against was capping the
-/// in-flight wait at the short `poll_idle` breather, so a `None` was returned
-/// before the real event arrived; the actor then parked on its mailbox with no
-/// re-poll timer and the event was lost forever. When idle (no turn), a
-/// `poll_idle` breather is correct — nothing is coming until the next `send_turn`,
-/// so the actor SHOULD park.
-fn next_wait(
-    turn_in_flight: bool,
-    elapsed: Duration,
-    hang_watchdog: Duration,
-    poll_idle: Duration,
-) -> Duration {
-    if turn_in_flight {
-        hang_watchdog
-            .saturating_sub(elapsed)
-            .max(Duration::from_millis(1))
-    } else {
-        poll_idle
     }
 }
 
@@ -714,11 +589,6 @@ impl Drop for OpenCodeAcpTransport {
     }
 }
 
-#[cfg(unix)]
-fn best_effort_signal(target: i32, sig: Signal) {
-    let _ = kill(Pid::from_raw(target), sig);
-}
-
 async fn supervise(
     mut child: tokio::process::Child,
     mut lines: BufReader<ChildStdout>,
@@ -764,12 +634,26 @@ async fn supervise(
                                 ),
                             })
                             .await;
-                        let code = escalate(&mut child, signal_target, supervision.timeouts).await;
+                        let code = escalate(
+                            &mut child,
+                            signal_target,
+                            supervision.timeouts.interrupt_ack,
+                            supervision.timeouts.term_after,
+                            supervision.timeouts.kill_after,
+                        )
+                        .await;
                         let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                         break;
                     }
                     Ok(BoundedLineRead::Eof) | Err(_) => {
-                        let code = escalate(&mut child, signal_target, supervision.timeouts).await;
+                        let code = escalate(
+                            &mut child,
+                            signal_target,
+                            supervision.timeouts.interrupt_ack,
+                            supervision.timeouts.term_after,
+                            supervision.timeouts.kill_after,
+                        )
+                        .await;
                         let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                         break;
                     }
@@ -777,7 +661,14 @@ async fn supervise(
             }
             msg = kill_rx.recv() => {
                 let _ = msg;
-                let code = escalate(&mut child, signal_target, supervision.timeouts).await;
+                let code = escalate(
+                    &mut child,
+                    signal_target,
+                    supervision.timeouts.interrupt_ack,
+                    supervision.timeouts.term_after,
+                    supervision.timeouts.kill_after,
+                )
+                .await;
                 let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                 break;
             }
@@ -786,46 +677,6 @@ async fn supervise(
 
     let _ = wait_for_exit(&mut child, supervision.timeouts.kill_after).await;
     stderr_task.abort();
-}
-
-async fn escalate(
-    child: &mut tokio::process::Child,
-    signal_target: Option<i32>,
-    t: SupervisionTimeouts,
-) -> Option<i32> {
-    if let Some(target) = signal_target {
-        best_effort_signal(target, Signal::SIGINT);
-    }
-    if let Some(code) = wait_for_exit(child, t.interrupt_ack).await {
-        return code;
-    }
-    if let Some(target) = signal_target {
-        best_effort_signal(target, Signal::SIGTERM);
-    }
-    if let Some(code) = wait_for_exit(child, t.term_after).await {
-        return code;
-    }
-    // Stage 3: SIGKILL (the hard stop). Signal the whole process GROUP (not
-    // just the leader, §4.9 defense-in-depth) so a grandchild that also
-    // ignored SIGINT/SIGTERM cannot survive as an orphan; `start_kill()` is
-    // kept as a direct-child backstop and to let tokio's own bookkeeping know
-    // a kill was issued.
-    if let Some(target) = signal_target {
-        best_effort_signal(target, Signal::SIGKILL);
-    }
-    let _ = child.start_kill();
-    if let Some(code) = wait_for_exit(child, t.kill_after).await {
-        return code;
-    }
-    wait_for_exit(child, t.kill_after).await.flatten()
-}
-
-async fn wait_for_exit(child: &mut tokio::process::Child, bound: Duration) -> Option<Option<i32>> {
-    match tokio::time::timeout(bound, child.wait()).await {
-        Ok(Ok(status)) => Some(status.code()),
-        Ok(Err(_)) => Some(None),
-        Err(_) => None,
-    }
 }
 
 async fn write_jsonrpc_line(
@@ -1024,61 +875,6 @@ fn map_acp_line(line: &str) -> Vec<ProtocolEvent> {
     }]
 }
 
-/// Classification of one JSON-RPC line read during the handshake, relative to
-/// the request id currently being awaited (hardening-plan §4.6).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HandshakeLineClass {
-    /// A JSON-RPC notification (has `method`, no `id`). A real ACP server may
-    /// legally send one at any time, including mid-handshake; ignore it and
-    /// keep reading — it is never the handshake response.
-    Notification,
-    /// The response we are waiting for: `id` matches `expected_id` AND the
-    /// line carries `result` or `error`. Either satisfies the handshake step
-    /// (an `error` still ends the read; the caller surfaces it separately).
-    ExpectedResponse,
-    /// Neither of the above: a response tagged with a DIFFERENT id, a
-    /// malformed/non-JSON line, or a line with no `id` and no `method`. A real
-    /// protocol anomaly to surface — never silently treated the same as a
-    /// benign `Notification`.
-    Anomaly,
-}
-
-/// Classify one handshake line against the request id currently awaited
-/// (hardening-plan §4.6). Pure — no IO, no async. `perform_handshake` loops
-/// reading lines (bounded by ONE overall handshake deadline, not a fresh
-/// timeout per skipped line) and acts on the classification: skip
-/// `Notification`s, accept `ExpectedResponse`, fail the handshake on
-/// `Anomaly`.
-pub fn classify_handshake_line(line: &str, expected_id: u64) -> HandshakeLineClass {
-    let trimmed = line.trim();
-    if trimmed.is_empty() {
-        return HandshakeLineClass::Anomaly;
-    }
-
-    let v: Value = match serde_json::from_str(trimmed) {
-        Ok(v) => v,
-        Err(_) => return HandshakeLineClass::Anomaly,
-    };
-
-    if v.get("method").is_some() && v.get("id").is_none() {
-        return HandshakeLineClass::Notification;
-    }
-
-    let Some(id) = v.get("id").and_then(Value::as_u64) else {
-        return HandshakeLineClass::Anomaly;
-    };
-
-    if v.get("result").is_some() || v.get("error").is_some() {
-        return if id == expected_id {
-            HandshakeLineClass::ExpectedResponse
-        } else {
-            HandshakeLineClass::Anomaly
-        };
-    }
-
-    HandshakeLineClass::Anomaly
-}
-
 /// Map one opencode ACP wire line to zero or more [`ProtocolEvent`]s, gating a
 /// terminal (`result{stopReason}`/`error`) by JSON-RPC id (hardening-plan
 /// §4.8): a terminal whose `id` does not match `expected_id` (or carries none
@@ -1249,74 +1045,5 @@ mod tests {
             "once truncated, accumulator must stop growing on later chunks"
         );
         assert_eq!(acc, "界界界…[truncated]");
-    }
-
-    // =================================================================
-    // Regression guard for the in-flight `next_wait` bug (the pure
-    // wait-duration policy `pull_one` calls). The bug: while a turn was in
-    // flight the wait was capped at the short `POLL_IDLE` (500ms) breather
-    // REGARDLESS of the real hang-watchdog budget, so `pull_one` returned a
-    // spurious `None` after 500ms; the generic R1 actor then parked on its
-    // mailbox with no re-poll timer and a real event arriving later was LOST
-    // FOREVER. The fix waits the FULL remaining watchdog budget while in flight.
-    // These table-driven cases pin that policy; reverting `next_wait` to the old
-    // `POLL_IDLE.min(...)` body makes the first case FAIL.
-    // =================================================================
-
-    const WATCHDOG: Duration = Duration::from_secs(60);
-    const IDLE: Duration = Duration::from_millis(500);
-
-    #[test]
-    fn next_wait_in_flight_uses_full_watchdog_not_poll_idle() {
-        // In flight, only 10ms elapsed of a 60s budget: the wait MUST be ~60s
-        // (the full remaining budget), NOT capped at the 500ms POLL_IDLE. This
-        // is the exact case the bug got wrong.
-        let w = next_wait(true, Duration::from_millis(10), WATCHDOG, IDLE);
-        assert_eq!(
-            w,
-            WATCHDOG - Duration::from_millis(10),
-            "in-flight wait must be the full remaining watchdog budget, not POLL_IDLE"
-        );
-        assert!(
-            w > IDLE,
-            "the in-flight wait must exceed POLL_IDLE ({IDLE:?}); got {w:?} \
-             (the old bug capped it at POLL_IDLE and lost slow real events)"
-        );
-    }
-
-    #[test]
-    fn next_wait_in_flight_near_watchdog_returns_small_remainder() {
-        // 59.9s elapsed of a 60s budget → ~100ms remaining. Still the true
-        // remainder (NOT POLL_IDLE.min(remainder), which the old buggy body
-        // would ALSO have returned here — so this case alone does not
-        // distinguish; it pins the boundary behavior correctly regardless).
-        let elapsed = Duration::from_millis(59_900);
-        let w = next_wait(true, elapsed, WATCHDOG, IDLE);
-        assert_eq!(
-            w,
-            Duration::from_millis(100),
-            "near the watchdog, the wait is the small true remainder"
-        );
-    }
-
-    #[test]
-    fn next_wait_in_flight_past_watchdog_clamps_to_one_millisecond() {
-        // Elapsed >= watchdog → saturating_sub is zero, clamped up to 1ms so the
-        // timeout still fires (and `pull_one` then trips the watchdog terminal).
-        let w = next_wait(true, WATCHDOG + Duration::from_secs(5), WATCHDOG, IDLE);
-        assert_eq!(w, Duration::from_millis(1));
-    }
-
-    #[test]
-    fn next_wait_idle_is_exactly_poll_idle_regardless_of_elapsed() {
-        // Not in flight → always exactly POLL_IDLE, no matter the elapsed value.
-        assert_eq!(
-            next_wait(false, Duration::from_millis(0), WATCHDOG, IDLE),
-            IDLE
-        );
-        assert_eq!(
-            next_wait(false, Duration::from_secs(120), WATCHDOG, IDLE),
-            IDLE
-        );
     }
 }

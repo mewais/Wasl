@@ -12,18 +12,20 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use crate::bounded_io::{
+    discard_one_bounded_line, read_bounded_line, BoundedLineRead, EVENT_CHANNEL_CAPACITY,
+    MAX_STDOUT_LINE_BYTES,
+};
+use crate::process_supervision::{best_effort_signal, escalate, next_wait, wait_for_exit};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::io;
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 #[cfg(unix)]
-use nix::sys::signal::{kill, Signal};
-#[cfg(unix)]
-use nix::unistd::Pid;
+use nix::sys::signal::Signal;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
@@ -77,131 +79,6 @@ impl Default for SupervisionTimeouts {
 /// instead, the "still held" signal). This is a bounded wait for a REAL child's
 /// timing, per the §1.4 CONSTRAINTS, not a sleep driving logic.
 const POLL_IDLE: Duration = Duration::from_millis(500);
-/// Hard cap for one stdout line from the child (84.4).
-const MAX_STDOUT_LINE_BYTES: usize = 4 * 1024 * 1024;
-/// Generous bounded queue for driveractor events (84.4).
-const EVENT_CHANNEL_CAPACITY: usize = 4096;
-
-enum BoundedLineRead {
-    Line(String),
-    Eof,
-    TooLong,
-}
-
-async fn discard_until_newline<R: AsyncBufRead + Unpin>(reader: &mut R) -> io::Result<()> {
-    loop {
-        let chunk = reader.fill_buf().await?;
-        if chunk.is_empty() {
-            return Ok(());
-        }
-        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
-            reader.consume(pos + 1);
-            return Ok(());
-        }
-        let len = chunk.len();
-        reader.consume(len);
-    }
-}
-
-/// Consume and discard exactly one line (bounded the same way as
-/// [`read_bounded_line`]) WITHOUT ever allocating its content into a `String`.
-/// Used for drains whose content is thrown away regardless (stderr, §4.4) —
-/// building a `String` per line there is pure overhead for content nobody
-/// reads, and under a high-volume flood that overhead is exactly the kind of
-/// per-line cost this fix should not be adding. Returns `Ok(true)` if a line
-/// (or an EOF-terminated partial line) was consumed, `Ok(false)` on a clean
-/// EOF with nothing pending.
-async fn discard_one_bounded_line<R: AsyncBufRead + Unpin>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> io::Result<bool> {
-    let mut seen = 0usize;
-    loop {
-        let chunk = reader.fill_buf().await?;
-        if chunk.is_empty() {
-            return Ok(seen > 0);
-        }
-        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
-            reader.consume(pos + 1);
-            return Ok(true);
-        }
-        let len = chunk.len();
-        seen = seen.saturating_add(len);
-        reader.consume(len);
-        if seen > max_bytes {
-            discard_until_newline(reader).await?;
-            return Ok(true);
-        }
-    }
-}
-
-async fn read_bounded_line<R: AsyncBufRead + Unpin>(
-    reader: &mut R,
-    max_bytes: usize,
-) -> io::Result<BoundedLineRead> {
-    let mut line = Vec::new();
-    loop {
-        let chunk = reader.fill_buf().await?;
-        if chunk.is_empty() {
-            if line.is_empty() {
-                return Ok(BoundedLineRead::Eof);
-            }
-            return Ok(BoundedLineRead::Line(
-                String::from_utf8_lossy(&line).to_string(),
-            ));
-        }
-
-        if let Some(pos) = chunk.iter().position(|b| *b == b'\n') {
-            let take = pos + 1;
-            if line.len().saturating_add(take) > max_bytes {
-                reader.consume(take);
-                return Ok(BoundedLineRead::TooLong);
-            }
-            line.extend_from_slice(&chunk[..take]);
-            reader.consume(take);
-            if line.last() == Some(&b'\n') {
-                line.pop();
-                if line.last() == Some(&b'\r') {
-                    line.pop();
-                }
-            }
-            return Ok(BoundedLineRead::Line(
-                String::from_utf8_lossy(&line).to_string(),
-            ));
-        }
-
-        if line.len().saturating_add(chunk.len()) > max_bytes {
-            let len = chunk.len();
-            reader.consume(len);
-            discard_until_newline(reader).await?;
-            return Ok(BoundedLineRead::TooLong);
-        }
-
-        line.extend_from_slice(chunk);
-        let len = chunk.len();
-        reader.consume(len);
-    }
-}
-
-/// Compute how long `pull_one` should block on the next event.
-///
-/// Cancellation-safety audit note: actor-level mailbox responsiveness is now
-/// provided by racing mailbox commands against `next_event`; while a turn is in
-/// flight this transport should wait the full remaining watchdog budget.
-fn next_wait(
-    turn_in_flight: bool,
-    elapsed: Duration,
-    hang_watchdog: Duration,
-    poll_idle: Duration,
-) -> Duration {
-    if turn_in_flight {
-        hang_watchdog
-            .saturating_sub(elapsed)
-            .max(Duration::from_millis(1))
-    } else {
-        poll_idle
-    }
-}
 
 /// The `FakeLineProtocol` driver: spawns the given fake-agent binary and maps its
 /// line wire onto [`ProtocolEvent`].
@@ -618,13 +495,6 @@ impl Drop for FakeLineTransport {
     }
 }
 
-/// Best-effort signal delivery via direct `kill(2)`. `target` may be a positive
-/// pid (single process) or a negative pid (process group).
-#[cfg(unix)]
-fn best_effort_signal(target: i32, sig: Signal) {
-    let _ = kill(Pid::from_raw(target), sig);
-}
-
 /// The per-child supervisor task: reads + maps stdout events, drains stderr
 /// (already spawned), reaps normal/abnormal exit, and runs the bounded escalation
 /// ladder on a kill request. It owns the `Child` so it can `wait()` (reap) it.
@@ -668,7 +538,14 @@ async fn supervise(
                                 ),
                             })
                             .await;
-                        let code = escalate(&mut child, signal_target, timeouts).await;
+                        let code = escalate(
+                            &mut child,
+                            signal_target,
+                            timeouts.interrupt_ack,
+                            timeouts.term_after,
+                            timeouts.kill_after,
+                        )
+                        .await;
                         let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                         break;
                     }
@@ -677,7 +554,14 @@ async fn supervise(
                             tokio::select! {
                                 msg = kill_rx.recv() => {
                                     let _ = msg;
-                                    let code = escalate(&mut child, signal_target, timeouts).await;
+                                    let code = escalate(
+                                        &mut child,
+                                        signal_target,
+                                        timeouts.interrupt_ack,
+                                        timeouts.term_after,
+                                        timeouts.kill_after,
+                                    )
+                                    .await;
                                     let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                                     break;
                                 }
@@ -696,7 +580,14 @@ async fn supervise(
             // A kill request (watchdog fired, or the transport is shutting down).
             msg = kill_rx.recv() => {
                 let _ = msg; // `Some(())` explicit request or `None` sender dropped
-                let code = escalate(&mut child, signal_target, timeouts).await;
+                let code = escalate(
+                    &mut child,
+                    signal_target,
+                    timeouts.interrupt_ack,
+                    timeouts.term_after,
+                    timeouts.kill_after,
+                )
+                .await;
                 let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                 break;
             }
@@ -708,59 +599,6 @@ async fn supervise(
     let _ = wait_for_exit(&mut child, timeouts.kill_after).await;
     // Stop draining stderr — the pipe is closed now.
     stderr_task.abort();
-}
-
-/// The bounded interrupt→SIGTERM→SIGKILL escalation ladder (§1.4). Each stage
-/// RACES the child's real exit against the injected timeout, so a cooperative
-/// child (one that dies on the gentle signal) is reaped fast regardless of how
-/// large the timeout is; only a signal-IGNORING child (the §1.3 script) climbs
-/// all the way to SIGKILL. Returns the reaped exit code (or `None` on signal
-/// death).
-async fn escalate(
-    child: &mut tokio::process::Child,
-    signal_target: Option<i32>,
-    t: SupervisionTimeouts,
-) -> Option<i32> {
-    // Stage 1: gentle SIGINT.
-    if let Some(target) = signal_target {
-        best_effort_signal(target, Signal::SIGINT);
-    }
-    if let Some(code) = wait_for_exit(child, t.interrupt_ack).await {
-        return code;
-    }
-    // Stage 2: SIGTERM.
-    if let Some(target) = signal_target {
-        best_effort_signal(target, Signal::SIGTERM);
-    }
-    if let Some(code) = wait_for_exit(child, t.term_after).await {
-        return code;
-    }
-    // Stage 3: SIGKILL (the hard stop the fake cannot ignore). Signal the
-    // whole process GROUP (not just the leader, §4.9 defense-in-depth) so a
-    // grandchild that also ignored SIGINT/SIGTERM cannot survive as an
-    // orphan; `start_kill()` is kept as a direct-child backstop (e.g. if
-    // `signal_target` is unavailable) and to let tokio's own bookkeeping know
-    // a kill was issued.
-    if let Some(target) = signal_target {
-        best_effort_signal(target, Signal::SIGKILL);
-    }
-    let _ = child.start_kill();
-    if let Some(code) = wait_for_exit(child, t.kill_after).await {
-        return code;
-    }
-    // Last resort: still bounded. A stuck reap is surfaced as `None` instead of
-    // parking supervision forever.
-    wait_for_exit(child, t.kill_after).await.flatten()
-}
-
-/// Wait up to `bound` for the child to exit; `Some(code)` if it exited in time
-/// (`code` may itself be `None` for a signal death), `None` if it is still alive.
-async fn wait_for_exit(child: &mut tokio::process::Child, bound: Duration) -> Option<Option<i32>> {
-    match tokio::time::timeout(bound, child.wait()).await {
-        Ok(Ok(status)) => Some(status.code()),
-        Ok(Err(_)) => Some(None),
-        Err(_) => None,
-    }
 }
 
 /// Map one fake event line onto a [`ProtocolEvent`] per the §1.2 table. A

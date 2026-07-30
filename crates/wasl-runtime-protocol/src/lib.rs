@@ -26,15 +26,23 @@
 
 #![forbid(unsafe_code)]
 
+mod bounded_io;
 mod claude_stream;
+mod codex_appserver;
 mod fake_line;
+mod json_rpc_handshake;
 mod opencode_acp;
+mod process_supervision;
 
 pub use claude_stream::{map_claude_line, ClaudeStreamProtocol, ClaudeToolTracker};
+pub use codex_appserver::{map_codex_line, CodexAppServerProtocol, CodexToolTracker};
 pub use fake_line::{FakeLineProtocol, SupervisionTimeouts};
-pub use opencode_acp::{
-    classify_handshake_line, map_acp_line_correlated, HandshakeLineClass, OpenCodeAcpProtocol,
+pub use json_rpc_handshake::{
+    classify_handshake_line, classify_handshake_line as classify_codex_handshake_line,
+    HandshakeLineClass, HandshakeLineClass as CodexHandshakeLineClass,
 };
+pub use opencode_acp::{map_acp_line_correlated, OpenCodeAcpProtocol};
+pub use process_supervision::next_wait;
 
 // The R1-owned generic driver contract every R2 driver implements/maps onto.
 // Re-surfaced here to make the R2 → R1 edge explicit.

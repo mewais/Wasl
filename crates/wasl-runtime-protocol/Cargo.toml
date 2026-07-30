@@ -34,6 +34,11 @@ unused_imports = "allow"
 # `doc_lazy_continuation` — a pure STYLE lint. The code-agent cannot edit tests;
 # `src/**` is clean.
 doc_lazy_continuation = "allow"
+# `tests/codex_appserver_smoke.rs` carries the same frozen, over-indented list
+# prose style and trips clippy's sibling formatting lint
+# `doc_overindented_list_items`. Keep this crate-level allow scoped to frozen
+# tests; `src/**` remains clean under `-D warnings`.
+doc_overindented_list_items = "allow"
 # `tests/hostile_inputs.rs:93` writes `|e| pred(e)` (a redundant closure over a
 # `&dyn Fn`) — a test-agent style choice the code-agent cannot change; `src/**`
 # has no redundant closures.
