@@ -310,25 +310,32 @@ specifically (which might cause a real side effect), a durable "this command was
 record is written to the audit log *before* it's injected — so after a crash, Wasl can tell that
 a command *might* have run and refuse to blindly re-run it.
 
-### 5.3 What a "driver" is, and the three that exist
+### 5.3 What a "driver" is, and the four that exist
 
 The actor is **generic** — it knows nothing about any specific assistant CLI. It only speaks in
 normalized, abstract events ("a turn was accepted," "here's an output chunk," "the turn
 completed"). But real CLIs each have their own wire format: Claude speaks one JSON dialect,
-opencode speaks another.
+opencode and codex each speak their own flavor of JSON-RPC.
 
 A **driver** is the translator: the code that knows how to actually talk to *one specific real
 CLI's* input and output format, and maps that CLI's native wire onto the abstract events the
 actor understands. The driver is the *only* place CLI-specific knowledge is allowed to live.
 
-Three drivers exist:
+Four drivers exist:
 
 1. **The Claude driver** (`ClaudeStreamProtocol`) — drives the real `claude` CLI over its
    streaming-JSON interface.
 2. **The opencode driver** (`OpenCodeAcpProtocol`) — drives the real `opencode` CLI over its
    ACP (a JSON-RPC) interface. (This one is the "primary" real driver because it genuinely
    streams partial output; Claude's interface only sends whole blocks.)
-3. **A fake/test-only driver** (`FakeLineProtocol`) — *not* a real CLI. It's an in-repo fake
+3. **The codex driver** (`CodexAppServerProtocol`) — drives the real `codex` CLI over its
+   `app-server` JSON-RPC interface (the same *family* of wire protocol as opencode's ACP —
+   request/response envelopes plus async notifications over a persistent stdio pipe — but a
+   different vendor's CLI with its own message shapes). It is also, so far, the only driver
+   proven to resume a session **across a process boundary**: a thread started by one OS process
+   can be handed to a brand-new, separate process (after the original has fully exited) and the
+   new process still remembers everything from before.
+4. **A fake/test-only driver** (`FakeLineProtocol`) — *not* a real CLI. It's an in-repo fake
    "assistant" that speaks a trivial line-based protocol, used to test the entire generic
    machinery deterministically (no real AI, no network flakiness, no cost). It can be told to
    remember facts across turns, to hold a turn open, to crash mid-turn, to raise a permission
@@ -337,10 +344,15 @@ Three drivers exist:
 **Why genericity was a deliberate goal:** the point of the abstract-event design is that *the
 same actor core works for every driver, unchanged.* Adding a new CLI should mean writing a new
 driver (a translator) and nothing else — the queueing, journaling, single-writer safety, cancel
-logic, etc. never need to change per CLI. The project even tested this on purpose by building two
+logic, etc. never need to change per CLI. The project tested this on purpose by building two
 *structurally different* real drivers (Claude's streaming-JSON vs opencode's JSON-RPC): if the
 abstraction had leaked, the second driver would have forced changes to the "generic" core. It
-didn't — which is the evidence the abstraction is real, not just Claude concepts renamed.
+didn't — which is the evidence the abstraction is real, not just Claude concepts renamed. The
+codex driver added a third real CLI without touching the generic core either (no new abstract
+event was needed even for codex's own quirks, like its all-statuses-in-one-notification turn
+boundary) — but it's honest to note codex and opencode share the SAME wire-protocol *family*
+(JSON-RPC-over-stdio), so codex is evidence genericity holds across different *vendors*, not proof
+of a third fundamentally different wire *shape* the way opencode was relative to Claude.
 
 To let a human actually use a live session standalone, there's also a small command-line tool
 (`wasl session ...`) with commands like `start`, `list`, `attach` (watch a session), `send`
