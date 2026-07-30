@@ -9,9 +9,6 @@
 //! remembers which protocol a key resolved to (in `routed`) so that a
 //! subsequent context-less `target_for` for the same key re-uses the same
 //! sub-provider.
-//!
-//! All method bodies are `todo!()` — this is the Phase-0 scaffold; Phase-2
-//! will fill the real routing logic.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
@@ -39,7 +36,11 @@ impl ProtocolRoutingProvider {
         providers: BTreeMap<String, std::sync::Arc<dyn crate::RuntimeProvider>>,
         default_protocol: String,
     ) -> Self {
-        todo!("store fields into ProtocolRoutingProvider {{ providers, default_protocol, routed: Mutex::new(HashMap::new()) }}")
+        ProtocolRoutingProvider {
+            providers,
+            default_protocol,
+            routed: Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -49,11 +50,31 @@ impl crate::RuntimeProvider for ProtocolRoutingProvider {
         &self,
         key: &crate::TargetKey,
     ) -> Result<std::sync::Arc<dyn crate::DeliveryTarget>, crate::RuntimeError> {
-        todo!("look up routed[key] or default_protocol; delegate to matching sub-provider")
+        // Look up the protocol recorded at first creation for this key, or fall
+        // back to the default protocol.
+        let proto = {
+            let routed = self.routed.lock().unwrap();
+            routed
+                .get(key)
+                .cloned()
+                .unwrap_or_else(|| self.default_protocol.clone())
+        };
+        // Delegate to the sub-provider (lock is released before the await).
+        let sub = self.providers.get(&proto).ok_or_else(|| {
+            crate::RuntimeError::AdmissionRefused {
+                detail: format!("no sub-provider registered for protocol '{proto}'"),
+            }
+        })?;
+        sub.target_for(key).await
     }
 
     async fn list_targets(&self) -> Vec<crate::TargetId> {
-        todo!("union of all sub-provider list_targets() results")
+        // Union of all sub-providers' list_targets().
+        let mut all = Vec::new();
+        for sub in self.providers.values() {
+            all.extend(sub.list_targets().await);
+        }
+        all
     }
 
     async fn target_for_with_context(
@@ -61,10 +82,29 @@ impl crate::RuntimeProvider for ProtocolRoutingProvider {
         key: &crate::TargetKey,
         context: crate::SpawnContext,
     ) -> Result<std::sync::Arc<dyn crate::DeliveryTarget>, crate::RuntimeError> {
-        todo!(
-            "pick protocol from context.protocol.clone().unwrap_or(default_protocol.clone()); \
-             record routed[key] = chosen_protocol; \
-             delegate to providers[chosen_protocol].target_for_with_context(key, context)"
-        )
+        // Pick the protocol: explicit from context, or fall back to the default.
+        let proto = context
+            .protocol
+            .clone()
+            .unwrap_or_else(|| self.default_protocol.clone());
+
+        // Look up the sub-provider before recording or awaiting anything.
+        let sub = self.providers.get(&proto).ok_or_else(|| {
+            crate::RuntimeError::AdmissionRefused {
+                detail: format!("no sub-provider registered for protocol '{proto}'"),
+            }
+        })?;
+        let sub = sub.clone();
+
+        // Record the chosen protocol for this key (so a later context-free
+        // target_for routes to the same sub-provider). Do this before the
+        // await so the mapping is visible even if the delegate fails.
+        {
+            let mut routed = self.routed.lock().unwrap();
+            routed.entry(key.clone()).or_insert_with(|| proto.clone());
+        }
+
+        // Delegate to the sub-provider (mutex is fully released above).
+        sub.target_for_with_context(key, context).await
     }
 }
