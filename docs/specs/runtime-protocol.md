@@ -12,13 +12,19 @@ generic `ProtocolEvent`. **It depends on R1 and never the reverse** (the plan's 
 internal `ProtocolEvent` enum live in R1; only concrete drivers live here). The generic scheduler/actor in R1
 consumes `ProtocolEvent` and knows none of the below.
 
-Three drivers:
+Four drivers:
 
 1. **`FakeLineProtocol`** — the long-lived in-repo fake structured agent + its line-oriented JSON protocol.
    The deterministic substrate the R1 core's process/framing plumbing (impl-plan Phase 2B) is proven against.
 2. **`ClaudeStreamProtocol`** — maps claude `stream-json` duplex → `ProtocolEvent` (impl-plan Phase 4).
 3. **`OpenCodeAcpProtocol`** (primary) / `OpenCodeServeProtocol` (secondary) — maps opencode ACP JSON-RPC (and
    the `serve` HTTP path) → `ProtocolEvent` (impl-plan Phase 5).
+4. **`CodexAppServerProtocol`** — maps codex `app-server --stdio` JSON-RPC → `ProtocolEvent` (Phase-0
+   follow-up capture + Phase-6 impl). This is the Phase-0 follow-up the original Phase-0′ spike explicitly
+   deferred (§"codex / antigravity" below, historical) — `codex exec`/`exec resume` is genuinely per-turn (that
+   finding stands unchanged), but `app-server --stdio` is a SEPARATE, persistent JSON-RPC-over-stdio substrate
+   Phase-0′ never investigated. It was captured and VERIFIED in the follow-up capture (CONTRACT STATUS below)
+   and is a real R2 managed driver, not out of scope.
 
 ---
 
@@ -41,7 +47,10 @@ every `tool_use`/`tool_result` (claude) and `ToolStarted`/`ToolFinished`/`Native
 
 Artifacts referenced: `out/capability-matrix.md`, `out/claude/{events.jsonl,argv.txt,verdict.json}`,
 `out/opencode/serve/{turn_*_message.txt,discover_*.txt,verdict-serve.json}`, `out/opencode/acp/{messages.jsonl,
-verdict-acp.json}`, `out/codex/{summary.txt,help.txt}`.
+verdict-acp.json}`, `out/codex/{summary.txt,help.txt}` (Phase-0′, `exec`), `out/codex_appserver/{verdict.json,
+events.jsonl,codex_toolcall_capture.jsonl}` + `out/codex_appserver_resume{,_B}/` (the Phase-0-follow-up
+capture, `app-server --stdio`; scripts: `spikes/live-substrate/codex_appserver_probe.py` +
+`codex_appserver_resume_probe.py`).
 
 ### claude `stream-json` duplex
 
@@ -83,23 +92,53 @@ verdict-acp.json}`, `out/codex/{summary.txt,help.txt}`.
 | ACP tool-activity + permission/native-gate `session/update` shapes (→ `ToolStarted`/`ToolFinished`/`NativeGateRequested`) | 🅰 **ASSUMED** — **NOT captured**: `out/opencode/acp/messages.jsonl` carries only `available_commands_update`/`agent_message_chunk`/`usage_update` `session/update`s — no tool call, no `request_permission`/gate notification. Needs a follow-up capture that exercises a tool/gate |
 | Interruptibility (ACP `session/cancel` or equivalent) | ⛔ **UNKNOWN** — not exercised in Phase-0′; `interruptible: false` until a follow-up capture |
 
-### codex / antigravity — out of scope for R2 managed drivers
+### codex `app-server` (JSON-RPC / stdio) — the Phase-0-follow-up substrate (now a real R2 driver)
+
+`codex exec`/`exec resume` (the interface Phase-0′ actually probed) genuinely IS per-turn — that original
+finding is unchanged and still correctly describes `exec`. It is a DIFFERENT subcommand from the one below;
+`EphemeralRuntimeProvider` still uses `exec` for the headless/adapter path (`wasl-adapter-codex`) and that is
+unaffected by anything here. `codex app-server --stdio` is the follow-up capture Phase-0′ explicitly deferred
+(the row this table used to carry read "⛔ UNKNOWN — out of scope (Phase-0 follow-up, not 0′)") — it was
+subsequently probed, and IS a persistent, multi-turn, JSON-RPC-over-stdio substrate, structurally the same
+family as opencode's `acp` (request/response envelope + async notifications), not claude's raw stream-json
+(which has no envelope at all). `codex exec-server` (a remote/websocket cloud-registration mode) and
+`codex mcp-server` (codex acting as an MCP tool PROVIDER, the wrong direction for a managed driver) were also
+checked and are correctly NOT used — `app-server --stdio` is the only one of the three that fits.
 
 | Claim | Status |
 |---|---|
-| codex `exec`/`exec resume` is **per-turn** (`persistent_process` unsupported via the documented interface); `persistent_conversation` true | ✅ VERIFIED — `out/capability-matrix.md` codex row = `unsupported-by-documented-interface`; `out/codex/summary.txt` ("exec is PER-TURN … persistent_process via the contracted exec interface: FALSE; persistent_conversation (resume-based): TRUE"); stays under `EphemeralRuntimeProvider` |
-| codex experimental `app-server`/`exec-server`/`mcp-server` modes | ⛔ UNKNOWN — out of scope (Phase-0 follow-up, not 0′; `out/codex/summary.txt`); no R2 driver |
-| antigravity (`agy`) | 🅰 ASSUMED per-turn like codex; **`not-installed`** on the spike host (`out/capability-matrix.md` antigravity row); no R2 driver |
+| `codex exec`/`exec resume` is **per-turn** (`persistent_process` unsupported via the documented `exec` interface); `persistent_conversation` true | ✅ VERIFIED (Phase-0′, unchanged) — `out/capability-matrix.md` codex row = `unsupported-by-documented-interface`; `out/codex/summary.txt`; `EphemeralRuntimeProvider`/`wasl-adapter-codex` still use `exec`, untouched by the driver below |
+| `codex app-server --stdio` IS a persistent, same-process, multi-turn JSON-RPC-over-stdio substrate | ✅ VERIFIED — `spikes/live-substrate/codex_appserver_probe.py`; `out/codex_appserver/verdict.json` (`P_persistent_process`/`C_context_retained`/`B_turn_boundary` all `verified-true`; same pid served 2 turns, turn 2 recalled turn 1's planted token) |
+| Handshake: `initialize` (id=1, `capabilities.experimentalApi:true`) → `thread/start {cwd}` (id=2) → `result.thread.id` (a UUIDv7); a `thread/started` NOTIFICATION can arrive BEFORE its matching response (same ordering hazard opencode acp has) | ✅ VERIFIED (live capture) + ✅ VERIFIED (authoritative schema, `codex app-server generate-json-schema`, `ThreadStartParams`/`ThreadStartResponse`/`Thread.id`) |
+| `thread/resume {threadId, cwd}` → same response shape as `thread/start` (`result.thread.id`); a thread whose ORIGINAL process has fully exited can be resumed by a genuinely FRESH, separate process and still recalls pre-exit context | ✅ VERIFIED — schema (`ThreadResumeParams`/`ThreadResumeResponse`, identical `required: [... "thread" ...]` shape to `ThreadStartResponse`) AND live cross-process capture (`spikes/live-substrate/codex_appserver_resume_probe.py`: process A plants a token and is SIGKILL'd/reaped, a SEPARATE process B resumes the same thread id and recalls the token — `R1_resume_succeeds=true`, `R2_context_retained=true`) AND a permanent regression test (`crates/wasl-runtime-protocol/tests/codex_appserver_resume_live.rs`, passing against the real CLI) |
+| `turn/start {threadId, input:[{type:"text",text}]}` acks `status:"inProgress"` immediately; streaming via `item/agentMessage/delta`; terminal via ONE `turn/completed` notification whose `params.turn.status` carries `completed\|interrupted\|failed\|inProgress` — there is NO separate `turn/failed` METHOD (all terminal outcomes ride the same notification) | ✅ VERIFIED (live capture, `completed` status only) + ✅ VERIFIED-BY-SCHEMA that `completed`/`failed`/`interrupted` are all embedded `status` values under the single `turn/completed` method, not sibling methods. 🅰 **ASSUMED**: only the `completed` status was actually exercised live; `failed`/`interrupted` are schema-derived, not yet captured |
+| Tool calls: `item/started`/`item/completed` with `item.type=="commandExecution"` (id+command on start, no command re-echoed on completion — needs an id→command tracker) | ✅ VERIFIED — `out/codex_appserver/codex_toolcall_capture.jsonl` (a real `ls -a` shell tool call, 156 wire lines, `tool_seen=true`, `turn_completed=true`) |
+| Server-initiated approval-flow REQUESTS (`execCommandApproval`, `applyPatchApproval`, `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`, `item/tool/requestUserInput`, `mcpServer/elicitation/request`) — methods the SERVER can send carrying an `id`, requiring a response before codex proceeds | ⛔ **UNKNOWN / DORMANT, not proven unreachable** — confirmed to exist in the authoritative schema (`ServerRequest.json`) but NEVER observed on the wire in any capture (including the real shell-tool-call capture above) under the default `approvalPolicy` this crate has actually exercised (neither `thread/start` nor `thread/resume` sets `approvalPolicy`/`sandbox`). `CodexAppServerProtocol` does NOT currently answer these — if one ever arrives, codex is left blocked waiting for a response that never comes (a SILENT hang bounded only by the hang watchdog). Documented in `codex_appserver.rs` directly above `supervise`; the correct response (auto-approve/auto-deny/a new gated `ProtocolEvent`) is a product/security decision, deliberately not picked unilaterally by this driver — **flagged, not fixed** |
+| `turn/interrupt {threadId, turnId}` | ✅ VERIFIED-BY-SCHEMA (exists, correct params shape) but ⛔ **UNKNOWN** — never exercised live; `interruptible: false` (consistent with `ClaudeStreamProtocol`/`OpenCodeAcpProtocol`, both also `false` — not rounded up) |
+| `codex exec-server` (remote/websocket cloud-registration mode) | checked and correctly NOT USED — a different substrate entirely (remote host registration, not a local stdio driver) |
+| `codex mcp-server` (codex as an MCP tool PROVIDER) | checked and correctly NOT USED — the wrong direction for a managed driver (we need codex as the AGENT, not as a tool codex exposes to some other caller) |
+
+### antigravity — out of scope
+
+| Claim | Status |
+|---|---|
+| antigravity (`agy`) | 🅰 ASSUMED per-turn like codex `exec`; **`not-installed`** on the spike host (`out/capability-matrix.md` antigravity row); no R2 driver |
 
 **GATE PASSED** is real: `out/capability-matrix.md` records claude=`verified-true`, opencode=`verified-true`
-(serve + acp), codex=`unsupported-by-documented-interface`, antigravity=`not-installed` — ≥1 CLI proven
-same-process multi-turn, so the go/no-go the whole core rests on is satisfied.
+(serve + acp), codex `exec`=`unsupported-by-documented-interface` (superseded for managed-driver purposes by
+`app-server`'s own `verified-true` above), antigravity=`not-installed` — ≥1 CLI proven same-process multi-turn,
+so the go/no-go the whole core rests on is satisfied (and is now satisfied twice over, independently, by
+codex `app-server` too).
 
 **No `candidate` cells.** The two UNKNOWN facts (interruptibility, streaming granularity) AND the ASSUMED
 tool/permission/native-gate wire shapes (claude `tool_use`/`tool_result`; opencode acp/serve `Tool*` +
-permission/gate) are carried forward from R1 and MUST be resolved by a Phase-1-follow-up capture before Phase
-4/5 commits `interruptible`/`streaming_output` true, or commits a `Tool*`/`NativeGateRequested` mapping around
-a specific captured shape, for the affected driver.
+permission/gate) are carried forward from R1 and MUST be resolved by a follow-up capture before a driver
+commits `interruptible`/`streaming_output` true, or commits a `Tool*`/`NativeGateRequested` mapping around a
+specific captured shape, for the affected driver. Codex's own analogous residuals — `failed`/`interrupted`
+turn statuses (schema-derived, not live-captured), `interruptible` (schema-real `turn/interrupt`, never
+exercised), and the approval-request methods (schema-real, never observed under this crate's exercised
+config) — are the SAME class of gap, tracked in the codex CONTRACT STATUS table above rather than repeated
+here.
 
 ---
 
@@ -277,26 +316,83 @@ pub struct OpenCodeServeProtocol { /* private: bin, model, isolated env, base_ur
 
 ---
 
-## 4. Common driver requirements
+## 4. `CodexAppServerProtocol` — codex `app-server --stdio` JSON-RPC → `ProtocolEvent` (Phase-0-follow-up + Phase-6)
 
-- **spawn/resume:** every driver implements both; `resume` is meaningful only where `resumable`; resume scope
-  is within one node-process lifetime (R1 §State durability).
-- **turn-boundary detection:** the driver, not the actor, knows the native boundary (claude `type=="result"`;
-  acp JSON-RPC `result` w/ `stopReason`; serve `info.finish=="stop"`/`step-finish`; fake `{"ev":"done"}`).
-- **native-session-id handling:** each driver reports its `NativeSessionId`; the normalizer accepts both
-  `sessionId` and `sessionID` casings (VERIFIED divergence) plus claude's client-supplied UUID.
-- **honest UNKNOWN cells:** every driver's `interruptible` and (claude/serve) `streaming_output` are `false`
-  and carry the UNKNOWN annotation; a change requires a cited Phase-1-follow-up capture.
-- **honest ASSUMED tool/gate shapes:** the `tool_use`/`tool_result` (claude) and tool-activity + permission/
-  native-gate `session/update` shapes (opencode acp/serve) that drive `ToolStarted`/`ToolFinished`/
-  `NativeGateRequested` were **NOT exercised** by the token-only spike prompts (no tool ran, no gate tripped).
-  Those mapping rows are ASSUMED (documented form only) and a driver MUST NOT freeze a byte-exact fixture
-  around them until a **follow-up capture that exercises a tool/gate** confirms the real shape — the
-  `AwaitingGate` receive-side story (R1 §7.4/§9) depends on that gate shape the spike never captured.
+```rust
+pub struct CodexAppServerProtocol { /* private: bin, timeouts */ }
+impl wasl_runtime::InteractiveProtocol for CodexAppServerProtocol { /* spawn/resume/capabilities */ }
+```
+
+- **capabilities:** `persistent_process: true`, `persistent_conversation: true`, `structured_turns: true`,
+  `streaming_output: true` (VERIFIED — real `item/agentMessage/delta` deltas), `attachable: true`,
+  `structured_provenance: true`, `resumable: true` (VERIFIED, see below — AHEAD of `OpenCodeAcpProtocol`'s own
+  resume gap, which remains ASSUMED), **`interruptible: false`** (⛔ UNKNOWN — `turn/interrupt` is
+  schema-real, never exercised live; consistent with the other two real-CLI drivers, not rounded up).
+- **spawn:** `codex app-server --stdio`, persistent stdin, never EOF between turns (VERIFIED). Handshake:
+  `initialize` (id=1) → `thread/start {cwd}` (id=2) → native id from `result.thread.id` (a UUIDv7). A
+  `thread/started` NOTIFICATION can arrive before its matching response — handled by the same
+  Notification/ExpectedResponse/Anomaly handshake-line classifier opencode's driver uses (the two share one
+  implementation, `json_rpc_handshake::classify_handshake_line`, since the logic is byte-for-byte identical).
+- **resume:** `thread/resume {threadId: <native>, cwd}` (id=2), same response shape as `thread/start`. VERIFIED
+  end-to-end cross-process: a thread whose original process has fully exited (SIGKILL'd, reaped) is resumed by
+  a genuinely FRESH, separate process and recalls pre-exit conversational context — proven by a standalone
+  probe AND a permanent regression test (`tests/codex_appserver_resume_live.rs`, passing against the real CLI).
+- **`send_turn`:** `turn/start {threadId, input:[{type:"text",text:"<ComposedPrompt>"}]}`, one request per
+  turn, incrementing request ids starting after the handshake's id=1/id=2.
+
+### 4.1 Mapping (byte-exact fixtures in `tests/`; live shapes cross-checked against the authoritative schema)
+
+| codex app-server wire | → `ProtocolEvent` |
+|---|---|
+| `thread/started` notification OR the `thread/start`/`thread/resume` RESPONSE, `result.thread.id` | `SessionReady{native: Some(thread.id)}` |
+| `item/agentMessage/delta` notification, `params.delta` | `AssistantDelta{text}` (REAL delta) |
+| `item/started`/`item/completed`, `item.type=="commandExecution"` | `ToolStarted{name: command}` / `ToolFinished{name, ok: exitCode==0}` — id-correlated across the pair (`CodexToolTracker`), cleared on the `turn/completed` turn boundary so an interrupted tool call cannot leak its id past the turn (the same fix already required for `ClaudeToolTracker`) |
+| `turn/completed` notification, `params.turn.status=="completed"` | `TurnCompleted{reply}` (reply = the final `agentMessage` item's text; turn boundary) |
+| `turn/completed` notification, `params.turn.status=="failed"` | `TurnFailed{error}` (from `turn.error.message`) — 🅰 ASSUMED shape (schema-derived; only `completed` was captured live, not `failed`) |
+| `turn/completed` notification, `params.turn.status=="interrupted"` | 🅰 ASSUMED/UNMAPPED — not yet exercised live or explicitly mapped; falls through the pure mapper's default arm today |
+| any `execCommandApproval`/`applyPatchApproval`/`item/*/requestApproval`/`item/tool/requestUserInput`/`mcpServer/elicitation/request` REQUEST (has both `method` and `id`) | ⛔ **UNHANDLED** — no `ProtocolEvent` mapping exists; silently dropped (see the CONTRACT STATUS row above and the doc comment above `supervise` in `codex_appserver.rs`) |
+| process exit | `ProcessExited{code}` |
+
+`native_turn` for `TurnAccepted` is left `None` (codex has no separate accept event distinct from
+`turn/start`'s immediate `status:"inProgress"` ack; the actor emits its own public `TurnAccepted` at
+admission), mirroring `ClaudeStreamProtocol`'s convention.
+
+### 4.2 Shared plumbing (extracted once byte-for-byte duplication was independently verified across all four drivers)
+
+`BoundedLineRead`/`read_bounded_line`/`discard_one_bounded_line`/`discard_until_newline` and the resource-bound
+constants (`bounded_io.rs`), `next_wait`/`best_effort_signal`/`escalate`/`wait_for_exit` (`process_supervision.rs`),
+and the JSON-RPC handshake classifier (`json_rpc_handshake.rs`, shared by `OpenCodeAcpProtocol` and
+`CodexAppServerProtocol`) are single-implementation, crate-shared modules — not per-driver copies. This is an
+implementation detail, not a wire-shape claim; it does not change any `Claim`/`Status` row above.
 
 ---
 
-## 5. Testability honesty + coverage bar
+## 5. Common driver requirements
+
+- **spawn/resume:** every driver implements both; `resume` is meaningful only where `resumable`; resume scope
+  is within one node-process lifetime (R1 §State durability) for claude/opencode, but is VERIFIED
+  cross-process for codex (a fresh, separate OS process can resume a thread whose original process has fully
+  exited — the only driver this has been proven for so far).
+- **turn-boundary detection:** the driver, not the actor, knows the native boundary (claude `type=="result"`;
+  acp JSON-RPC `result` w/ `stopReason`; serve `info.finish=="stop"`/`step-finish`; codex `turn/completed`
+  notification w/ `status`; fake `{"ev":"done"}`).
+- **native-session-id handling:** each driver reports its `NativeSessionId`; the normalizer accepts
+  `sessionId` and `sessionID` casings (VERIFIED divergence, opencode acp vs serve) plus claude's
+  client-supplied UUID plus codex's server-assigned `thread.id` (a UUIDv7) — a THIRD distinct shape/casing.
+- **honest UNKNOWN cells:** every driver's `interruptible` is `false` and (claude/serve) `streaming_output` is
+  `false`, each carrying the UNKNOWN annotation; a change requires a cited follow-up capture.
+- **honest ASSUMED tool/gate shapes:** the `tool_use`/`tool_result` (claude), tool-activity + permission/
+  native-gate `session/update` shapes (opencode acp/serve), and codex's `failed`/`interrupted` turn statuses +
+  approval-request methods that drive `ToolStarted`/`ToolFinished`/`NativeGateRequested`/`TurnFailed` were
+  **NOT exercised** by the respective token-only/tool-only spike prompts actually run (no gate tripped for
+  any driver; codex's own tool row IS captured, but its approval-flow and non-`completed` turn statuses are
+  not). Those mapping rows are ASSUMED (documented form only) and a driver MUST NOT freeze a byte-exact
+  fixture around them until a **follow-up capture** confirms the real shape — the `AwaitingGate` receive-side
+  story (R1 §7.4/§9) depends on gate shapes none of the three real-CLI drivers have captured yet.
+
+---
+
+## 6. Testability honesty + coverage bar
 
 **Deterministic (no CLI, no LLM):** the fake-agent + `FakeLineProtocol` line framing (incl. ALL §1.3 hostile
 scripts) and each real driver's **mapping** (native wire → `ProtocolEvent`) via byte-exact fixtures — for the
