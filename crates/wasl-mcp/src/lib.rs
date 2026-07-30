@@ -18,8 +18,11 @@ pub mod handle;
 pub mod server;
 
 // Needed for the managed-runtime / runtime-control wiring in `run()`.
-use std::sync::Arc;
-use wasl_runtime::RuntimeProvider;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use wasl_runtime::{ManagedConfig, MonotonicClock, ProtocolRoutingProvider, RuntimeProvider,
+    WaslManagedRuntimeProvider};
+use wasl_runtime_protocol::{ClaudeStreamProtocol, OpenCodeAcpProtocol};
 
 use wasl_audit::{AuditEntry, AuditError, AuditLog, Sink};
 use wasl_filesink::FileSink;
@@ -100,19 +103,60 @@ impl Sink for RunSink {
 // ---------------------------------------------------------------------
 
 /// Construct a per-protocol [`WaslManagedRuntimeProvider`] for each of the
-/// configured protocols (claude, opencode-acp) and wrap them in a
+/// configured protocols (`"claude"`, `"opencode-acp"`) and wrap them in a
 /// [`ProtocolRoutingProvider`] so one Wasl node can serve both protocols.
 ///
-/// **Body is `todo!()` — Phase-0 scaffold.** Phase-2 will fill the real
-/// construction logic (per-protocol `WaslManagedRuntimeProvider` instances
-/// wired to `ClaudeStreamProtocol`/`OpenCodeAcpProtocol`, wrapped in
-/// `ProtocolRoutingProvider`).
+/// The clock is [`MonotonicClock`] (the same default the node uses throughout).
+/// The audit sink is a fresh [`MemSink`] — a non-durable in-memory sink, which
+/// is correct here: the managed provider's actor uses the sink only for
+/// runtime-layer audit entries; the durable per-session audit trail is
+/// separately written by the MCP handler via the `AuditLog`/`FileSink` already
+/// built in [`build_handler`]. A shared durable sink could be wired in a
+/// future phase; for now the default matches the crate's existing pattern.
 fn build_managed_provider(cfg: &Config) -> Arc<dyn RuntimeProvider> {
-    todo!(
-        "construct WaslManagedRuntimeProvider<ClaudeStreamProtocol> from cfg.runtime.claude_bin, \
-         WaslManagedRuntimeProvider<OpenCodeAcpProtocol> from cfg.runtime.opencode_bin, \
-         wrap both in ProtocolRoutingProvider {{ default_protocol: cfg.runtime.default_protocol }}"
-    )
+    let clock: Arc<dyn wasl_runtime::RuntimeClock> = Arc::new(MonotonicClock);
+    // Each sub-provider gets its own sink handle (the actor's sole writer).
+    let claude_bin = cfg
+        .runtime
+        .claude_bin
+        .clone()
+        .unwrap_or_else(|| "claude".to_string());
+    let opencode_bin = cfg
+        .runtime
+        .opencode_bin
+        .clone()
+        .unwrap_or_else(|| "opencode".to_string());
+
+    let claude_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> =
+        Arc::new(Mutex::new(MemSink::new()));
+    let opencode_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> =
+        Arc::new(Mutex::new(MemSink::new()));
+
+    let claude_provider: Arc<dyn RuntimeProvider> = Arc::new(
+        WaslManagedRuntimeProvider::with_seams(
+            ClaudeStreamProtocol::new(claude_bin),
+            ManagedConfig::default(),
+            clock.clone(),
+            claude_sink,
+        ),
+    );
+    let opencode_provider: Arc<dyn RuntimeProvider> = Arc::new(
+        WaslManagedRuntimeProvider::with_seams(
+            OpenCodeAcpProtocol::new(opencode_bin),
+            ManagedConfig::default(),
+            clock,
+            opencode_sink,
+        ),
+    );
+
+    let mut providers = BTreeMap::new();
+    providers.insert("claude".to_string(), claude_provider);
+    providers.insert("opencode-acp".to_string(), opencode_provider);
+
+    Arc::new(ProtocolRoutingProvider::new(
+        providers,
+        cfg.runtime.default_protocol.clone(),
+    ))
 }
 
 // ---------------------------------------------------------------------

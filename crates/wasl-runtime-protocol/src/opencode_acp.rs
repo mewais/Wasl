@@ -208,15 +208,22 @@ fn next_wait(
 /// The body is `todo!()` — Phase-0 scaffold; Phase-2 fills the real JSON
 /// construction logic (currently inlined in `perform_handshake`).
 pub fn opencode_session_params(
-    _session_method: &str,
-    _requested_session_id: Option<&str>,
-    _cwd: &str,
+    session_method: &str,
+    requested_session_id: Option<&str>,
+    cwd: &str,
 ) -> serde_json::Value {
-    todo!(
-        "build serde_json::json!({{ \"cwd\": cwd, \"mcpServers\": [] }}) \
-         or {{ \"sessionId\": requested_session_id, \"cwd\": cwd, \"mcpServers\": [] }} \
-         depending on session_method"
-    )
+    if session_method == "session/load" {
+        serde_json::json!({
+            "sessionId": requested_session_id.unwrap_or_default(),
+            "cwd": cwd,
+            "mcpServers": []
+        })
+    } else {
+        serde_json::json!({
+            "cwd": cwd,
+            "mcpServers": []
+        })
+    }
 }
 
 pub struct OpenCodeAcpProtocol {

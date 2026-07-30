@@ -179,12 +179,16 @@ pub enum ConfigError {
     },
     /// Two `[[peers]]` entries share an agent_id.
     DuplicatePeer(String),
-    /// `a2a.bind` / `operator.bind` does not parse as a socket address.
+    /// `a2a.bind` / `operator.bind` / `runtime.control_bind` does not parse as
+    /// a socket address.
     InvalidBind {
         section: String,
         value: String,
         detail: String,
     },
+    /// `runtime.default_protocol` is not one of the known protocol names
+    /// (`"claude"`, `"opencode-acp"`).
+    UnknownProtocol(String),
 }
 
 impl fmt::Display for ConfigError {
@@ -206,6 +210,9 @@ impl fmt::Display for ConfigError {
                 value,
                 detail,
             } => write!(f, "invalid {section}.bind {value:?}: {detail}"),
+            ConfigError::UnknownProtocol(proto) => {
+                write!(f, "unknown runtime.default_protocol: {proto}")
+            }
         }
     }
 }
@@ -386,10 +393,17 @@ impl Config {
             other => return Err(ConfigError::UnknownAdapterKind(other.to_string())),
         };
 
+        let runtime_control_bind = validate_bind("runtime", raw.runtime.control_bind)?;
+
         let runtime_kind = match raw.runtime.kind.as_str() {
             "ephemeral" => RuntimeKind::Ephemeral,
             "managed" => RuntimeKind::Managed,
             other => return Err(ConfigError::UnknownRuntimeKind(other.to_string())),
+        };
+
+        match raw.runtime.default_protocol.as_str() {
+            "claude" | "opencode-acp" => {}
+            other => return Err(ConfigError::UnknownProtocol(other.to_string())),
         };
 
         let authority = match raw.gate.authority.as_str() {
@@ -440,7 +454,7 @@ impl Config {
             },
             runtime: RuntimeConfig {
                 kind: runtime_kind,
-                control_bind: raw.runtime.control_bind,
+                control_bind: runtime_control_bind,
                 default_protocol: raw.runtime.default_protocol,
                 claude_bin: raw.runtime.claude_bin,
                 opencode_bin: raw.runtime.opencode_bin,

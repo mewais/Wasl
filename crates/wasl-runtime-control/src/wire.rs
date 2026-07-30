@@ -33,13 +33,17 @@ pub struct TargetsSnapshotResponse {
     pub targets: Vec<TargetSnapshot>,
 }
 
+fn spawn_context_is_default(c: &wasl_runtime::SpawnContext) -> bool {
+    *c == wasl_runtime::SpawnContext::default()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct CreateTargetRequest {
     pub key: TargetKey,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protocol: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "spawn_context_is_default")]
     pub context: wasl_runtime::SpawnContext,
 }
 

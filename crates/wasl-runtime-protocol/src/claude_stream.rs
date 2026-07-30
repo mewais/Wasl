@@ -194,14 +194,42 @@ fn next_wait(
 pub fn claude_argv(
     bin: &str,
     session_id: &str,
-    _resume: bool,
-    _context: &SpawnContext,
+    resume: bool,
+    context: &SpawnContext,
 ) -> Vec<String> {
-    todo!(
-        "assemble: [bin, -p, --input-format, stream-json, --output-format, stream-json, \
-         --verbose, --session-id, session_id] \
-         plus optional --model / --permission-mode / --disallowed-tools from context"
-    )
+    let mut argv: Vec<String> = vec![
+        bin.to_string(),
+        "-p".to_string(),
+        "--input-format".to_string(),
+        "stream-json".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+    ];
+
+    if resume {
+        argv.push("--resume".to_string());
+    } else {
+        argv.push("--session-id".to_string());
+    }
+    argv.push(session_id.to_string());
+
+    if let Some(model) = &context.model {
+        argv.push("--model".to_string());
+        argv.push(model.clone());
+    }
+
+    if let Some(posture) = &context.posture {
+        argv.push("--permission-mode".to_string());
+        argv.push(posture.clone());
+    }
+
+    if !context.disallowed_tools.is_empty() {
+        argv.push("--disallowedTools".to_string());
+        argv.push(context.disallowed_tools.join(","));
+    }
+
+    argv
 }
 
 pub struct ClaudeStreamProtocol {
