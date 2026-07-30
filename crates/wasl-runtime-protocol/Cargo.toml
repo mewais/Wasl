@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Wasl runtime protocol (R2): concrete interactive drivers over the R1 driver seam (Phase-2B: the long-lived fake structured agent + FakeLineProtocol)"
+description = "Wasl runtime protocol (R2): concrete interactive drivers (fake/claude/opencode/codex) over the R1 driver seam"
 
 # The long-lived in-repo fake structured agent (runtime-protocol.md §1.1). A
 # `[[bin]]` declared IN THIS crate makes Cargo define `CARGO_BIN_EXE_wasl-fake-agent`

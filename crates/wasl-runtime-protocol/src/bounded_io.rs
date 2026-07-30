@@ -28,12 +28,27 @@ pub(crate) async fn discard_until_newline<R: AsyncBufRead + Unpin>(
     }
 }
 
-/// Consume and discard exactly one line (bounded the same way as
-/// [`read_bounded_line`]) WITHOUT ever allocating its content into a `String`.
-/// Used for drains whose content is thrown away regardless (stderr, §4.4) —
-/// building a `String` per line there is pure overhead for content nobody
-/// reads. Returns `Ok(true)` if a line (or an EOF-terminated partial line) was
-/// consumed, `Ok(false)` on a clean EOF with nothing pending.
+/// Consume and discard exactly one line WITHOUT ever allocating its content
+/// into a `String`. Used for drains whose content is thrown away regardless
+/// (stderr, §4.4) — building a `String` per line there is pure overhead for
+/// content nobody reads. Returns `Ok(true)` if a line (or an EOF-terminated
+/// partial line) was consumed, `Ok(false)` on a clean EOF with nothing
+/// pending.
+///
+/// Found by holistic code review: `max_bytes` here is NOT the same guarantee
+/// [`read_bounded_line`] gives. This function never flags/rejects an
+/// oversized line — since the content is discarded either way, there is
+/// nothing to report a `TooLong` outcome for — it always returns `Ok(true)`
+/// once a newline is found, regardless of how many bytes preceded it. If a
+/// newline arrives within the reader's CURRENT buffered chunk, `max_bytes` is
+/// never even consulted (the byte count is only accumulated across MULTIPLE
+/// `fill_buf`/`consume` cycles when a newline is NOT yet found). What
+/// `max_bytes` actually bounds is the total bytes scanned before falling back
+/// to [`discard_until_newline`] when a line spans many chunks with no
+/// newline in sight — preventing an unboundedly long re-scan, not flagging
+/// line length. Memory itself was never at risk either way: `fill_buf`
+/// returns only what the underlying `AsyncBufRead`'s own fixed internal
+/// buffer already holds, never more.
 pub(crate) async fn discard_one_bounded_line<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     max_bytes: usize,

@@ -191,6 +191,21 @@ impl CodexAppServerProtocol {
         }))
     }
 
+    // NICE-TO-HAVE, not a bug (found by holistic code review): the shared
+    // `json_rpc_handshake` module extracts only line CLASSIFICATION
+    // (`classify_handshake_line`); this function still carries its own
+    // ~130-line copy of the surrounding exchange machinery (deadline
+    // accounting, bounded writes/flushes, bounded line reads, the
+    // expected-response loop, diagnostic truncation) that `opencode_acp.rs`'s
+    // own handshake ALSO duplicates near-identically, differing only in
+    // diagnostic prefixes. A deeper extraction (the whole deadline-bound
+    // request/response exchange, parameterized by a protocol label and
+    // expected id, leaving only request-payload construction and native-id
+    // extraction per driver) would remove that duplication too. Not done in
+    // this pass: it is an architectural improvement, not a correctness fix,
+    // and reworking the exchange loop the SECOND time in one review pass
+    // carries real regression risk for no safety benefit — left as a
+    // documented follow-up rather than rushed.
     async fn perform_handshake(
         &self,
         stdin: &mut ChildStdin,
@@ -346,6 +361,26 @@ impl CodexAppServerTransport {
         RuntimeError::TransportOutcomeUnknown { detail }
     }
 
+    /// KNOWN CROSS-CUTTING RESIDUAL (found by holistic code review, not fixed
+    /// here deliberately — pre-existing in ALL THREE real-CLI drivers, not
+    /// introduced by codex): a WRITE-TIMEOUT is treated as a fatal, unknown-
+    /// outcome desync (`fail_write_with_unknown_outcome`: drop stdin, clear
+    /// all turn state, request process termination), but an ORDINARY
+    /// non-benign `write_all`/`flush` error (i.e. not a timeout, not
+    /// `BrokenPipe`/`WriteZero`) merely returns `RuntimeError::Transport`
+    /// WITHOUT closing stdin or terminating the child — even though a
+    /// `write_all` error can occur after a partial JSON frame reached the
+    /// child, an outcome just as genuinely ambiguous as a timeout. This
+    /// EXACT same pattern exists unchanged in `claude_stream.rs` and
+    /// `opencode_acp.rs` (verified: both return a bare `RuntimeError::
+    /// Transport` from their own `write_stdin_line`'s non-benign write/flush
+    /// arms). Deliberately NOT fixed here: unifying this behavior is a
+    /// crate-wide change spanning all three already-shipped, already-audited
+    /// real-CLI drivers — a materially larger and riskier change than
+    /// codex's own scope, and inconsistent-but-safe (this driver mirrors its
+    /// siblings' EXISTING, already-audited behavior rather than introducing
+    /// new, untested divergence). Flagged for a dedicated cross-driver
+    /// follow-up, not papered over here.
     async fn write_stdin_line(&mut self, text: &str) -> Result<(), RuntimeError> {
         let Some(stdin) = self.stdin.as_mut() else {
             return Ok(());
@@ -403,6 +438,30 @@ impl CodexAppServerTransport {
         }
     }
 
+    /// KNOWN RESIDUAL (found by holistic code review, not fixed here
+    /// deliberately): terminal events (`turn/completed`, mapped by
+    /// `map_codex_value`/`CodexToolTracker`) are NOT correlated against
+    /// `params.threadId`/`params.turn.id` before being accepted as THIS
+    /// turn's terminal. `threadId` correlation is moot in practice (one
+    /// `CodexAppServerTransport` manages exactly one thread for its whole
+    /// lifetime), but `turn.id` correlation is a real, if narrow and never
+    /// live-observed, gap: `turn_terminal_seen` (which suppresses a LATE
+    /// duplicate terminal for the turn that already finished) is reset to
+    /// `false` at the START of `send_turn` for the NEXT turn — so if codex
+    /// ever emitted a duplicate/delayed `turn/completed` for a PRIOR turn
+    /// after the next turn has already started, it would be misrouted as the
+    /// new turn's own terminal. This has never been observed in any live
+    /// capture (codex has not been seen to duplicate/delay a terminal), and
+    /// R1's own single-writer/turn-serialized actor discipline means
+    /// `send_turn` for turn N+1 is only ever called AFTER turn N's terminal
+    /// has already been consumed via `next_event()` — so the failure mode
+    /// requires codex ITSELF to emit a genuinely duplicate/delayed terminal,
+    /// not merely fast turn succession. NOT fixed here: correlating by
+    /// `turn.id` would require threading the codex-native turn id (already
+    /// tracked separately via `active_turn_id`) through the event-mapping
+    /// path, a larger change than this review pass's scope; flagged for a
+    /// follow-up rather than a rushed fix with no live reproduction to
+    /// verify against.
     fn observe(&mut self, ev: &ProtocolEvent) {
         self.last_event_at = Instant::now();
         match ev {
@@ -735,11 +794,14 @@ async fn supervise(
             line = read_bounded_line(&mut lines, MAX_STDOUT_LINE_BYTES) => {
                 match line {
                     Ok(BoundedLineRead::Line(line)) => {
-                        let unanswerable_method = parse_line_value(&line)
+                        let expected_id = supervision.outstanding_request_id.load(Ordering::Acquire);
+                        let parsed = parse_line_value(&line);
+
+                        if let Some(method) = parsed
                             .as_ref()
                             .and_then(unanswerable_server_request_method)
-                            .map(ToOwned::to_owned);
-                        if let Some(method) = unanswerable_method {
+                            .map(ToOwned::to_owned)
+                        {
                             // A genuine server-initiated JSON-RPC REQUEST this
                             // driver has no handler for (e.g. an approval
                             // decision). Left unanswered, codex would block
@@ -770,7 +832,32 @@ async fn supervise(
                             let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
                             break;
                         }
-                        let expected_id = supervision.outstanding_request_id.load(Ordering::Acquire);
+
+                        if let Some(error) = parsed
+                            .as_ref()
+                            .and_then(|v| correlated_json_rpc_error(v, expected_id))
+                        {
+                            // codex REJECTED the request we're currently
+                            // waiting on (e.g. turn/start or turn/interrupt)
+                            // with an immediate JSON-RPC error. Without this,
+                            // `turn_in_flight` would stay set and the caller
+                            // would be blocked for the full hang-watchdog
+                            // duration instead of learning immediately that
+                            // the request failed. Unlike the unanswerable-
+                            // request case above, an error RESPONSE is
+                            // well-formed JSON-RPC -- the wire is not
+                            // desynchronized, so the process is NOT killed;
+                            // the connection may still serve a future turn.
+                            if ev_tx
+                                .send(ProtocolEvent::TurnFailed { error })
+                                .await
+                                .is_err()
+                            {
+                                break 'outer;
+                            }
+                            continue;
+                        }
+
                         update_active_turn_id_from_wire(&line, expected_id, &supervision.active_turn_id);
                         for ev in tracker.observe_line(&line) {
                             if ev_tx.send(ev).await.is_err() {
@@ -1007,6 +1094,46 @@ fn unanswerable_server_request_method(v: &Value) -> Option<&str> {
     Some(method)
 }
 
+/// Detect a JSON-RPC ERROR RESPONSE (`id` + `error`, no `method`) correlated
+/// to the request THIS DRIVER currently has outstanding, and return the error
+/// message if so.
+///
+/// Found by holistic code review (dev-manager-caught real gap): `turn/start`
+/// and `turn/interrupt` requests can be REJECTED by codex outright (an
+/// immediate JSON-RPC error, e.g. invalid params or a resource limit) — before
+/// this fix, `map_codex_value` only matched on `method`, so a bare error
+/// response (which by definition carries no `method`) silently fell through
+/// to its `_ => vec![]` default, leaving `turn_in_flight` set and the caller
+/// blocked for the FULL hang-watchdog duration (60s) instead of learning
+/// immediately that the request was rejected. Mirrors the EXACT sibling
+/// pattern already established in `opencode_acp.rs`'s `map_acp_line`
+/// (`if let Some(error) = v.get("error") { ... TurnFailed ... }`), correlated
+/// by id the same way `map_acp_line_correlated` gates a terminal response by
+/// `expected_id` before delegating.
+///
+/// Deliberately does NOT kill the process (unlike the `TooLong`/unanswerable-
+/// request handling): an error RESPONSE is well-formed JSON-RPC — the wire is
+/// not desynchronized, only this one outstanding request was rejected, so the
+/// connection may still be perfectly usable for a future turn. Only a
+/// correlated `id` match is treated as ours; an error for a DIFFERENT
+/// (stale/foreign) id is ignored rather than misrouted into the current turn,
+/// the same defensive posture `map_acp_line_correlated` documents.
+fn correlated_json_rpc_error(v: &Value, expected_id: u64) -> Option<String> {
+    if v.get("method").is_some() {
+        return None; // has a method: a request or notification, not a response
+    }
+    let id = v.get("id").and_then(Value::as_u64)?;
+    if id != expected_id {
+        return None; // not ours: a stale or foreign response, don't misroute it
+    }
+    let error = v.get("error")?;
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("codex app-server json-rpc error with no message");
+    Some(message.to_string())
+}
+
 fn final_agent_message_text(turn: &Value) -> Option<String> {
     turn.get("items")
         .and_then(Value::as_array)
@@ -1236,6 +1363,53 @@ mod tests {
         let malformed_both = r#"{"id":9,"method":"execCommandApproval","result":{}}"#;
         assert_eq!(
             unanswerable_server_request_method(&serde_json::from_str(malformed_both).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn correlated_json_rpc_error_matches_only_the_outstanding_id() {
+        // An error response correlated to the id we're waiting on -> Some(message).
+        let rejected =
+            r#"{"jsonrpc":"2.0","id":3,"error":{"code":-32602,"message":"invalid params"}}"#;
+        assert_eq!(
+            correlated_json_rpc_error(&serde_json::from_str(rejected).unwrap(), 3),
+            Some("invalid params".to_string())
+        );
+
+        // Missing error.message -> a sensible fallback string, not a panic/None.
+        let no_message = r#"{"id":3,"error":{"code":-32602}}"#;
+        assert_eq!(
+            correlated_json_rpc_error(&serde_json::from_str(no_message).unwrap(), 3),
+            Some("codex app-server json-rpc error with no message".to_string())
+        );
+
+        // A stale/foreign id -- must NOT be misrouted into the current turn.
+        let stale = r#"{"id":2,"error":{"message":"too late"}}"#;
+        assert_eq!(
+            correlated_json_rpc_error(&serde_json::from_str(stale).unwrap(), 3),
+            None
+        );
+
+        // A successful response (result, no error) -- not an error at all.
+        let success = r#"{"id":3,"result":{"turn":{"id":"t1"}}}"#;
+        assert_eq!(
+            correlated_json_rpc_error(&serde_json::from_str(success).unwrap(), 3),
+            None
+        );
+
+        // A notification (method, no id) -- not a response, must not match.
+        let notification = r#"{"method":"turn/completed","params":{}}"#;
+        assert_eq!(
+            correlated_json_rpc_error(&serde_json::from_str(notification).unwrap(), 3),
+            None
+        );
+
+        // A genuine unanswerable server REQUEST (method + id + no result/error)
+        // must be classified by `unanswerable_server_request_method`, NOT here.
+        let request = r#"{"jsonrpc":"2.0","id":3,"method":"execCommandApproval","params":{}}"#;
+        assert_eq!(
+            correlated_json_rpc_error(&serde_json::from_str(request).unwrap(), 3),
             None
         );
     }
