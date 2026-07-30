@@ -323,22 +323,29 @@ the same shared items so the frozen `tests/codex_appserver_mapping_and_handshake
 (they have no JSON-RPC handshake to share). No behavior change; verified byte-for-byte equivalent per item
 before extraction, all 27 test binaries green after, zero coverage silently dropped.
 
-**Honest residual gap — NOT fixed, deliberately (a product/security decision, not a driver bug to silently
-paper over):** the real codex schema (`ServerRequest.json`) defines several methods the SERVER can send as a
-genuine JSON-RPC REQUEST requiring a response written back to stdin before codex proceeds —
-`execCommandApproval`, `applyPatchApproval`, `item/commandExecution/requestApproval`,
-`item/fileChange/requestApproval`, `item/permissions/requestApproval`, `item/tool/requestUserInput`,
-`mcpServer/elicitation/request` — for interactive approval flows under a stricter `approvalPolicy`. This
-driver never sets `approvalPolicy`/`sandbox` in `thread/start`/`thread/resume` (both fields are optional and
-omitted, so codex falls back to its own/config.toml default), and empirically, under that default, a real
-live-captured shell-command tool call completed with ZERO approval-request-shaped lines ever appearing on the
-wire — the gap is currently DORMANT, not proven unreachable. If codex ever emits one of the methods above, it
-is silently dropped by `map_codex_value`'s method-only match (no `id`-based request/notification distinction
-exists in this driver) and codex is left blocked waiting for an answer that never comes — a SILENT hang,
-bounded only by the hang watchdog eventually killing the process. Documented in detail directly above
-`supervise` in `src/codex_appserver.rs`. Not fixed here because the correct response (auto-approve? auto-deny?
-a new `ProtocolEvent` gate the caller must answer, mirroring `NativeGateRequested`?) is a real security
-decision that should not be picked unilaterally inside a driver.
+**Honest residual gap — the hang is fixed; ANSWERING is still NOT implemented, deliberately (a product/
+security decision, not a driver bug to silently paper over):** the real codex schema (`ServerRequest.json`)
+defines several methods the SERVER can send as a genuine JSON-RPC REQUEST requiring a response written back to
+stdin before codex proceeds — `execCommandApproval`, `applyPatchApproval`,
+`item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`,
+`item/tool/requestUserInput`, `mcpServer/elicitation/request` — for interactive approval flows under a
+stricter `approvalPolicy`. This driver never sets `approvalPolicy`/`sandbox` in `thread/start`/`thread/resume`
+(both fields are optional and omitted, so codex falls back to its own/config.toml default), and empirically,
+under that default, a real live-captured shell-command tool call completed with ZERO approval-request-shaped
+lines ever appearing on the wire — the gap is currently DORMANT, not proven unreachable.
+
+**Fixed:** `supervise` now detects any incoming line matching the genuine JSON-RPC REQUEST shape (`method` AND
+`id` present, no `result`/`error` — `unanswerable_server_request_method`, a structural discriminator so it
+also catches any FUTURE method the schema adds, not a curated list) and, instead of silently dropping it
+(the prior behavior, which left codex blocked forever), immediately fails the turn with a clear diagnostic
+naming the method and tears the now-permanently-stuck process down, mirroring the existing `TooLong`
+handling. A regression test (`unanswerable_server_request_detects_id_plus_method_shape`) pins the pure
+detection logic and was verified to genuinely fail on a targeted mutation before being trusted.
+
+**Still NOT implemented, deliberately:** actually SUPPORTING approval flows (auto-approve? auto-deny? a new
+`ProtocolEvent` gate the caller must answer, mirroring `NativeGateRequested`?) is a real security decision
+that should not be picked unilaterally inside a driver. The fail-fast-and-terminate behavior above is a safe
+floor (refuse loudly, never hang silently), not a substitute for that decision.
 
 Verification summary for this landing:
 - `cargo test -p wasl-runtime-protocol`: green (41 lib unit + all integration files, including the 29 frozen

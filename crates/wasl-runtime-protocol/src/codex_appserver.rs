@@ -656,13 +656,20 @@ fn update_active_turn_id_from_wire(
 /// (e.g. a stricter `approvalPolicy` requiring per-command confirmation before
 /// exec/patch).
 ///
-/// `map_codex_value` (below) matches PURELY on `method`, with no `id`-based
-/// request/notification distinction, and `supervise`'s read loop never writes
-/// anything back to stdin outside the handshake and `send_turn`. If codex ever
-/// emits one of the methods above, it is silently dropped here (falls to the
-/// `_ => vec![]` arm) and codex is left blocked waiting for a response that
-/// this driver will never send — a SILENT hang, bounded only by the hang
-/// watchdog eventually killing the process (not an instant/visible failure).
+/// `supervise`'s read loop never writes anything back to stdin outside the
+/// handshake and `send_turn`, so this driver cannot answer ANY of these (or
+/// any future method the schema adds). Rather than silently drop such a line
+/// (leaving codex blocked forever waiting for an answer that will never
+/// come — a hang bounded only by the hang watchdog, not an instant/visible
+/// failure), `supervise` detects the JSON-RPC REQUEST shape itself
+/// (`unanswerable_server_request_method`: `method` AND `id` present, no
+/// `result`/`error` — a structural discriminator, not a curated method-name
+/// list, so it also catches any future method) and immediately fails the
+/// turn with a clear diagnostic naming the method, then tears the process
+/// down (mirroring the `TooLong` handling below) since it is now permanently
+/// stuck and cannot serve another turn either. This is a SAFE, POLICY-FREE
+/// fix: it does not approve or deny anything, it only refuses and reports
+/// loudly instead of hanging silently.
 ///
 /// Why this has NOT manifested in this crate's own live tests/spikes: neither
 /// `thread/start` nor `thread/resume` sets `approvalPolicy`/`sandbox` in this
@@ -677,8 +684,11 @@ fn update_active_turn_id_from_wire(
 /// `approvalPolicy`, a different codex CLI default in a future version, or a
 /// deployment explicitly setting a stricter policy could all trigger it).
 ///
-/// NOT fixed here deliberately: the correct response (auto-approve? auto-deny?
-/// surface as a new `ProtocolEvent` gate the caller must answer, mirroring
+/// STILL an open product/security decision, NOT fixed here deliberately: an
+/// immediate, clear failure (what's implemented) is always correct as a
+/// SAFETY FLOOR, but it is not the same as actually SUPPORTING approval
+/// flows — the correct richer response (auto-approve? auto-deny? surface as
+/// a new `ProtocolEvent` gate the caller must answer, mirroring
 /// `NativeGateRequested`?) is a real product/security decision — auto-approving
 /// arbitrary shell/file-change requests on an agent's behalf has real safety
 /// implications and should not be picked unilaterally inside a driver. Flagged
@@ -715,6 +725,41 @@ async fn supervise(
             line = read_bounded_line(&mut lines, MAX_STDOUT_LINE_BYTES) => {
                 match line {
                     Ok(BoundedLineRead::Line(line)) => {
+                        let unanswerable_method = parse_line_value(&line)
+                            .as_ref()
+                            .and_then(unanswerable_server_request_method)
+                            .map(ToOwned::to_owned);
+                        if let Some(method) = unanswerable_method {
+                            // A genuine server-initiated JSON-RPC REQUEST this
+                            // driver has no handler for (e.g. an approval
+                            // decision). Left unanswered, codex would block
+                            // forever waiting for a response that will never
+                            // come -- this transport is now permanently
+                            // useless, so fail the turn immediately (rather
+                            // than a silent hang bounded only by the hang
+                            // watchdog) and tear the process down, mirroring
+                            // the `TooLong` handling above.
+                            let _ = ev_tx
+                                .send(ProtocolEvent::TurnFailed {
+                                    error: format!(
+                                        "codex app-server sent an unanswerable request \
+                                         ({method}) this driver does not support answering \
+                                         -- the process cannot make progress and is being \
+                                         terminated"
+                                    ),
+                                })
+                                .await;
+                            let code = escalate(
+                                &mut child,
+                                signal_target,
+                                supervision.timeouts.interrupt_ack,
+                                supervision.timeouts.term_after,
+                                supervision.timeouts.kill_after,
+                            )
+                            .await;
+                            let _ = ev_tx.send(ProtocolEvent::ProcessExited { code }).await;
+                            break;
+                        }
                         let expected_id = supervision.outstanding_request_id.load(Ordering::Acquire);
                         update_active_turn_id_from_wire(&line, expected_id, &supervision.active_turn_id);
                         for ev in tracker.observe_line(&line) {
@@ -922,6 +967,36 @@ fn parse_line_value(line: &str) -> Option<Value> {
     serde_json::from_str(trimmed).ok()
 }
 
+/// Detect a genuine JSON-RPC REQUEST sent BY THE SERVER (codex), as opposed to
+/// a notification or a response to one of OUR OWN outgoing requests.
+///
+/// Per JSON-RPC 2.0: a Request has `method` AND `id` (no `result`/`error`); a
+/// Notification has `method`, no `id`; a Response has `id` and EXACTLY ONE of
+/// `result`/`error`, no `method`. This driver only ever sends `initialize`/
+/// `thread/start`/`thread/resume`/`turn/start` requests itself, so any line
+/// matching the Request shape is BY CONSTRUCTION the server asking THIS
+/// DRIVER for something (e.g. an approval decision — `execCommandApproval`,
+/// `applyPatchApproval`, `item/*/requestApproval`, `item/tool/requestUserInput`,
+/// `mcpServer/elicitation/request`, or any future method the schema adds) that
+/// this driver does not implement answering. Returns the method name for a
+/// clear diagnostic; deliberately NOT a curated method-name list — matching
+/// the Request SHAPE means this correctly generalizes to any such method,
+/// present or future, without needing to be updated when codex adds new ones.
+///
+/// Deliberately does NOT inspect the `jsonrpc` field: codex's own real
+/// notifications omit it (see `AGENTS.md`'s "notifications carry NO
+/// `id`/`jsonrpc`"), so requiring it would be strictly LESS conservative, not
+/// more — it could only ever narrow the match, never widen it into a false
+/// positive.
+fn unanswerable_server_request_method(v: &Value) -> Option<&str> {
+    let method = v.get("method").and_then(Value::as_str)?;
+    v.get("id")?; // a notification (no id) is not a request
+    if v.get("result").is_some() || v.get("error").is_some() {
+        return None; // malformed/theoretical: a line can't be both a request and a response
+    }
+    Some(method)
+}
+
 fn final_agent_message_text(turn: &Value) -> Option<String> {
     turn.get("items")
         .and_then(Value::as_array)
@@ -1106,6 +1181,54 @@ impl CodexToolTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unanswerable_server_request_detects_id_plus_method_shape() {
+        // A genuine server-initiated REQUEST: has both `method` and `id`.
+        let approval = r#"{"jsonrpc":"2.0","id":42,"method":"execCommandApproval","params":{"command":"rm -rf /"}}"#;
+        assert_eq!(
+            unanswerable_server_request_method(&serde_json::from_str(approval).unwrap()),
+            Some("execCommandApproval")
+        );
+
+        let patch_approval =
+            r#"{"jsonrpc":"2.0","id":7,"method":"item/fileChange/requestApproval","params":{}}"#;
+        assert_eq!(
+            unanswerable_server_request_method(&serde_json::from_str(patch_approval).unwrap()),
+            Some("item/fileChange/requestApproval")
+        );
+
+        // A notification: `method` but no `id` -- NOT a request.
+        let notification = r#"{"method":"turn/completed","params":{}}"#;
+        assert_eq!(
+            unanswerable_server_request_method(&serde_json::from_str(notification).unwrap()),
+            None
+        );
+
+        // A response to OUR OWN request: `id` + `result`, no `method` -- NOT a request.
+        let our_response = r#"{"id":3,"result":{"turn":{"id":"t1"}}}"#;
+        assert_eq!(
+            unanswerable_server_request_method(&serde_json::from_str(our_response).unwrap()),
+            None
+        );
+
+        // A response carrying an error to OUR OWN request -- also NOT a request.
+        let our_error_response = r#"{"id":3,"error":{"message":"boom"}}"#;
+        assert_eq!(
+            unanswerable_server_request_method(&serde_json::from_str(our_error_response).unwrap()),
+            None
+        );
+
+        // Malformed/theoretical: `method` + `id` + `result` all present at
+        // once -- not a real JSON-RPC shape (a line can't be a request AND a
+        // response), but the helper must not misclassify it as an
+        // unanswerable request either.
+        let malformed_both = r#"{"id":9,"method":"execCommandApproval","result":{}}"#;
+        assert_eq!(
+            unanswerable_server_request_method(&serde_json::from_str(malformed_both).unwrap()),
+            None
+        );
+    }
 
     #[test]
     fn pure_map_ignores_ack_and_maps_terminal_reply_from_turn_items() {
