@@ -78,9 +78,19 @@ impl CodexAppServerProtocol {
             structured_turns: true,
             streaming_output: true,
             attachable: true,
-            // Intentionally locked false until a live interrupt round-trip is
-            // independently captured, even though the schema advertises it.
-            interruptible: false,
+            // VERIFIED live (not rounded up): `turn/interrupt` on a genuinely
+            // in-flight, tool-running turn (a real `sleep 30` shell command)
+            // aborted it in ~30ms, with `turn/completed` reporting
+            // `status:"interrupted"` at ~4.3s elapsed instead of the natural
+            // ~30s completion -- spikes/live-substrate/
+            // codex_appserver_interrupt_probe.py,
+            // out/codex_appserver_interrupt/interrupt_verdict.json
+            // (`I1_interrupt_accepted=true`, `I2_turn_actually_stopped_early=true`).
+            // Also covered by a permanent regression test exercising the real
+            // `cancel_turn` path this flag unlocks (previously `Unsupported`
+            // unconditionally, since `actor.rs` gates `cancel_turn` on this
+            // exact flag).
+            interruptible: true,
             structured_provenance: true,
             resumable: true,
         }

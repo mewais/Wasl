@@ -280,9 +280,10 @@ the wrong direction), and the wire shape captured live and cross-checked against
 
 What landed:
 - **Capabilities:** `persistent_process=true`, `persistent_conversation=true`, `structured_turns=true`,
-  `streaming_output=true`, `attachable=true`, `interruptible=false` (consistent with `ClaudeStreamProtocol`/
-  `OpenCodeAcpProtocol`, both also `false` — `turn/interrupt` is schema-real but was never exercised live, so
-  the capability is not rounded up), `structured_provenance=true`, `resumable=true` (now VERIFIED, see below).
+  `streaming_output=true`, `attachable=true`, `interruptible=true` (VERIFIED LIVE, see below — the FIRST of
+  the three real-CLI drivers to have this genuinely proven, not rounded up; `ClaudeStreamProtocol`/
+  `OpenCodeAcpProtocol` remain `false`, untested), `structured_provenance=true`, `resumable=true` (also
+  VERIFIED, see below).
 - **Wire shape:** NDJSON JSON-RPC; requests `{jsonrpc,id,method,params}`, responses `{id,result|error}`,
   notifications carry NO `id`/`jsonrpc` (`{method,params,emittedAtMs}`) — same family as opencode's ACP, NOT
   claude's raw stream-json (which has no request/response envelope at all). Handshake: `initialize` (id=1) →
@@ -310,6 +311,20 @@ What landed:
   spec against the `InteractiveProtocol`/`InteractiveTransport` seam, passing against the real CLI in 8.68s).
   This is AHEAD of `OpenCodeAcpProtocol`'s own resume gap, which remains ASSUMED (Phase-5, above) — the two are
   independent and were not required to close together.
+- **`interruptible` — VERIFIED LIVE, not rounded up:** `turn/interrupt {threadId,turnId}` on a genuinely
+  in-flight, tool-running turn (a real `sleep` shell command via codex's own tool-call mechanism) aborted it
+  in ~30ms, with `turn/completed` reporting `status:"interrupted"` at ~4.3s elapsed instead of the natural
+  ~30s completion — proven live TWICE: a standalone probe
+  (`spikes/live-substrate/codex_appserver_interrupt_probe.py`, `I1_interrupt_accepted=true`,
+  `I2_turn_actually_stopped_early=true`) and a permanent regression-guarded test
+  (`tests/codex_appserver_interrupt_live.rs::interrupt_aborts_an_in_flight_tool_running_turn_early`, written
+  from spec against the driver seam, passing against the real CLI in ~4-5s, run twice with zero flakiness).
+  This ALSO exercised, for the first time ever in this codebase, the previously-100%-dead `if
+  caps.interruptible { ... cancel_turn ... }` branch of the shared `conformance()` function
+  (`tests/codex_appserver_live.rs`, used across ephemeral/claude/opencode/codex) — run 4 times against the
+  real CLI with zero flakiness. This is AHEAD of `ClaudeStreamProtocol`/`OpenCodeAcpProtocol`, both still
+  `false` and untested on this axis — the codex-specific `status=="interrupted"` mapping row (previously
+  documented as unmapped/unexercised) is also now VERIFIED LIVE, not just schema-derived.
 
 Shared-plumbing extraction (done alongside this landing, once the byte-for-byte duplication across ALL FOUR
 driver files was independently verified): `src/bounded_io.rs` (`BoundedLineRead`/`read_bounded_line`/

@@ -27,15 +27,27 @@
 //!                                    opencode, unlike claude's whole-block output)
 //!   * attachable           = true  (a persistent stdio JSON-RPC connection is
 //!                                    observable by a viewer)
-//!   * interruptible        = false ⛔ UNKNOWN CELL: turn/interrupt is
-//!                                    schema-ADVERTISED but was NOT triggered
-//!                                    live ("interruptible":
-//!                                    "advertised-turn/interrupt (not triggered
-//!                                    live)"). Per the honest-residual
-//!                                    convention (claude/opencode keep this
-//!                                    false until a follow-up interrupt capture),
-//!                                    it stays false — an advertised-but-not-
-//!                                    exercised capability is NOT rounded up.
+//!   * interruptible        = true  ✅ VERIFIED — turn/interrupt was exercised
+//!                                    live against a genuinely in-flight,
+//!                                    tool-running turn (a real `sleep 30` shell
+//!                                    command issued via codex's tool-call
+//!                                    mechanism). The interrupt aborted it in
+//!                                    ~30ms: `turn/completed` reported
+//!                                    status:"interrupted" at ~4.3s elapsed
+//!                                    instead of the natural ~30s completion —
+//!                                    genuinely stopped mid-flight, not a status
+//!                                    label slapped on a turn that ran to the end
+//!                                    anyway (spikes/live-substrate/
+//!                                    codex_appserver_interrupt_probe.py,
+//!                                    out/codex_appserver_interrupt/
+//!                                    interrupt_verdict.json:
+//!                                    I1_interrupt_accepted=true,
+//!                                    I2_turn_actually_stopped_early=true). This
+//!                                    is the FIRST of the three real-CLI drivers
+//!                                    (claude/opencode/codex) to have this
+//!                                    capability GENUINELY verified live, not
+//!                                    rounded up — claude/opencode remain false
+//!                                    until each gets its own interrupt capture.
 //!   * structured_provenance = true (native thread id [UUIDv7] + JSON-RPC
 //!                                    request ids + per-turn ids give
 //!                                    machine-usable correlation, VERIFIED)
@@ -78,10 +90,13 @@ fn capabilities_are_exactly_the_locked_report() {
         "a persistent stdio JSON-RPC connection is observable by a viewer"
     );
     assert!(
-        !caps.interruptible,
-        "⛔ UNKNOWN cell: turn/interrupt is schema-ADVERTISED but was NOT \
-         triggered live -- must stay false until a follow-up interrupt capture \
-         (same honest-residual convention as claude/opencode)"
+        caps.interruptible,
+        "✅ VERIFIED live: turn/interrupt aborted a genuinely in-flight, \
+         tool-running turn (real `sleep 30`) in ~30ms -- turn/completed reported \
+         status:\"interrupted\" at ~4.3s elapsed, not the natural ~30s \
+         completion (interrupt_verdict.json: I1_interrupt_accepted=true, \
+         I2_turn_actually_stopped_early=true). FIRST of the three real-CLI \
+         drivers to have this capability genuinely verified live, not rounded up."
     );
     assert!(
         caps.structured_provenance,
@@ -111,7 +126,8 @@ fn capabilities_are_not_all_false() {
     assert!(
         !all_false,
         "an all-false capability report is a FAIL (repo convention) -- \
-         CodexAppServerProtocol has 7 genuinely VERIFIED true capabilities"
+         CodexAppServerProtocol has all 8 genuinely VERIFIED true capabilities \
+         (interruptible flipped true once turn/interrupt was verified live)"
     );
 }
 
