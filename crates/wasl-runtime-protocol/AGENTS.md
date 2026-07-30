@@ -352,6 +352,20 @@ Verification summary for this landing:
   distinct `turn/failed` method — checked against the real captured wire and confirmed not to exist; documented
   as an explicit assumption in the tracker's turn-boundary-clear comment).
 
+Coverage honesty (`cargo llvm-cov -p wasl-runtime-protocol --summary-only`, default run — live-cli tests
+excluded, as for every prior phase):
+- `codex_appserver.rs`: **29.51% lines / 29.92% regions** (793 lines, 559 missed).
+- This is expected and honest, and closely matches `opencode_acp.rs`'s own 28.26%/30.65% (same shape driver:
+  a JSON-RPC-over-stdio handshake + supervise/escalation plumbing crate): the uncovered area is predominantly
+  spawn/handshake/supervise/escalation code paths that are only meaningfully exercised by the deferred
+  live-cli runs (proven green separately, including the 4 live-cli tests run against the real CLI); mapping
+  logic (`map_codex_value`, `CodexToolTracker`, `classify_handshake_line`/`next_wait` via the shared modules)
+  is covered by byte-exact unit fixtures in `#[cfg(test)]` and the 29 frozen
+  `tests/codex_appserver_mapping_and_handshake.rs` cases.
+- The three extracted shared modules are well-covered by design (they carry the consolidated fixtures every
+  driver used to duplicate): `bounded_io.rs` 87.31%/86.75%, `process_supervision.rs` 90.52%/95.24%,
+  `json_rpc_handshake.rs` 91.18%/85.00%.
+
 Genericity assertion still holds:
 - **No new `ProtocolEvent` variants and no new `TargetStatus` variants were required.**
 - `crates/wasl-runtime/src/lib.rs` remained untouched in Phase-6.
