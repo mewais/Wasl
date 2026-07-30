@@ -268,3 +268,90 @@ Coverage honesty (`cargo llvm-cov -p wasl-runtime-protocol --summary-only`):
 Genericity assertion still holds:
 - **No new `ProtocolEvent` variants and no new `TargetStatus` variants were required.**
 - `crates/wasl-runtime/src/lib.rs` remained untouched in Phase-5.
+
+## Phase-6 scope (LANDED) — `CodexAppServerProtocol` (real codex `app-server --stdio` JSON-RPC-over-stdio driver)
+
+Phase-6 added `src/codex_appserver.rs` plus crate-root export wiring in `src/lib.rs`. Diagnosed from first
+principles (no prior spec pin existed): `codex`'s CLI surface was explored fresh, `app-server --stdio`
+confirmed as the persistent multi-turn substrate (`exec` is per-turn/respawn; `exec-server` is a remote/
+websocket cloud registration, not a local stdio substrate; `mcp-server` is codex acting as a tool PROVIDER,
+the wrong direction), and the wire shape captured live and cross-checked against the AUTHORITATIVE schema
+(`codex app-server generate-json-schema` — not just live capture guesswork).
+
+What landed:
+- **Capabilities:** `persistent_process=true`, `persistent_conversation=true`, `structured_turns=true`,
+  `streaming_output=true`, `attachable=true`, `interruptible=false` (consistent with `ClaudeStreamProtocol`/
+  `OpenCodeAcpProtocol`, both also `false` — `turn/interrupt` is schema-real but was never exercised live, so
+  the capability is not rounded up), `structured_provenance=true`, `resumable=true` (now VERIFIED, see below).
+- **Wire shape:** NDJSON JSON-RPC; requests `{jsonrpc,id,method,params}`, responses `{id,result|error}`,
+  notifications carry NO `id`/`jsonrpc` (`{method,params,emittedAtMs}`) — same family as opencode's ACP, NOT
+  claude's raw stream-json (which has no request/response envelope at all). Handshake: `initialize` (id=1) →
+  `thread/start` (spawn) or `thread/resume` (resume) (id=2); a `thread/started` notification can arrive BEFORE
+  its matching response (the same handshake-ordering hazard opencode had, handled by the shared
+  `json_rpc_handshake` classifier). Turns: `turn/start` acks `status:"inProgress"` immediately; streaming via
+  `item/agentMessage/delta`; terminal via the single `turn/completed` notification, whose `params.turn.status`
+  carries `completed|interrupted|failed|inProgress` — there is NO separate `turn/failed` method (confirmed
+  against both the live capture and re-derivable from the schema's terminal-status enum living inside
+  `turn/completed`, not as sibling methods).
+- **Tool-call correlation:** `CodexToolTracker` correlates `item/started`/`item/completed` (where
+  `item.type == "commandExecution"`) by `item.id`, mirroring `ClaudeToolTracker`'s id-correlation pattern. It
+  clears its pending-id map on the `turn/completed` METHOD (not conditioned on the embedded `status`) — a
+  bug found by dev-manager audit before this landed (an interrupted/failed tool call would otherwise leak one
+  entry per turn for the life of the session, the same unbounded-growth class already fixed for
+  `ClaudeToolTracker`) and fixed with a regression test proven to fail without the fix.
+- **`resume` — VERIFIED, not ASSUMED:** implemented against `thread/resume`
+  (`{threadId,cwd} -> {..., thread:{id,...}}`), whose request/response shape was confirmed against the
+  authoritative schema (not just a live guess). The full cross-process round-trip — a thread started by one OS
+  process, resumed by a genuinely FRESH, separate OS process after the original has fully exited, still
+  recalling pre-exit conversational context — was proven live TWICE: a standalone probe
+  (`spikes/live-substrate/codex_appserver_resume_probe.py`, R1_resume_succeeds=true,
+  R2_context_retained=true) and a permanent regression-guarded test
+  (`tests/codex_appserver_resume_live.rs::resume_in_a_fresh_process_recalls_pre_exit_context`, written from
+  spec against the `InteractiveProtocol`/`InteractiveTransport` seam, passing against the real CLI in 8.68s).
+  This is AHEAD of `OpenCodeAcpProtocol`'s own resume gap, which remains ASSUMED (Phase-5, above) — the two are
+  independent and were not required to close together.
+
+Shared-plumbing extraction (done alongside this landing, once the byte-for-byte duplication across ALL FOUR
+driver files was independently verified): `src/bounded_io.rs` (`BoundedLineRead`/`read_bounded_line`/
+`discard_one_bounded_line`/`discard_until_newline`/the two resource-bound constants), `src/process_supervision.rs`
+(`next_wait`/`best_effort_signal`/`escalate`/`wait_for_exit`, plus consolidated `#[cfg(test)]` fixtures
+previously duplicated 2-3x), `src/json_rpc_handshake.rs` (the canonical `HandshakeLineClass`/
+`classify_handshake_line`, shared by `opencode_acp.rs` and `codex_appserver.rs`, with codex's pre-existing
+external names `CodexHandshakeLineClass`/`classify_codex_handshake_line` kept as `lib.rs` re-export ALIASES of
+the same shared items so the frozen `tests/codex_appserver_mapping_and_handshake.rs` needed zero changes).
+`fake_line.rs` and `claude_stream.rs` also migrated to the shared `bounded_io`/`process_supervision` modules
+(they have no JSON-RPC handshake to share). No behavior change; verified byte-for-byte equivalent per item
+before extraction, all 27 test binaries green after, zero coverage silently dropped.
+
+**Honest residual gap — NOT fixed, deliberately (a product/security decision, not a driver bug to silently
+paper over):** the real codex schema (`ServerRequest.json`) defines several methods the SERVER can send as a
+genuine JSON-RPC REQUEST requiring a response written back to stdin before codex proceeds —
+`execCommandApproval`, `applyPatchApproval`, `item/commandExecution/requestApproval`,
+`item/fileChange/requestApproval`, `item/permissions/requestApproval`, `item/tool/requestUserInput`,
+`mcpServer/elicitation/request` — for interactive approval flows under a stricter `approvalPolicy`. This
+driver never sets `approvalPolicy`/`sandbox` in `thread/start`/`thread/resume` (both fields are optional and
+omitted, so codex falls back to its own/config.toml default), and empirically, under that default, a real
+live-captured shell-command tool call completed with ZERO approval-request-shaped lines ever appearing on the
+wire — the gap is currently DORMANT, not proven unreachable. If codex ever emits one of the methods above, it
+is silently dropped by `map_codex_value`'s method-only match (no `id`-based request/notification distinction
+exists in this driver) and codex is left blocked waiting for an answer that never comes — a SILENT hang,
+bounded only by the hang watchdog eventually killing the process. Documented in detail directly above
+`supervise` in `src/codex_appserver.rs`. Not fixed here because the correct response (auto-approve? auto-deny?
+a new `ProtocolEvent` gate the caller must answer, mirroring `NativeGateRequested`?) is a real security
+decision that should not be picked unilaterally inside a driver.
+
+Verification summary for this landing:
+- `cargo test -p wasl-runtime-protocol`: green (41 lib unit + all integration files, including the 29 frozen
+  codex mapping/handshake tests and the 3+1 live-cli codex tests run separately against the real CLI). One
+  pre-existing, environmental sandbox-contention flake (`hostile_inputs::eof_without_code_maps_to_process_exited_none`)
+  reproduces identically with this landing's changes fully reverted — confirmed unrelated.
+- `cargo test -p wasl-runtime-protocol --features live-cli --no-run`: compile-clean.
+- `cargo build --workspace`: clean. `cargo clippy -p wasl-runtime-protocol --all-targets -- -D warnings`: clean.
+  `cargo fmt --check`: clean.
+- Independent dev-manager audit: SHIP, zero blocking findings (one non-blocking finding — a hypothetical
+  distinct `turn/failed` method — checked against the real captured wire and confirmed not to exist; documented
+  as an explicit assumption in the tracker's turn-boundary-clear comment).
+
+Genericity assertion still holds:
+- **No new `ProtocolEvent` variants and no new `TargetStatus` variants were required.**
+- `crates/wasl-runtime/src/lib.rs` remained untouched in Phase-6.

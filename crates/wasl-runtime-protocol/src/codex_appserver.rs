@@ -643,6 +643,48 @@ fn update_active_turn_id_from_wire(
     }
 }
 
+/// KNOWN GAP, not silently hidden — read before touching approval handling:
+///
+/// The real codex app-server schema (`codex app-server generate-json-schema`,
+/// `ServerRequest.json`) defines several methods the SERVER can send as a
+/// genuine JSON-RPC REQUEST (i.e. carrying BOTH `method` and `id`, requiring a
+/// `{"id":..,"result":..}` response written back to stdin before codex will
+/// proceed): `execCommandApproval`, `applyPatchApproval`,
+/// `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`,
+/// `item/permissions/requestApproval`, `item/tool/requestUserInput`,
+/// `mcpServer/elicitation/request`. These exist for interactive approval flows
+/// (e.g. a stricter `approvalPolicy` requiring per-command confirmation before
+/// exec/patch).
+///
+/// `map_codex_value` (below) matches PURELY on `method`, with no `id`-based
+/// request/notification distinction, and `supervise`'s read loop never writes
+/// anything back to stdin outside the handshake and `send_turn`. If codex ever
+/// emits one of the methods above, it is silently dropped here (falls to the
+/// `_ => vec![]` arm) and codex is left blocked waiting for a response that
+/// this driver will never send — a SILENT hang, bounded only by the hang
+/// watchdog eventually killing the process (not an instant/visible failure).
+///
+/// Why this has NOT manifested in this crate's own live tests/spikes: neither
+/// `thread/start` nor `thread/resume` sets `approvalPolicy`/`sandbox` in this
+/// driver (both fields are optional and omitted), so codex falls back to
+/// whatever policy `~/.codex/config.toml`/its own defaults apply under
+/// `experimentalApi: true`. A real, live-captured shell-command tool call
+/// (`spikes/live-substrate/out/codex_appserver/codex_toolcall_capture.jsonl`)
+/// completed end-to-end WITHOUT any approval-request-shaped line ever
+/// appearing on the wire — i.e. under the config this crate has actually
+/// exercised, approvals are not being requested. This is empirical evidence
+/// the gap is currently DORMANT, not proof it can never trigger (a different
+/// `approvalPolicy`, a different codex CLI default in a future version, or a
+/// deployment explicitly setting a stricter policy could all trigger it).
+///
+/// NOT fixed here deliberately: the correct response (auto-approve? auto-deny?
+/// surface as a new `ProtocolEvent` gate the caller must answer, mirroring
+/// `NativeGateRequested`?) is a real product/security decision — auto-approving
+/// arbitrary shell/file-change requests on an agent's behalf has real safety
+/// implications and should not be picked unilaterally inside a driver. Flagged
+/// for an explicit decision before this driver is used with any
+/// `approvalPolicy` stricter than whatever default made the current live
+/// tests pass.
 async fn supervise(
     mut child: tokio::process::Child,
     mut lines: BufReader<ChildStdout>,
