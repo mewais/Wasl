@@ -5,26 +5,38 @@ mod wire;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures::{stream, Stream, StreamExt};
+
+use wasl_proto::{AgentCard, AgentId};
+use wasl_registry::PeerRegistry;
 
 use hub::{frame_from_stream_item, status_for_error, HubSseFrame};
 pub use hub::{EventSubscription, RuntimeControlHub, RuntimeKind};
 pub use wire::{
     CancelRequest, CreateTargetRequest, ErrorBody, GateRequest, HelloFrame, InfoResponse,
-    ShutdownRequest, SubmitTurnRequest, TargetSnapshot, TargetsSnapshotResponse, TruncatedFrame,
+    PeersResponse, ShutdownRequest, SubmitTurnRequest, TargetSnapshot, TargetsSnapshotResponse,
+    TruncatedFrame,
 };
+
+/// The shared, runtime-mutable peer registry (D3). Created once by the node
+/// (`wasl_mcp::run`) and shared between this HTTP surface (the `/v1/peers`
+/// CRUD endpoints) and the send path (`WaslMcp`), so a peer added/removed here
+/// is immediately visible to `consult`/`command`/`message` dispatch.
+pub type SharedPeers = Arc<RwLock<PeerRegistry>>;
 
 #[derive(Clone)]
 struct AppState {
     hub: RuntimeControlHub,
+    peers: SharedPeers,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -53,7 +65,7 @@ impl IntoResponse for ApiError {
     }
 }
 
-pub fn router(hub: RuntimeControlHub) -> Router {
+pub fn router(hub: RuntimeControlHub, peers: SharedPeers) -> Router {
     Router::new()
         .route("/v1/info", get(info_handler))
         .route(
@@ -66,12 +78,23 @@ pub fn router(hub: RuntimeControlHub) -> Router {
         .route("/v1/targets/:target_id/cancel", post(cancel_handler))
         .route("/v1/targets/:target_id/gate", post(gate_handler))
         .route("/v1/targets/:target_id/shutdown", post(shutdown_handler))
-        .with_state(AppState { hub })
+        // D3: dynamic peer topology. Marsad's "Connections" edits ride here —
+        // the same control plane it already uses for session ownership.
+        .route(
+            "/v1/peers",
+            get(list_peers_handler).post(register_peer_handler),
+        )
+        .route("/v1/peers/:peer_id", delete(unregister_peer_handler))
+        .with_state(AppState { hub, peers })
 }
 
-pub async fn serve(hub: RuntimeControlHub, addr: SocketAddr) -> std::io::Result<()> {
+pub async fn serve(
+    hub: RuntimeControlHub,
+    peers: SharedPeers,
+    addr: SocketAddr,
+) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(hub)).await
+    axum::serve(listener, router(hub, peers)).await
 }
 
 async fn info_handler(State(state): State<AppState>) -> Json<InfoResponse> {
@@ -215,4 +238,57 @@ async fn shutdown_handler(
         .await
         .map(|_| StatusCode::NO_CONTENT)
         .map_err(ApiError::from_body)
+}
+
+// ---------------------------------------------------------------------
+// D3: peer topology CRUD (`/v1/peers`)
+// ---------------------------------------------------------------------
+
+/// `GET /v1/peers` — the registered A2A peers, sorted by id (deterministic,
+/// per `PeerRegistry::list`).
+async fn list_peers_handler(State(state): State<AppState>) -> Json<PeersResponse> {
+    let peers = state
+        .peers
+        .read()
+        .expect("peer registry lock poisoned")
+        .list()
+        .into_iter()
+        .cloned()
+        .collect();
+    Json(PeersResponse { peers })
+}
+
+/// `POST /v1/peers` — register (insert-or-overwrite) a peer by its card.
+/// Idempotent; returns `204 No Content`.
+async fn register_peer_handler(
+    State(state): State<AppState>,
+    Json(card): Json<AgentCard>,
+) -> StatusCode {
+    state
+        .peers
+        .write()
+        .expect("peer registry lock poisoned")
+        .register(card);
+    StatusCode::NO_CONTENT
+}
+
+/// `DELETE /v1/peers/:peer_id` — unregister a peer. `204` when it existed,
+/// `404 unknown_peer` when it did not (mirrors `/v1/targets/:id`'s honesty).
+async fn unregister_peer_handler(
+    State(state): State<AppState>,
+    Path(peer_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let removed = state
+        .peers
+        .write()
+        .expect("peer registry lock poisoned")
+        .unregister(&AgentId(peer_id.clone()));
+    if removed {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError::from_body(ErrorBody {
+            error: "unknown_peer".to_string(),
+            detail: peer_id,
+        }))
+    }
 }

@@ -341,6 +341,12 @@ pub fn run() {
         };
         // ── end OPERATOR shell ──────────────────────────────────────────────────
 
+        // Build the MCP handler now (not at the end) so its shared peer registry
+        // (D3) can be handed to the runtime-control `/v1/peers` endpoint below —
+        // the send path and the control plane then mutate the SAME registry.
+        let handler = build_handler(&cfg, hub);
+        let peers = handler.registry_handle();
+
         // ── RUNTIME-CONTROL wiring — IO SHELL, UNTESTED HERE ──────────────────
         //
         // When `runtime.kind = managed` AND `runtime.control_bind` is set, spin
@@ -366,8 +372,11 @@ pub fn run() {
                             env!("CARGO_PKG_VERSION").to_string(),
                             wasl_runtime_control::RuntimeKind::Managed,
                         );
+                        // Share the send path's peer registry (D3) so Marsad can
+                        // add/remove peers over `/v1/peers` at runtime.
+                        let peers = peers.clone();
                         tokio::spawn(async move {
-                            if let Err(err) = wasl_runtime_control::serve(hub, addr).await {
+                            if let Err(err) = wasl_runtime_control::serve(hub, peers, addr).await {
                                 eprintln!(
                                     "wasl-mcpd: runtime-control server terminated: {err}"
                                 );
@@ -385,7 +394,6 @@ pub fn run() {
         }
         // ── end RUNTIME-CONTROL shell ─────────────────────────────────────────
 
-        let handler = build_handler(&cfg, hub);
         match handler.serve(stdio()).await {
             Ok(running) => {
                 if let Err(err) = running.waiting().await {

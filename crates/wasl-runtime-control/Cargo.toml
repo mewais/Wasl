@@ -11,6 +11,7 @@ description = "Runtime Control API v1 serving shell and wire types over wasl-run
 [dependencies]
 wasl-runtime = { workspace = true }
 wasl-proto = { workspace = true }
+wasl-registry = { workspace = true }
 wasl-adapter = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

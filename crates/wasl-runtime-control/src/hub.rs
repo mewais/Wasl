@@ -335,7 +335,7 @@ async fn probe_target_window(target: Arc<dyn DeliveryTarget>) -> TargetProbe {
 pub(crate) fn status_for_error(error_code: &str) -> axum::http::StatusCode {
     match error_code {
         "admission_refused" => axum::http::StatusCode::TOO_MANY_REQUESTS,
-        "unknown_target" => axum::http::StatusCode::NOT_FOUND,
+        "unknown_target" | "unknown_peer" => axum::http::StatusCode::NOT_FOUND,
         "unsupported" | "gate_unresolvable" => axum::http::StatusCode::CONFLICT,
         _ => axum::http::StatusCode::BAD_REQUEST,
     }

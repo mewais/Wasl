@@ -261,7 +261,13 @@ impl TokenIds for CounterTokenIds {
 pub struct WaslMcp<K: Sink, R: Runner> {
     self_id: AgentId,
     self_host: HostId,
-    registry: Arc<PeerRegistry>,
+    /// Shared, runtime-mutable peer registry (D3). The SAME `Arc` handed to the
+    /// runtime-control `/v1/peers` endpoint via [`WaslMcp::registry_handle`], so
+    /// a peer Marsad adds/removes at runtime is immediately visible to the send
+    /// path (`consult`/`command`/`message`), which reads a per-dispatch snapshot
+    /// (see [`WaslMcp::registry_snapshot`]) — never holding the lock across an
+    /// `.await`.
+    registry: Arc<std::sync::RwLock<PeerRegistry>>,
     state: Arc<Mutex<WaslState<K, R>>>,
     tool_router: ToolRouter<Self>,
     /// The configured gate authority (which tier(s) may decide a call).
@@ -337,13 +343,29 @@ where
         Self {
             self_id,
             self_host,
-            registry: Arc::new(registry),
+            registry: Arc::new(std::sync::RwLock::new(registry)),
             state: Arc::new(Mutex::new(state)),
             tool_router: Self::tool_router(),
             authority,
             hub,
             token_ids,
         }
+    }
+
+    /// The shared peer-registry handle (D3). Register/unregister peers on this
+    /// at runtime and the change is immediately visible to the send path — it is
+    /// the SAME `Arc` this handler reads. The runtime-control `/v1/peers`
+    /// endpoint is wired to this handle in `wasl_mcp::run`.
+    pub fn registry_handle(&self) -> Arc<std::sync::RwLock<PeerRegistry>> {
+        self.registry.clone()
+    }
+
+    /// A point-in-time clone of the peer registry — exactly what each dispatch
+    /// reads to build its `ToolCtx`. Cloning (rather than borrowing the guard)
+    /// keeps the `std::sync::RwLock` read lock from being held across the
+    /// dispatch `.await`.
+    pub fn registry_snapshot(&self) -> PeerRegistry {
+        self.registry.read().expect("peer registry lock poisoned").clone()
     }
 
     /// Tier-1: surface the gate via MCP `elicitation/create`. Mirrored
@@ -553,10 +575,14 @@ where
         let mut state = self.state.lock().await;
         let seq = state.next_seq();
         let base_id = format!("mcp-{seq}");
+        // Snapshot the shared registry (D3): a plain clone so no read lock is
+        // held across the dispatch `.await` below; the snapshot reflects any
+        // peer added/removed at runtime via `registry_handle`.
+        let registry_snapshot = self.registry_snapshot();
         let ctx = ToolCtx {
             self_id: &self.self_id,
             self_host: &self.self_host,
-            registry: &self.registry,
+            registry: &registry_snapshot,
         };
 
         // Split the borrow of `state`: the A2A seam is a `&` shared client (cheap

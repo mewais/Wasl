@@ -11,7 +11,6 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
@@ -219,6 +218,108 @@ async fn shutdown_returns_204() {
         .await
         .expect("POST .../shutdown");
     assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+}
+
+// ---------------------------------------------------------------------
+// D3: /v1/peers CRUD over real HTTP (dynamic peer topology)
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn peers_crud_round_trip() {
+    let target = ScriptedTarget::new("tgt-1", vec![]);
+    let provider = ScriptedProvider::new(target, false);
+    let hub = make_hub(provider);
+    let addr = spawn_router(hub).await;
+    let c = client();
+
+    // Initially empty.
+    let listed: serde_json::Value = c
+        .get(format!("http://{addr}/v1/peers"))
+        .send()
+        .await
+        .expect("GET /v1/peers")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed["peers"], json!([]));
+
+    // Register two peers out of order — list must come back sorted by id.
+    for (id, host, ep) in [
+        ("peer-z", "host-9", "http://10.0.0.9:8080"),
+        ("peer-a", "host-1", "http://10.0.0.1:8080"),
+    ] {
+        let r = c
+            .post(format!("http://{addr}/v1/peers"))
+            .json(&json!({ "id": id, "host": host, "endpoint": ep }))
+            .send()
+            .await
+            .expect("POST /v1/peers");
+        assert_eq!(r.status(), reqwest::StatusCode::NO_CONTENT);
+    }
+
+    // List reflects both, sorted ascending by id.
+    let listed: serde_json::Value = c
+        .get(format!("http://{addr}/v1/peers"))
+        .send()
+        .await
+        .expect("GET /v1/peers")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed["peers"].as_array().expect("array").len(), 2);
+    assert_eq!(listed["peers"][0]["id"], json!("peer-a"));
+    assert_eq!(listed["peers"][0]["host"], json!("host-1"));
+    assert_eq!(listed["peers"][0]["endpoint"], json!("http://10.0.0.1:8080"));
+    assert_eq!(listed["peers"][1]["id"], json!("peer-z"));
+
+    // Re-register peer-a with a new endpoint → idempotent overwrite, still 2.
+    let r = c
+        .post(format!("http://{addr}/v1/peers"))
+        .json(&json!({ "id": "peer-a", "host": "host-1", "endpoint": "http://10.0.0.2:9999" }))
+        .send()
+        .await
+        .expect("POST overwrite");
+    assert_eq!(r.status(), reqwest::StatusCode::NO_CONTENT);
+    let listed: serde_json::Value = c
+        .get(format!("http://{addr}/v1/peers"))
+        .send()
+        .await
+        .expect("GET after overwrite")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed["peers"].as_array().expect("array").len(), 2);
+    assert_eq!(listed["peers"][0]["endpoint"], json!("http://10.0.0.2:9999"));
+
+    // Delete peer-z → 204.
+    let r = c
+        .delete(format!("http://{addr}/v1/peers/peer-z"))
+        .send()
+        .await
+        .expect("DELETE peer-z");
+    assert_eq!(r.status(), reqwest::StatusCode::NO_CONTENT);
+
+    // Delete again → 404 unknown_peer.
+    let r = c
+        .delete(format!("http://{addr}/v1/peers/peer-z"))
+        .send()
+        .await
+        .expect("DELETE peer-z again");
+    assert_eq!(r.status(), reqwest::StatusCode::NOT_FOUND);
+    let body: serde_json::Value = r.json().await.expect("json");
+    assert_eq!(body["error"], json!("unknown_peer"));
+
+    // Final list = only peer-a.
+    let listed: serde_json::Value = c
+        .get(format!("http://{addr}/v1/peers"))
+        .send()
+        .await
+        .expect("final GET")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(listed["peers"].as_array().expect("array").len(), 1);
+    assert_eq!(listed["peers"][0]["id"], json!("peer-a"));
 }
 
 // ---------------------------------------------------------------------

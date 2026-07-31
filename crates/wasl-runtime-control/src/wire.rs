@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use wasl_adapter::Delivery;
-use wasl_proto::GateDecision;
+use wasl_proto::{AgentCard, GateDecision};
 use wasl_runtime::{
     BusyPolicy, CancelReason, Causation, EventSeq, IdempotencyKey, RuntimeCapabilities,
     ShutdownMode, TargetId, TargetKey, TargetStatus, TurnId, TurnSource,
@@ -31,6 +31,13 @@ pub struct TargetSnapshot {
 #[serde(rename_all = "snake_case")]
 pub struct TargetsSnapshotResponse {
     pub targets: Vec<TargetSnapshot>,
+}
+
+/// `GET /v1/peers` body (D3): the node's registered A2A peers, sorted by id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct PeersResponse {
+    pub peers: Vec<AgentCard>,
 }
 
 fn spawn_context_is_default(c: &wasl_runtime::SpawnContext) -> bool {

@@ -33,7 +33,11 @@ pub fn client() -> reqwest::Client {
 /// spawned so connections queue immediately (no readiness race) -- the exact
 /// `wasl-operator::tests::common::spawn_router` idiom.
 pub async fn spawn_router(hub: RuntimeControlHub) -> std::net::SocketAddr {
-    let app = wasl_runtime_control::router(hub);
+    // D3: the peer-CRUD tests drive `/v1/peers` over this same fresh registry.
+    let peers = std::sync::Arc::new(std::sync::RwLock::new(
+        wasl_registry::PeerRegistry::new(),
+    ));
+    let app = wasl_runtime_control::router(hub, peers);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
