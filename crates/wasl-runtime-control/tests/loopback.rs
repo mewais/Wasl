@@ -17,8 +17,8 @@ use std::time::Duration;
 use serde_json::json;
 
 use common::{
-    assistant_delta_event, client, make_hub, session_ready_event, spawn_router, ScriptedProvider,
-    ScriptedTarget, SseReader,
+    assistant_delta_event, client, make_hub, make_recording_provider, session_ready_event,
+    spawn_router, ScriptedProvider, ScriptedTarget, SseReader,
 };
 
 use wasl_runtime::{EventSeq, StreamItem};
@@ -28,10 +28,7 @@ const SSE_TIMEOUT: Duration = Duration::from_secs(5);
 #[tokio::test]
 async fn info_endpoint_returns_expected_body() {
     let target = ScriptedTarget::new("tgt-1", vec![]);
-    let provider = Arc::new(ScriptedProvider {
-        target,
-        refuse_admission: false,
-    });
+    let provider = ScriptedProvider::new(target, false);
     let hub = make_hub(provider);
     let addr = spawn_router(hub).await;
 
@@ -51,10 +48,7 @@ async fn info_endpoint_returns_expected_body() {
 #[tokio::test]
 async fn create_then_snapshot_then_list_round_trip() {
     let target = ScriptedTarget::new("tgt-1", vec![session_ready_event(1)]);
-    let provider = Arc::new(ScriptedProvider {
-        target,
-        refuse_admission: false,
-    });
+    let provider = ScriptedProvider::new(target, false);
     let hub = make_hub(provider);
     let addr = spawn_router(hub).await;
     let c = client();
@@ -92,10 +86,7 @@ async fn create_then_snapshot_then_list_round_trip() {
 #[tokio::test]
 async fn get_unknown_target_is_404() {
     let target = ScriptedTarget::new("tgt-1", vec![]);
-    let provider = Arc::new(ScriptedProvider {
-        target,
-        refuse_admission: false,
-    });
+    let provider = ScriptedProvider::new(target, false);
     let hub = make_hub(provider);
     let addr = spawn_router(hub).await;
 
@@ -110,10 +101,7 @@ async fn get_unknown_target_is_404() {
 #[tokio::test]
 async fn create_target_admission_refused_is_429() {
     let target = ScriptedTarget::new("tgt-1", vec![]);
-    let provider = Arc::new(ScriptedProvider {
-        target,
-        refuse_admission: true,
-    });
+    let provider = ScriptedProvider::new(target, true);
     let hub = make_hub(provider);
     let addr = spawn_router(hub).await;
 
@@ -131,10 +119,7 @@ async fn create_target_admission_refused_is_429() {
 #[tokio::test]
 async fn submit_turn_returns_started_receipt() {
     let target = ScriptedTarget::new("tgt-1", vec![]);
-    let provider = Arc::new(ScriptedProvider {
-        target,
-        refuse_admission: false,
-    });
+    let provider = ScriptedProvider::new(target, false);
     let hub = make_hub(provider);
     let addr = spawn_router(hub).await;
     let c = client();
@@ -166,10 +151,7 @@ async fn submit_turn_returns_started_receipt() {
 #[tokio::test]
 async fn cancel_unsupported_target_is_409() {
     let target = ScriptedTarget::new("tgt-1", vec![]);
-    let provider = Arc::new(ScriptedProvider {
-        target,
-        refuse_admission: false,
-    });
+    let provider = ScriptedProvider::new(target, false);
     let hub = make_hub(provider);
     let addr = spawn_router(hub).await;
     let c = client();
@@ -194,10 +176,7 @@ async fn cancel_unsupported_target_is_409() {
 #[tokio::test]
 async fn gate_unresolvable_is_409() {
     let target = ScriptedTarget::new("tgt-1", vec![]);
-    let provider = Arc::new(ScriptedProvider {
-        target,
-        refuse_admission: false,
-    });
+    let provider = ScriptedProvider::new(target, false);
     let hub = make_hub(provider);
     let addr = spawn_router(hub).await;
     let c = client();
@@ -222,10 +201,7 @@ async fn gate_unresolvable_is_409() {
 #[tokio::test]
 async fn shutdown_returns_204() {
     let target = ScriptedTarget::new("tgt-1", vec![]);
-    let provider = Arc::new(ScriptedProvider {
-        target,
-        refuse_admission: false,
-    });
+    let provider = ScriptedProvider::new(target, false);
     let hub = make_hub(provider);
     let addr = spawn_router(hub).await;
     let c = client();
@@ -259,10 +235,7 @@ async fn events_sse_hello_then_turn_events_with_seq_ids() {
             assistant_delta_event(3, "G"),
         ],
     );
-    let provider = Arc::new(ScriptedProvider {
-        target,
-        refuse_admission: false,
-    });
+    let provider = ScriptedProvider::new(target, false);
     let hub = make_hub(provider);
     let addr = spawn_router(hub).await;
     let c = client();
@@ -334,10 +307,7 @@ async fn events_sse_after_seq_resumes_correctly() {
             assistant_delta_event(3, "keep-me"),
         ],
     );
-    let provider = Arc::new(ScriptedProvider {
-        target,
-        refuse_admission: false,
-    });
+    let provider = ScriptedProvider::new(target, false);
     let hub = make_hub(provider);
     let addr = spawn_router(hub).await;
     let c = client();
@@ -375,10 +345,7 @@ async fn events_sse_truncated_frame_carries_earliest_latest() {
             latest: EventSeq(20),
         }],
     );
-    let provider = Arc::new(ScriptedProvider {
-        target,
-        refuse_admission: false,
-    });
+    let provider = ScriptedProvider::new(target, false);
     let hub = make_hub(provider);
     let addr = spawn_router(hub).await;
     let c = client();
@@ -405,4 +372,248 @@ async fn events_sse_truncated_frame_carries_earliest_latest() {
     );
     assert_eq!(truncated.data["earliest"], json!(8));
     assert_eq!(truncated.data["latest"], json!(20));
+}
+
+// =====================================================================
+// Context round-trip + protocol-precedence loopback tests
+//
+// Each test POSTs to /v1/targets, then interrogates the recorded
+// SpawnContext that the ScriptedProvider's target_for_with_context()
+// captured.  This is the key proof that the context payload crosses
+// the HTTP wire all the way into the provider.
+// =====================================================================
+
+/// Helper: POST /v1/targets with the given JSON body and expect HTTP 200.
+/// Returns the response JSON.
+async fn post_create_target(
+    addr: std::net::SocketAddr,
+    body: serde_json::Value,
+) -> serde_json::Value {
+    client()
+        .post(format!("http://{addr}/v1/targets"))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST /v1/targets")
+        .json()
+        .await
+        .expect("response body as JSON")
+}
+
+/// Helper: POST /v1/targets with the given JSON body and expect non-200.
+/// Returns the (status, body) pair.
+async fn post_create_target_expect_error(
+    addr: std::net::SocketAddr,
+    body: serde_json::Value,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let resp = client()
+        .post(format!("http://{addr}/v1/targets"))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST /v1/targets");
+    let status = resp.status();
+    let body: serde_json::Value = resp.json().await.expect("error body as JSON");
+    (status, body)
+}
+
+/// POST with a full context body (protocol + cwd + model) and verify
+/// the recorded SpawnContext matches those fields exactly.
+#[tokio::test]
+async fn create_target_with_full_context_recorded_by_provider() {
+    let target = ScriptedTarget::new("tgt-1", vec![]);
+    let provider = make_recording_provider(target);
+    let hub = make_hub(provider.clone());
+    let addr = spawn_router(hub).await;
+
+    post_create_target(
+        addr,
+        json!({
+            "key": "ctx-42",
+            "context": {
+                "protocol": "claude",
+                "cwd": "/workspace/project",
+                "model": "claude-opus-4-5"
+            }
+        }),
+    )
+    .await;
+
+    let ctx = provider
+        .recorded_context()
+        .await
+        .expect("provider must have received a context");
+
+    // Hub folds context.protocol as the effective protocol.
+    assert_eq!(
+        ctx.protocol.as_deref(),
+        Some("claude"),
+        "context.protocol must survive the wire"
+    );
+    assert_eq!(
+        ctx.cwd.as_deref(),
+        Some("/workspace/project"),
+        "cwd must survive the wire"
+    );
+    assert_eq!(
+        ctx.model.as_deref(),
+        Some("claude-opus-4-5"),
+        "model must survive the wire"
+    );
+}
+
+// --- Protocol-precedence tests ---
+
+/// context.protocol wins over top-level protocol (context wins per spec).
+#[tokio::test]
+async fn protocol_precedence_context_wins_over_top_level() {
+    let target = ScriptedTarget::new("tgt-1", vec![]);
+    let provider = make_recording_provider(target);
+    let hub = make_hub(provider.clone());
+    let addr = spawn_router(hub).await;
+
+    post_create_target(
+        addr,
+        json!({
+            "key": "ctx-42",
+            "protocol": "opencode-acp",
+            "context": { "protocol": "claude" }
+        }),
+    )
+    .await;
+
+    let ctx = provider
+        .recorded_context()
+        .await
+        .expect("provider must have received a context");
+
+    assert_eq!(
+        ctx.protocol.as_deref(),
+        Some("claude"),
+        "context.protocol='claude' must win over top-level 'opencode-acp'"
+    );
+}
+
+/// Only top-level protocol (no context.protocol) → effective protocol
+/// propagated into context.protocol by the hub fold.
+#[tokio::test]
+async fn protocol_precedence_top_level_only_propagated_to_context() {
+    let target = ScriptedTarget::new("tgt-1", vec![]);
+    let provider = make_recording_provider(target);
+    let hub = make_hub(provider.clone());
+    let addr = spawn_router(hub).await;
+
+    post_create_target(
+        addr,
+        json!({
+            "key": "ctx-42",
+            "protocol": "claude"
+        }),
+    )
+    .await;
+
+    let ctx = provider
+        .recorded_context()
+        .await
+        .expect("provider must have received a context");
+
+    assert_eq!(
+        ctx.protocol.as_deref(),
+        Some("claude"),
+        "top-level protocol must be folded into context.protocol"
+    );
+}
+
+/// Neither top-level nor context.protocol → context.protocol remains None.
+#[tokio::test]
+async fn protocol_precedence_neither_yields_none() {
+    let target = ScriptedTarget::new("tgt-1", vec![]);
+    let provider = make_recording_provider(target);
+    let hub = make_hub(provider.clone());
+    let addr = spawn_router(hub).await;
+
+    post_create_target(
+        addr,
+        json!({ "key": "ctx-42" }),
+    )
+    .await;
+
+    let ctx = provider
+        .recorded_context()
+        .await
+        .expect("provider must have received a context");
+
+    assert_eq!(
+        ctx.protocol,
+        None,
+        "with no protocol in body, context.protocol must be None"
+    );
+}
+
+/// An unknown protocol value → the hub's validate_protocol rejects it
+/// with HTTP 400 and an "malformed" error body; provider is never called.
+#[tokio::test]
+async fn protocol_unknown_rejected_by_hub_before_provider() {
+    let target = ScriptedTarget::new("tgt-1", vec![]);
+    let provider = make_recording_provider(target);
+    let hub = make_hub(provider.clone());
+    let addr = spawn_router(hub).await;
+
+    let (status, body) = post_create_target_expect_error(
+        addr,
+        json!({ "key": "ctx-42", "protocol": "not-a-real-protocol" }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "unknown protocol must be rejected with 400"
+    );
+    assert_eq!(
+        body["error"], json!("malformed"),
+        "error body must carry 'malformed' error code"
+    );
+
+    // Provider must NOT have been called.
+    assert!(
+        provider.recorded_context().await.is_none(),
+        "provider must not be invoked when protocol validation fails"
+    );
+}
+
+/// Same precedence test as above but with context.protocol being the unknown
+/// value: hub validates the effective protocol (context wins), so the bad
+/// value in context still gets rejected.
+#[tokio::test]
+async fn protocol_unknown_in_context_also_rejected() {
+    let target = ScriptedTarget::new("tgt-1", vec![]);
+    let provider = make_recording_provider(target);
+    let hub = make_hub(provider.clone());
+    let addr = spawn_router(hub).await;
+
+    let (status, body) = post_create_target_expect_error(
+        addr,
+        json!({
+            "key": "ctx-42",
+            "protocol": "claude",
+            "context": { "protocol": "not-a-real-protocol" }
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST,
+        "unknown protocol in context must be rejected with 400"
+    );
+    assert_eq!(
+        body["error"], json!("malformed"),
+        "error body must carry 'malformed' error code"
+    );
+
+    assert!(
+        provider.recorded_context().await.is_none(),
+        "provider must not be invoked when protocol validation fails"
+    );
 }

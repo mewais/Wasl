@@ -17,6 +17,13 @@ pub mod gating;
 pub mod handle;
 pub mod server;
 
+// Needed for the managed-runtime / runtime-control wiring in `run()`.
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+use wasl_runtime::{ManagedConfig, MonotonicClock, ProtocolRoutingProvider, RuntimeProvider,
+    WaslManagedRuntimeProvider};
+use wasl_runtime_protocol::{ClaudeStreamProtocol, OpenCodeAcpProtocol};
+
 use wasl_audit::{AuditEntry, AuditError, AuditLog, Sink};
 use wasl_filesink::FileSink;
 use wasl_operator::{HubConfig, NodeInfo, OperatorHub, TeeSink};
@@ -89,6 +96,67 @@ impl Sink for RunSink {
             RunSink::Teed(tee) => tee.append(entry),
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// 1b. build_managed_provider — IO SHELL, UNTESTED HERE
+// ---------------------------------------------------------------------
+
+/// Construct a per-protocol [`WaslManagedRuntimeProvider`] for each of the
+/// configured protocols (`"claude"`, `"opencode-acp"`) and wrap them in a
+/// [`ProtocolRoutingProvider`] so one Wasl node can serve both protocols.
+///
+/// The clock is [`MonotonicClock`] (the same default the node uses throughout).
+/// The audit sink is a fresh [`MemSink`] — a non-durable in-memory sink, which
+/// is correct here: the managed provider's actor uses the sink only for
+/// runtime-layer audit entries; the durable per-session audit trail is
+/// separately written by the MCP handler via the `AuditLog`/`FileSink` already
+/// built in [`build_handler`]. A shared durable sink could be wired in a
+/// future phase; for now the default matches the crate's existing pattern.
+fn build_managed_provider(cfg: &Config) -> Arc<dyn RuntimeProvider> {
+    let clock: Arc<dyn wasl_runtime::RuntimeClock> = Arc::new(MonotonicClock);
+    // Each sub-provider gets its own sink handle (the actor's sole writer).
+    let claude_bin = cfg
+        .runtime
+        .claude_bin
+        .clone()
+        .unwrap_or_else(|| "claude".to_string());
+    let opencode_bin = cfg
+        .runtime
+        .opencode_bin
+        .clone()
+        .unwrap_or_else(|| "opencode".to_string());
+
+    let claude_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> =
+        Arc::new(Mutex::new(MemSink::new()));
+    let opencode_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> =
+        Arc::new(Mutex::new(MemSink::new()));
+
+    let claude_provider: Arc<dyn RuntimeProvider> = Arc::new(
+        WaslManagedRuntimeProvider::with_seams(
+            ClaudeStreamProtocol::new(claude_bin),
+            ManagedConfig::default(),
+            clock.clone(),
+            claude_sink,
+        ),
+    );
+    let opencode_provider: Arc<dyn RuntimeProvider> = Arc::new(
+        WaslManagedRuntimeProvider::with_seams(
+            OpenCodeAcpProtocol::new(opencode_bin),
+            ManagedConfig::default(),
+            clock,
+            opencode_sink,
+        ),
+    );
+
+    let mut providers = BTreeMap::new();
+    providers.insert("claude".to_string(), claude_provider);
+    providers.insert("opencode-acp".to_string(), opencode_provider);
+
+    Arc::new(ProtocolRoutingProvider::new(
+        providers,
+        cfg.runtime.default_protocol.clone(),
+    ))
 }
 
 // ---------------------------------------------------------------------
@@ -253,6 +321,45 @@ pub fn run() {
             None => None,
         };
         // ── end OPERATOR shell ──────────────────────────────────────────────────
+
+        // ── RUNTIME-CONTROL wiring — IO SHELL, UNTESTED HERE ──────────────────
+        //
+        // When `runtime.kind = managed` AND `runtime.control_bind` is set, spin
+        // up the runtime-control HTTP API (wasl_runtime_control::serve) backed
+        // by a ProtocolRoutingProvider that delegates to per-protocol managed
+        // WaslManagedRuntimeProvider instances. The serve body and the managed-
+        // provider constructor are COMPILE-ONLY SHELLS (`todo!()` inside
+        // `build_managed_provider`); the actual logic lands in Phase-2.
+        if matches!(cfg.runtime.kind, RuntimeKind::Managed) {
+            if let Some(bind) = cfg.runtime.control_bind.clone() {
+                match bind.parse::<std::net::SocketAddr>() {
+                    Ok(addr) => {
+                        let provider = build_managed_provider(&cfg);
+                        let hub = wasl_runtime_control::RuntimeControlHub::new(
+                            provider,
+                            cfg.identity.agent_id.clone(),
+                            cfg.identity.host_id.clone(),
+                            env!("CARGO_PKG_VERSION").to_string(),
+                            wasl_runtime_control::RuntimeKind::Managed,
+                        );
+                        tokio::spawn(async move {
+                            if let Err(err) = wasl_runtime_control::serve(hub, addr).await {
+                                eprintln!(
+                                    "wasl-mcpd: runtime-control server terminated: {err}"
+                                );
+                            }
+                        });
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "wasl-mcpd: WARNING: runtime.control_bind={bind:?} is not a valid \
+                             socket address ({err}); runtime-control API not started."
+                        );
+                    }
+                }
+            }
+        }
+        // ── end RUNTIME-CONTROL shell ─────────────────────────────────────────
 
         let handler = build_handler(&cfg, hub);
         match handler.serve(stdio()).await {

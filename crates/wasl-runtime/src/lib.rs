@@ -35,10 +35,12 @@ mod config;
 mod ephemeral;
 mod journal;
 mod provider;
+mod routing;
 
 pub use config::ManagedConfig;
 pub use ephemeral::EphemeralRuntimeProvider;
 pub use provider::WaslManagedRuntimeProvider;
+pub use routing::ProtocolRoutingProvider;
 
 // `wasl_proto` owns the shared vocabulary (`AgentId`/`RequestId`/`GateDecision`
 // and, critically, `DeliveryCertainty`), re-exported by `wasl-audit`; this crate
@@ -750,12 +752,49 @@ pub enum ProtocolEvent {
     },
 }
 
+/// Caller-supplied spawn context: per-target protocol routing, cwd, model,
+/// posture, env overrides, setup script, binary override, and disallowed tools.
+/// All fields are optional; absent fields mean "use the driver/provider default".
+/// `Default` yields an all-`None`/empty context (fully backward-compatible).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SpawnContext {
+    /// Which protocol to use (e.g. `"claude"`, `"opencode-acp"`). `None` means
+    /// the provider picks its default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// Working directory for the spawned process. `None` means inherit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Model name to pass to the driver. `None` means use the driver default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Permission posture (e.g. `"default"`, `"bypassPermissions"`). `None`
+    /// means use the driver default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posture: Option<String>,
+    /// Extra environment variables merged into the spawned process env.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
+    /// Setup script run before the agent is started. `None` means no setup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<String>,
+    /// Override the agent binary path. `None` means use the driver's configured
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin: Option<String>,
+    /// Tool names the agent is not permitted to call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub disallowed_tools: Vec<String>,
+}
+
 /// Options a provider passes a driver at spawn/resume (bin, model, isolated env,
 /// target key, native-for-resume). Fields are private to the crate; only R2
 /// drivers construct/read them.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SpawnOptions {
     pub(crate) target_key: Option<TargetKey>,
+    pub(crate) context: SpawnContext,
 }
 
 impl SpawnOptions {
@@ -766,6 +805,12 @@ impl SpawnOptions {
     /// (e.g. `FakeLineProtocol`) may ignore it.
     pub fn target_key(&self) -> Option<&TargetKey> {
         self.target_key.as_ref()
+    }
+
+    /// The spawn context (cwd, model, posture, env, bin, disallowed_tools,
+    /// protocol) carried from the create-target request down to the driver.
+    pub fn context(&self) -> &SpawnContext {
+        &self.context
     }
 }
 
@@ -815,6 +860,23 @@ pub trait RuntimeProvider: Send + Sync {
 
     /// List currently-known targets (R3 `list`).
     async fn list_targets(&self) -> Vec<TargetId>;
+
+    /// Get-or-create the target for a `key`, threading a [`SpawnContext`] to the
+    /// driver so per-target protocol routing, cwd, model, posture, env overrides,
+    /// and binary choice take effect at spawn time.
+    ///
+    /// **Default impl**: falls back to [`RuntimeProvider::target_for`] ignoring
+    /// the context. Providers that understand the context (e.g.
+    /// `WaslManagedRuntimeProvider`, `ProtocolRoutingProvider`) override this.
+    /// Ephemeral and external-seam providers need no change — the default keeps
+    /// them compiling with zero edits.
+    async fn target_for_with_context(
+        &self,
+        key: &TargetKey,
+        _context: SpawnContext,
+    ) -> Result<std::sync::Arc<dyn DeliveryTarget>, RuntimeError> {
+        self.target_for(key).await
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -929,10 +991,23 @@ impl std::error::Error for RuntimeError {}
 
 #[cfg(test)]
 mod tests {
-    use super::SpawnOptions;
+    use super::{SpawnContext, SpawnOptions};
 
     #[test]
     fn spawn_options_default_has_no_target_key() {
         assert!(SpawnOptions::default().target_key().is_none());
+    }
+
+    #[test]
+    fn spawn_context_default_is_all_none() {
+        let ctx = SpawnContext::default();
+        assert!(ctx.protocol.is_none());
+        assert!(ctx.cwd.is_none());
+        assert!(ctx.model.is_none());
+        assert!(ctx.posture.is_none());
+        assert!(ctx.env.is_empty());
+        assert!(ctx.setup.is_none());
+        assert!(ctx.bin.is_none());
+        assert!(ctx.disallowed_tools.is_empty());
     }
 }

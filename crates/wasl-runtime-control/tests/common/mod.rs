@@ -16,8 +16,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use wasl_runtime::{
     BusyPolicy, CancelReason, DeliveryTarget, EventSeq, NativeSessionId, RuntimeCapabilities,
-    RuntimeError, RuntimeProvider, ShutdownMode, StreamItem, TargetId, TargetKey, TargetStatus,
-    TurnEvent, TurnId, TurnReceipt, TurnRequest,
+    RuntimeError, RuntimeProvider, ShutdownMode, SpawnContext, StreamItem, TargetId, TargetKey,
+    TargetStatus, TurnEvent, TurnId, TurnReceipt, TurnRequest,
 };
 use wasl_runtime_control::{RuntimeControlHub, RuntimeKind};
 
@@ -237,6 +237,25 @@ impl wasl_runtime::ToolCallAnswerer for ScriptedTarget {
 pub struct ScriptedProvider {
     pub target: Arc<ScriptedTarget>,
     pub refuse_admission: bool,
+    /// Records the last [`SpawnContext`] received by `target_for_with_context`.
+    /// `None` means no context call has occurred yet.
+    pub last_context: Arc<AsyncMutex<Option<SpawnContext>>>,
+}
+
+impl ScriptedProvider {
+    /// Create a provider without context recording (backward-compat with existing tests).
+    pub fn new(target: Arc<ScriptedTarget>, refuse_admission: bool) -> Arc<Self> {
+        Arc::new(Self {
+            target,
+            refuse_admission,
+            last_context: Arc::new(AsyncMutex::new(None)),
+        })
+    }
+
+    /// Convenience: snapshot the last recorded context.
+    pub async fn recorded_context(&self) -> Option<SpawnContext> {
+        self.last_context.lock().await.clone()
+    }
 }
 
 #[async_trait]
@@ -248,6 +267,16 @@ impl RuntimeProvider for ScriptedProvider {
             });
         }
         Ok(self.target.clone())
+    }
+
+    /// Override: records the `SpawnContext` before delegating to `target_for`.
+    async fn target_for_with_context(
+        &self,
+        key: &TargetKey,
+        context: SpawnContext,
+    ) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
+        *self.last_context.lock().await = Some(context);
+        self.target_for(key).await
     }
 
     async fn list_targets(&self) -> Vec<TargetId> {
@@ -282,4 +311,12 @@ pub fn make_hub(provider: Arc<dyn RuntimeProvider>) -> RuntimeControlHub {
         "0.1.0".to_string(),
         RuntimeKind::Managed,
     )
+}
+
+/// Helper: build a `ScriptedProvider` (non-refusing) backed by `target` and
+/// return the Arc so tests can call `recorded_context()` on it later.
+pub fn make_recording_provider(
+    target: Arc<ScriptedTarget>,
+) -> Arc<ScriptedProvider> {
+    ScriptedProvider::new(target, false)
 }

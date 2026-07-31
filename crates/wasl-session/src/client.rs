@@ -49,6 +49,7 @@ pub async fn start(
     let req = CreateTargetRequest {
         key: TargetKey(key.to_string()),
         protocol: protocol.map(ToOwned::to_owned),
+        context: Default::default(),
     };
     post_json(&endpoint(base_url, "v1/targets"), &req).await
 }

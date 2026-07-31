@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 use wasl_runtime::{
     ComposedPrompt, InteractiveProtocol, InteractiveTransport, NativeSessionId, ProtocolEvent,
-    RuntimeCapabilities, RuntimeError, SpawnOptions,
+    RuntimeCapabilities, RuntimeError, SpawnContext, SpawnOptions,
 };
 
 /// Identical UUIDv5 namespace to `wasl-adapter-claude::WASL_SESSION_NS`,
@@ -56,6 +56,56 @@ impl Default for SupervisionTimeouts {
 
 const POLL_IDLE: Duration = Duration::from_millis(500);
 
+/// Build the `claude` command-line argument vector from a session id, a resume
+/// flag, and a [`SpawnContext`].
+///
+/// The returned `Vec<String>` has `bin` as its first element so the caller can
+/// pass `argv[0]` directly to `Command::new` and `argv[1..]` as args.
+///
+/// The body of the new-flags section (model / permission-mode /
+/// disallowed-tools application) is `todo!()` — Phase-0 scaffold; Phase-2 will
+/// fill the real flag-application logic.
+pub fn claude_argv(
+    bin: &str,
+    session_id: &str,
+    resume: bool,
+    context: &SpawnContext,
+) -> Vec<String> {
+    let mut argv: Vec<String> = vec![
+        bin.to_string(),
+        "-p".to_string(),
+        "--input-format".to_string(),
+        "stream-json".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+    ];
+
+    if resume {
+        argv.push("--resume".to_string());
+    } else {
+        argv.push("--session-id".to_string());
+    }
+    argv.push(session_id.to_string());
+
+    if let Some(model) = &context.model {
+        argv.push("--model".to_string());
+        argv.push(model.clone());
+    }
+
+    if let Some(posture) = &context.posture {
+        argv.push("--permission-mode".to_string());
+        argv.push(posture.clone());
+    }
+
+    if !context.disallowed_tools.is_empty() {
+        argv.push("--disallowedTools".to_string());
+        argv.push(context.disallowed_tools.join(","));
+    }
+
+    argv
+}
+
 pub struct ClaudeStreamProtocol {
     bin: PathBuf,
     timeouts: SupervisionTimeouts,
@@ -85,17 +135,26 @@ impl ClaudeStreamProtocol {
     async fn spawn_child(
         &self,
         session_id: &str,
+        context: &SpawnContext,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        let mut cmd = Command::new(&self.bin);
-        cmd.arg("-p")
-            .arg("--input-format")
-            .arg("stream-json")
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose")
-            .arg("--session-id")
-            .arg(session_id)
-            .stdin(Stdio::piped())
+        let bin = context.bin.as_deref().unwrap_or(
+            self.bin
+                .to_str()
+                .unwrap_or("claude"),
+        );
+        let argv = claude_argv(bin, session_id, false, context);
+        // argv[0] is the binary, remaining args follow.
+        let mut cmd = Command::new(&argv[0]);
+        for arg in &argv[1..] {
+            cmd.arg(arg);
+        }
+        if let Some(cwd) = &context.cwd {
+            cmd.current_dir(cwd);
+        }
+        for (k, v) in &context.env {
+            cmd.env(k, v);
+        }
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -181,15 +240,15 @@ impl InteractiveProtocol for ClaudeStreamProtocol {
             detail: "ClaudeStreamProtocol::spawn requires SpawnOptions::target_key".to_string(),
         })?;
         let native = session_uuid(&target_key.0).to_string();
-        self.spawn_child(&native).await
+        self.spawn_child(&native, opts.context()).await
     }
 
     async fn resume(
         &self,
         native: &NativeSessionId,
-        _opts: &SpawnOptions,
+        opts: &SpawnOptions,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        self.spawn_child(&native.0).await
+        self.spawn_child(&native.0, opts.context()).await
     }
 }
 

@@ -97,12 +97,15 @@ impl RuntimeControlHub {
         &self,
         req: CreateTargetRequest,
     ) -> Result<TargetSnapshot, ErrorBody> {
-        validate_protocol(req.protocol.as_deref())?;
+        let effective_protocol = req.context.protocol.clone().or_else(|| req.protocol.clone());
+        validate_protocol(effective_protocol.as_deref())?;
+        let mut context = req.context;
+        context.protocol = effective_protocol;
 
         let target = self
             .0
             .provider
-            .target_for(&req.key)
+            .target_for_with_context(&req.key, context)
             .await
             .map_err(map_runtime_error)?;
         let target_id = target.target_id().clone();
@@ -496,6 +499,7 @@ mod tests {
             .create_target(CreateTargetRequest {
                 key: TargetKey("ctx-42".to_string()),
                 protocol: Some("opencode-acp".to_string()),
+                context: Default::default(),
             })
             .await
             .expect("create should succeed");
@@ -518,6 +522,7 @@ mod tests {
         hub.create_target(CreateTargetRequest {
             key: TargetKey("ctx-42".to_string()),
             protocol: None,
+            context: Default::default(),
         })
         .await
         .expect("create should succeed");

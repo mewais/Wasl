@@ -53,19 +53,19 @@ mod json_rpc_handshake;
 mod opencode_acp;
 mod process_supervision;
 
-pub use claude_stream::{map_claude_line, ClaudeStreamProtocol, ClaudeToolTracker};
+pub use claude_stream::{claude_argv, map_claude_line, ClaudeStreamProtocol, ClaudeToolTracker};
 pub use codex_appserver::{map_codex_line, CodexAppServerProtocol, CodexToolTracker};
 pub use fake_line::{FakeLineProtocol, SupervisionTimeouts};
 pub use json_rpc_handshake::{
     classify_handshake_line, classify_handshake_line as classify_codex_handshake_line,
     HandshakeLineClass, HandshakeLineClass as CodexHandshakeLineClass,
 };
-pub use opencode_acp::{map_acp_line_correlated, OpenCodeAcpProtocol};
+pub use opencode_acp::{map_acp_line_correlated, opencode_session_params, OpenCodeAcpProtocol};
 pub use process_supervision::next_wait;
 
 // The R1-owned generic driver contract every R2 driver implements/maps onto.
 // Re-surfaced here to make the R2 → R1 edge explicit.
 pub use wasl_runtime::{
     ComposedPrompt, InteractiveProtocol, InteractiveTransport, NativeSessionId, ProtocolEvent,
-    RuntimeCapabilities, RuntimeError, SpawnOptions,
+    RuntimeCapabilities, RuntimeError, SpawnContext, SpawnOptions,
 };
