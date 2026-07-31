@@ -18,9 +18,13 @@ wasl-dispatch = { workspace = true }
 wasl-a2a-types = { workspace = true }
 wasl-a2a-server = { workspace = true }
 wasl-adapter = { workspace = true }
+# D1: drive inbound A2A into the persistent managed runtime session.
+wasl-runtime = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-async-trait = { workspace = true }
 axum = { workspace = true }
+serde_json = { workspace = true }
