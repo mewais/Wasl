@@ -239,6 +239,18 @@ pub fn run() {
         use rmcp::transport::io::stdio;
         use rmcp::ServiceExt;
 
+        // D1 (live-runtime-plan §3): under `runtime.kind = managed`, build the
+        // managed provider ONCE and share it between the A2A receive server (so a
+        // peer's task lands in the node's live managed session) and the
+        // runtime-control hub below (so a session Marsad creates via
+        // runtime-control is the SAME target the A2A receiver delivers into).
+        let managed_provider: Option<std::sync::Arc<dyn wasl_runtime::RuntimeProvider>> =
+            if matches!(cfg.runtime.kind, RuntimeKind::Managed) {
+                Some(build_managed_provider(&cfg))
+            } else {
+                None
+            };
+
         // ── A2A RECEIVE wiring — IO SHELL, UNTESTED HERE ──────────────────────
         //
         // This composes only already-tested pieces (`wasl_node::receiver` →
@@ -266,8 +278,15 @@ pub fn run() {
                         default_output_modes: vec!["text/plain".to_string()],
                         skills: vec![],
                     };
-                    let adapter = build_adapter(&cfg.adapter);
-                    let server = std::sync::Arc::new(wasl_node::receiver(card, adapter));
+                    // Managed mode → drive inbound A2A into the persistent managed
+                    // session via the shared provider (D1); otherwise the one-shot
+                    // adapter path.
+                    let server = std::sync::Arc::new(match &managed_provider {
+                        Some(provider) => {
+                            wasl_node::receiver_runtime(card, std::sync::Arc::clone(provider))
+                        }
+                        None => wasl_node::receiver(card, build_adapter(&cfg.adapter)),
+                    });
                     // Spawn the receive serve loop concurrently with the stdio MCP
                     // server. UNTESTED HERE: this future's body never runs in tests.
                     tokio::spawn(async move {
@@ -334,7 +353,12 @@ pub fn run() {
             if let Some(bind) = cfg.runtime.control_bind.clone() {
                 match bind.parse::<std::net::SocketAddr>() {
                     Ok(addr) => {
-                        let provider = build_managed_provider(&cfg);
+                        // Reuse the shared managed provider built above (D1) so the
+                        // runtime-control API and the A2A receiver serve the SAME
+                        // sessions. Guaranteed Some here (kind == Managed).
+                        let provider = managed_provider
+                            .clone()
+                            .expect("managed provider built when runtime.kind = managed");
                         let hub = wasl_runtime_control::RuntimeControlHub::new(
                             provider,
                             cfg.identity.agent_id.clone(),

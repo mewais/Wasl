@@ -11,8 +11,8 @@ use wasl_node::RuntimeExecutor;
 use wasl_proto::{AgentId, DeliveryCertainty};
 use wasl_runtime::{
     BusyPolicy, CancelReason, DeliveryTarget, EventSeq, NativeGateResolver, RuntimeCapabilities,
-    RuntimeError, ShutdownMode, StreamItem, TargetId, TargetStatus, ToolCallAnswerer, TurnEvent,
-    TurnEventStream, TurnId, TurnReceipt, TurnRequest, TurnSource,
+    RuntimeError, RuntimeProvider, ShutdownMode, StreamItem, TargetId, TargetKey, TargetStatus,
+    ToolCallAnswerer, TurnEvent, TurnEventStream, TurnId, TurnReceipt, TurnRequest, TurnSource,
 };
 
 fn caps() -> RuntimeCapabilities {
@@ -96,6 +96,24 @@ impl ToolCallAnswerer for FakeTarget {
     }
 }
 
+/// A provider that always hands back the one scripted target (get-or-create noop).
+struct FakeProvider {
+    target: Arc<FakeTarget>,
+}
+
+#[async_trait::async_trait]
+impl RuntimeProvider for FakeProvider {
+    async fn target_for(
+        &self,
+        _key: &TargetKey,
+    ) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
+        Ok(Arc::clone(&self.target) as Arc<dyn DeliveryTarget>)
+    }
+    async fn list_targets(&self) -> Vec<TargetId> {
+        vec![self.target.id.clone()]
+    }
+}
+
 fn tid() -> TurnId {
     TurnId("t1".to_string())
 }
@@ -115,7 +133,8 @@ fn fake(receipt: TurnReceipt, events: Vec<TurnEvent>) -> (RuntimeExecutor, Arc<M
         events,
         captured: Arc::clone(&captured),
     });
-    (RuntimeExecutor::new(target), captured)
+    let provider = Arc::new(FakeProvider { target });
+    (RuntimeExecutor::new(provider), captured)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

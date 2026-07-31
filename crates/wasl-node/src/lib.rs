@@ -282,14 +282,15 @@ pub fn receiver<A: wasl_adapter::AgentAdapter + 'static>(
     )
 }
 
-/// D1: build the A2A server for this node backed by a PERSISTENT managed runtime
-/// session (`target`) instead of a one-shot adapter. Each inbound A2A task is
-/// submitted into `target` as a `TurnSource::Agent` turn and its reply returned
-/// (see [`RuntimeExecutor`]). This is the seam `wasl-mcpd` wires under
-/// `runtime.kind = managed` so a peer's send lands in the node's live session.
+/// D1: build the A2A server for this node backed by the managed runtime
+/// `provider` instead of a one-shot adapter. Each inbound A2A task is routed to
+/// the target for its `context_id` and submitted as a `TurnSource::Agent` turn,
+/// its reply returned (see [`RuntimeExecutor`]). This is the seam `wasl-mcpd`
+/// wires under `runtime.kind = managed` so a peer's send lands in the node's
+/// live session.
 pub fn receiver_runtime(
     card: wasl_a2a_types::AgentCard,
-    target: std::sync::Arc<dyn wasl_runtime::DeliveryTarget>,
+    provider: std::sync::Arc<dyn wasl_runtime::RuntimeProvider>,
 ) -> wasl_a2a_server::A2aServer {
-    wasl_a2a_server::A2aServer::new(card, std::sync::Arc::new(RuntimeExecutor::new(target)))
+    wasl_a2a_server::A2aServer::new(card, std::sync::Arc::new(RuntimeExecutor::new(provider)))
 }

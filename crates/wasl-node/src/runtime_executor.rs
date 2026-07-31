@@ -19,36 +19,39 @@ use wasl_a2a_types::{Message, Part};
 use wasl_adapter::delivery_from_message;
 use wasl_proto::{AgentId, RequestId};
 use wasl_runtime::{
-    BusyPolicy, Causation, DeliveryTarget, EventSeq, StreamItem, TurnEvent, TurnId, TurnReceipt,
-    TurnRequest, TurnSource,
+    BusyPolicy, Causation, EventSeq, RuntimeProvider, StreamItem, TargetKey, TurnEvent, TurnId,
+    TurnReceipt, TurnRequest, TurnSource,
 };
 
 /// Default bounded wait for a queued A2A turn before it expires, so a peer's task
 /// isn't dropped merely because the session is mid-turn.
 const DEFAULT_QUEUE_WAIT: Duration = Duration::from_secs(300);
 
-/// A [`TaskExecutor`] backed by a persistent managed [`DeliveryTarget`].
+/// A [`TaskExecutor`] backed by the managed [`RuntimeProvider`]. Each inbound A2A
+/// task is routed to the target for its `context_id` (`TargetKey == context_id`,
+/// get-or-create), so a node hosting several managed sessions delivers each
+/// peer's task into the right one.
 pub struct RuntimeExecutor {
-    target: Arc<dyn DeliveryTarget>,
+    provider: Arc<dyn RuntimeProvider>,
     busy_policy: BusyPolicy,
 }
 
 impl RuntimeExecutor {
-    /// Wrap `target` with the default busy policy (queue behind the active turn
+    /// Wrap `provider` with the default busy policy (queue behind the active turn
     /// for a bounded wait).
-    pub fn new(target: Arc<dyn DeliveryTarget>) -> Self {
+    pub fn new(provider: Arc<dyn RuntimeProvider>) -> Self {
         Self {
-            target,
+            provider,
             busy_policy: BusyPolicy::Queue {
                 max_wait: DEFAULT_QUEUE_WAIT,
             },
         }
     }
 
-    /// Wrap `target` with an explicit busy policy.
-    pub fn with_busy_policy(target: Arc<dyn DeliveryTarget>, busy_policy: BusyPolicy) -> Self {
+    /// Wrap `provider` with an explicit busy policy.
+    pub fn with_busy_policy(provider: Arc<dyn RuntimeProvider>, busy_policy: BusyPolicy) -> Self {
         Self {
-            target,
+            provider,
             busy_policy,
         }
     }
@@ -78,6 +81,16 @@ impl RuntimeExecutor {
 #[async_trait::async_trait]
 impl TaskExecutor for RuntimeExecutor {
     async fn execute(&self, context_id: String, message: Message) -> Result<Vec<Part>, ExecError> {
+        // Route to the managed target for this context (get-or-create). A node may
+        // host several sessions; `TargetKey == context_id` selects the right one.
+        let target = self
+            .provider
+            .target_for(&TargetKey(context_id.clone()))
+            .await
+            .map_err(|e| ExecError {
+                message: format!("no runtime target for context '{context_id}': {e:?}"),
+            })?;
+
         // Same message→Delivery extraction the one-shot path uses.
         let delivery = delivery_from_message(context_id, &message);
         let from = AgentId(delivery.from.clone());
@@ -99,11 +112,11 @@ impl TaskExecutor for RuntimeExecutor {
             causation,
         };
 
-        let receipt = self.target.submit_turn(req, self.busy_policy.clone()).await;
+        let receipt = target.submit_turn(req, self.busy_policy.clone()).await;
         let (turn_id, from_seq) = Self::resolve_receipt(receipt)?;
 
         // Follow the turn to its terminal event and surface the reply.
-        let mut stream = self.target.events(from_seq).await;
+        let mut stream = target.events(from_seq).await;
         while let Some(item) = stream.next().await {
             match item {
                 StreamItem::Event { event, .. } => match event {
