@@ -103,6 +103,14 @@ pub fn claude_argv(
         argv.push(context.disallowed_tools.join(","));
     }
 
+    // D2 (send-capability): give the managed session Wasl's peer-send MCP tools by
+    // passing the caller-provided config verbatim. `--mcp-config` accepts a JSON
+    // blob or a file path; the runtime never interprets it.
+    if let Some(mcp_config) = &context.mcp_config {
+        argv.push("--mcp-config".to_string());
+        argv.push(mcp_config.clone());
+    }
+
     argv
 }
 

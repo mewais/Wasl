@@ -185,6 +185,7 @@ async fn target_for_with_context_threads_context_to_driver_spawn() {
         setup: Some("npm install".to_string()),
         bin: Some("/usr/local/bin/claude".to_string()),
         disallowed_tools: vec!["Bash".to_string()],
+        mcp_config: None,
     };
 
     let _target = prov

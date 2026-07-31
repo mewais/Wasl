@@ -189,6 +189,7 @@ fn sample_create_request_with_context() -> CreateTargetRequest {
             setup: Some("npm install".to_string()),
             bin: Some("/usr/local/bin/claude".to_string()),
             disallowed_tools: vec!["bash".to_string(), "computer".to_string()],
+            mcp_config: None,
         },
     }
 }

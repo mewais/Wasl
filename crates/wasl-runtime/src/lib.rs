@@ -786,6 +786,14 @@ pub struct SpawnContext {
     /// Tool names the agent is not permitted to call.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub disallowed_tools: Vec<String>,
+    /// D2 (send-capability): an MCP-server config the driver passes to the CLI
+    /// verbatim via `--mcp-config` (a JSON blob or a file path). This is how the
+    /// managed session gets Wasl's peer-send tools (consult/command/message) so it
+    /// can reach peers. `None` = no extra MCP servers. The caller (Marsad, or
+    /// wasl-mcpd node config) populates it with the node's send-tools endpoint;
+    /// the runtime applies it without interpreting the contents.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_config: Option<String>,
 }
 
 /// Options a provider passes a driver at spawn/resume (bin, model, isolated env,

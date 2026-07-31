@@ -46,6 +46,7 @@ fn full_spawn_context_round_trips_with_exact_field_names() {
         setup: Some("npm install".to_string()),
         bin: Some("/usr/local/bin/claude".to_string()),
         disallowed_tools: vec!["Bash".to_string(), "Write".to_string()],
+        mcp_config: Some("{\"mcpServers\":{\"wasl\":{}}}".to_string()),
     };
 
     let value = roundtrip(&ctx);
@@ -79,6 +80,10 @@ fn full_spawn_context_round_trips_with_exact_field_names() {
         value["disallowed_tools"],
         json!(["Bash", "Write"]),
         "field must be named 'disallowed_tools' (snake_case)"
+    );
+    assert_eq!(
+        value["mcp_config"], "{\"mcpServers\":{\"wasl\":{}}}",
+        "field must be named 'mcp_config' (snake_case)"
     );
     // env is a BTreeMap — must serialize as an object.
     assert_eq!(

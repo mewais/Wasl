@@ -58,6 +58,37 @@ fn default_context_resume_false_produces_canonical_argv() {
 }
 
 // ------------------------------------------------------------------
+// D2: mcp_config → --mcp-config (send-capability)
+// ------------------------------------------------------------------
+
+#[test]
+fn mcp_config_appends_mcp_config_flag_verbatim() {
+    let ctx = SpawnContext {
+        mcp_config: Some("{\"mcpServers\":{\"wasl\":{}}}".to_string()),
+        ..SpawnContext::default()
+    };
+    let argv = claude_argv("claude", "sid", false, &ctx);
+
+    let i = argv
+        .iter()
+        .position(|a| a == "--mcp-config")
+        .expect("--mcp-config must be present when mcp_config is set");
+    assert_eq!(
+        argv[i + 1], "{\"mcpServers\":{\"wasl\":{}}}",
+        "the mcp_config value is passed verbatim"
+    );
+}
+
+#[test]
+fn no_mcp_config_flag_when_unset() {
+    let argv = claude_argv("claude", "sid", false, &default_ctx());
+    assert!(
+        !argv.iter().any(|a| a == "--mcp-config"),
+        "no --mcp-config when mcp_config is None"
+    );
+}
+
+// ------------------------------------------------------------------
 // 2. resume=true uses --resume instead of --session-id
 // ------------------------------------------------------------------
 
