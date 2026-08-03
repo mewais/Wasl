@@ -68,3 +68,7 @@ axum = "0.7"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 async-trait = "0.1"
 futures = "0.3"
+wasit-core = { path = "../Wasit/crates/wasit-core" }
+wasit-claude = { path = "../Wasit/crates/wasit-claude" }
+wasit-codex = { path = "../Wasit/crates/wasit-codex" }
+wasit-opencode = { path = "../Wasit/crates/wasit-opencode" }

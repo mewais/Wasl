@@ -29,7 +29,6 @@ use wasl_runtime::{
     ShutdownMode, SpawnContext, TargetId, TargetKey, TargetStatus, ToolCallAnswerer,
     TurnEventStream, TurnId, TurnReceipt, TurnRequest,
 };
-use wasl_adapter;
 
 fn key(s: &str) -> TargetKey {
     TargetKey(s.to_string())

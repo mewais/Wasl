@@ -17,7 +17,9 @@ use axum::{Json, Router};
 use futures::{stream, Stream, StreamExt};
 
 use wasl_proto::{AgentCard, AgentId};
-use wasl_registry::PeerRegistry;
+// `pub use` so any `router()`/`serve()` caller can construct the `SharedPeers`
+// argument without a direct dependency on `wasl-registry`.
+pub use wasl_registry::PeerRegistry;
 
 use hub::{frame_from_stream_item, status_for_error, HubSseFrame};
 pub use hub::{EventSubscription, RuntimeControlHub, RuntimeKind};

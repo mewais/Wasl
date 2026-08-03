@@ -446,7 +446,6 @@ async fn default_trait_impl_delegates_to_target_for_ignoring_context() {
     );
 }
 
-use wasl_adapter;
 
 // ==================================================================
 // 6. ProtocolRoutingProvider overrides target_for_with_context and threads

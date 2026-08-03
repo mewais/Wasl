@@ -63,6 +63,12 @@ pub use json_rpc_handshake::{
 pub use opencode_acp::{map_acp_line_correlated, opencode_session_params, OpenCodeAcpProtocol};
 pub use process_supervision::next_wait;
 
+// Wasit re-exports so callers can use SpawnSpec / AgentEvent via this crate.
+pub use wasit_core;
+pub use wasit_claude;
+pub use wasit_codex;
+pub use wasit_opencode;
+
 // The R1-owned generic driver contract every R2 driver implements/maps onto.
 // Re-surfaced here to make the R2 → R1 edge explicit.
 pub use wasl_runtime::{

@@ -70,6 +70,13 @@ tokio = { workspace = true, features = ["process", "io-util", "io-std", "time", 
 # `crates/wasl-runtime-protocol/AGENTS.md` Phase-4 section.
 uuid = { version = "1", features = ["v5"] }
 nix = { version = "0.30", default-features = false, features = ["signal", "process"] }
+# Wasit driver library — the single source of truth for CLI parsing/events.
+# The 3 concrete drivers (claude_stream, codex_appserver, opencode_acp) are
+# now thin adapters wrapping Box<dyn wasit_core::Session>.
+wasit-core = { workspace = true }
+wasit-claude = { workspace = true }
+wasit-codex = { workspace = true }
+wasit-opencode = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

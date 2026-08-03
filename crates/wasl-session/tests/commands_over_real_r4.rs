@@ -159,7 +159,10 @@ async fn spawn_r4() -> String {
         "0.1.0".to_string(),
         wasl_runtime_control::RuntimeKind::Managed,
     );
-    let app = wasl_runtime_control::router(hub);
+    let peers = std::sync::Arc::new(std::sync::RwLock::new(
+        wasl_runtime_control::PeerRegistry::new(),
+    ));
+    let app = wasl_runtime_control::router(hub, peers);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral port");
