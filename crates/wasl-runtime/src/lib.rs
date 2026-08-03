@@ -484,6 +484,81 @@ mod duration_millis {
 }
 
 // ---------------------------------------------------------------------
+// 5a. Payload types for the new informational TurnEvent variants.
+//
+// These are ported/mirrored from `wasit_core` types; `wasl-runtime` does NOT
+// re-export or re-depend on wasit-core here (no dependency cycle), so the
+// fields are replicated with identical serde shapes.
+// ---------------------------------------------------------------------
+
+/// Token and cost snapshot for one `UsageUpdate` event.
+/// Field names and serde forms are identical to `wasit_core::Usage`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct UsageSnapshot {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
+    #[serde(default)]
+    pub cost_usd: f64,
+}
+
+/// One selectable agent mode (mirrored from `wasit_core::SessionMode`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AgentMode {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// One entry in an opencode plan (mirrored from `wasit_core::PlanEntry`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct PlanEntry {
+    pub content: String,
+    #[serde(default)]
+    pub priority: String,
+}
+
+/// Metadata from a context-compaction event (mirrored from `wasit_core::CompactionInfo`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct CompactionInfo {
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default)]
+    pub pre_tokens: u64,
+    #[serde(default)]
+    pub post_tokens: u64,
+    #[serde(default)]
+    pub cumulative_dropped_tokens: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
+/// One slash command (mirrored from `wasit_core::SlashCommandInfo`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct SlashCommandInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub argument_hint: String,
+}
+
+// `UsageSnapshot` uses f64 which is not Eq; provide a manual Eq via bit-equality
+// (sufficient for test assertions / round-trip checks).
+impl Eq for UsageSnapshot {}
+
+// ---------------------------------------------------------------------
 // 5. The PUBLIC TurnEvent vocabulary (runtime.md §5)
 // ---------------------------------------------------------------------
 
@@ -597,7 +672,59 @@ pub enum TurnEvent {
         /// The exit code, if any.
         code: Option<i32>,
     },
+
+    // ── Informational / observability events (additive, forward-compat) ──
+
+    /// An incremental reasoning/thinking text chunk (extended-thinking mode).
+    /// Produced by claude (extended thinking) and opencode (`agent_thought_chunk`).
+    ThinkingDelta {
+        /// The thinking text delta.
+        text: String,
+    },
+    /// An incremental or periodic token/cost usage snapshot.
+    /// Produced by claude (per-message) and opencode (cumulative).
+    UsageUpdate {
+        /// The current token/cost snapshot.
+        usage: UsageSnapshot,
+        /// Running context-window fill, 0–100 (integer percentage). `None` when not reported.
+        /// `f32` from the driver is clamped and rounded to `u8` for wire/Eq compatibility.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_pct: Option<u8>,
+    },
+    /// The opencode plan-mode todo list was replaced (full snapshot).
+    PlanUpdated {
+        /// All current plan entries.
+        entries: Vec<PlanEntry>,
+    },
+    /// The session's available mode list or current mode changed.
+    ModesUpdated {
+        /// New available mode list. Empty = only `current_mode` changed.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        available_modes: Vec<AgentMode>,
+        /// The current mode id after the change. `None` = unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        current_mode: Option<String>,
+    },
+    /// The session's active model changed mid-session.
+    ModelChanged {
+        /// The new model id.
+        model: String,
+    },
+    /// The available slash commands catalog was replaced.
+    SlashCommandsUpdated {
+        /// The full replacement command list.
+        commands: Vec<SlashCommandInfo>,
+    },
+    /// A context-compaction event (context trimmed to make room).
+    Compaction {
+        /// Compaction metadata.
+        info: CompactionInfo,
+    },
 }
+
+// `TurnEvent::UsageUpdate` contains a `UsageSnapshot` whose `cost_usd: f64`
+// is not `Eq` by default; `UsageSnapshot` provides a manual `Eq` (bit-equality)
+// so `TurnEvent` can derive `Eq` and satisfy the public sealed surface.
 
 // ---------------------------------------------------------------------
 // 6. The driver seam — InteractiveProtocol / InteractiveTransport /
@@ -749,6 +876,48 @@ pub enum ProtocolEvent {
     ProcessExited {
         /// The exit code, if any.
         code: Option<i32>,
+    },
+
+    // ── Informational / observability events (additive, forward-compat) ──
+
+    /// A reasoning/thinking text delta (extended-thinking mode).
+    ThinkingDelta {
+        /// The thinking text.
+        text: String,
+    },
+    /// An incremental or periodic usage/cost update.
+    UsageUpdate {
+        /// The current snapshot.
+        usage: UsageSnapshot,
+        /// Context-window fill, 0–100 (integer percentage). `None` when not reported.
+        context_pct: Option<u8>,
+    },
+    /// The opencode plan-mode todo list was replaced (full snapshot).
+    PlanUpdated {
+        /// All current plan entries.
+        entries: Vec<PlanEntry>,
+    },
+    /// The session's available mode list or current mode changed.
+    ModesUpdated {
+        /// New available mode list. Empty = only current_mode changed.
+        available_modes: Vec<AgentMode>,
+        /// Current mode id after the change. `None` = unchanged.
+        current_mode: Option<String>,
+    },
+    /// The session's active model changed mid-session.
+    ModelChanged {
+        /// The new model id.
+        model: String,
+    },
+    /// The available slash commands catalog was replaced.
+    SlashCommandsUpdated {
+        /// The full replacement command list.
+        commands: Vec<SlashCommandInfo>,
+    },
+    /// A context-compaction event.
+    Compaction {
+        /// Compaction metadata.
+        info: CompactionInfo,
     },
 }
 

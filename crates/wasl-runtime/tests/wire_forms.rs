@@ -34,8 +34,9 @@
 use serde_json::json;
 
 use wasl_runtime::{
-    BusyPhase, BusyPolicy, Causation, NativeGateDetail, RuntimeCapabilities, TargetStatus,
-    TurnEvent, TurnId, TurnReceipt, TurnSource,
+    AgentMode, BusyPhase, BusyPolicy, Causation, CompactionInfo, NativeGateDetail,
+    PlanEntry, RuntimeCapabilities, SlashCommandInfo, TargetStatus, TurnEvent, TurnId,
+    TurnReceipt, TurnSource, UsageSnapshot,
 };
 
 // wasl_proto owns DeliveryCertainty (§8.1); TurnEvent re-uses it verbatim.
@@ -327,7 +328,7 @@ fn turn_event_process_exited_wire_form() {
 
 #[test]
 fn turn_event_all_fourteen_variant_tags_are_snake_case_and_distinct() {
-    // The complete variant tag set, per control-api.md line 151-154. Assert the
+    // The complete variant tag set (original 14 + 7 new informational). Assert the
     // "type" tag of a representative of every variant is snake_case and unique.
     let events = vec![
         TurnEvent::SessionReady { native: None },
@@ -382,6 +383,22 @@ fn turn_event_all_fourteen_variant_tags_are_snake_case_and_distinct() {
             status: TargetStatus::Stopped,
         },
         TurnEvent::ProcessExited { code: None },
+        // Informational / observability (additive, 7 new variants).
+        TurnEvent::ThinkingDelta { text: String::new() },
+        TurnEvent::UsageUpdate {
+            usage: UsageSnapshot::default(),
+            context_pct: None,
+        },
+        TurnEvent::PlanUpdated { entries: vec![] },
+        TurnEvent::ModesUpdated {
+            available_modes: vec![],
+            current_mode: None,
+        },
+        TurnEvent::ModelChanged { model: String::new() },
+        TurnEvent::SlashCommandsUpdated { commands: vec![] },
+        TurnEvent::Compaction {
+            info: CompactionInfo::default(),
+        },
     ];
 
     let expected_tags = [
@@ -399,8 +416,16 @@ fn turn_event_all_fourteen_variant_tags_are_snake_case_and_distinct() {
         "turn_expired",
         "status_changed",
         "process_exited",
+        // Informational additions.
+        "thinking_delta",
+        "usage_update",
+        "plan_updated",
+        "modes_updated",
+        "model_changed",
+        "slash_commands_updated",
+        "compaction",
     ];
-    assert_eq!(events.len(), expected_tags.len(), "14 TurnEvent variants");
+    assert_eq!(events.len(), expected_tags.len(), "21 TurnEvent variants (14 original + 7 informational)");
 
     let mut seen = std::collections::BTreeSet::new();
     for (ev, expected_tag) in events.iter().zip(expected_tags.iter()) {
@@ -415,7 +440,7 @@ fn turn_event_all_fourteen_variant_tags_are_snake_case_and_distinct() {
             "duplicate TurnEvent tag: {tag}"
         );
     }
-    assert_eq!(seen.len(), 14, "14 distinct snake_case TurnEvent tags");
+    assert_eq!(seen.len(), 21, "21 distinct snake_case TurnEvent tags");
 }
 
 // =====================================================================
@@ -803,4 +828,189 @@ fn causation_root_turn_has_null_parent_and_empty_path_hop_zero() {
     );
     let back: Causation = serde_json::from_value(value).expect("deserialize");
     assert_eq!(back, causation);
+}
+
+// =====================================================================
+// New informational TurnEvent variants — wire-form round-trip tests.
+// Each test pins the exact snake_case tag + field names + round-trip.
+// =====================================================================
+
+#[test]
+fn turn_event_thinking_delta_wire_form() {
+    assert_turn_event_roundtrips(
+        &TurnEvent::ThinkingDelta {
+            text: "hmm...".to_string(),
+        },
+        json!({ "type": "thinking_delta", "text": "hmm..." }),
+    );
+}
+
+#[test]
+fn turn_event_usage_update_wire_form_with_context_pct() {
+    let ev = TurnEvent::UsageUpdate {
+        usage: UsageSnapshot {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_tokens: 20,
+            cache_creation_tokens: 5,
+            cost_usd: 0.002,
+        },
+        context_pct: Some(42),
+    };
+    assert_turn_event_roundtrips(
+        &ev,
+        json!({
+            "type": "usage_update",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "cache_read_tokens": 20,
+                "cache_creation_tokens": 5,
+                "cost_usd": 0.002
+            },
+            "context_pct": 42
+        }),
+    );
+}
+
+#[test]
+fn turn_event_usage_update_wire_form_no_context_pct() {
+    let ev = TurnEvent::UsageUpdate {
+        usage: UsageSnapshot::default(),
+        context_pct: None,
+    };
+    let value = roundtrip_json(&ev);
+    // context_pct is None → skip_serializing_if → absent from JSON.
+    assert_eq!(value.get("context_pct"), None, "context_pct is omitted when None");
+    assert_eq!(value.get("type").and_then(|t| t.as_str()), Some("usage_update"));
+    let back: TurnEvent = serde_json::from_value(value).expect("deserialize");
+    assert_eq!(back, ev);
+}
+
+#[test]
+fn turn_event_plan_updated_wire_form() {
+    let ev = TurnEvent::PlanUpdated {
+        entries: vec![
+            PlanEntry { content: "step 1".to_string(), priority: "high".to_string() },
+            PlanEntry { content: "step 2".to_string(), priority: String::new() },
+        ],
+    };
+    assert_turn_event_roundtrips(
+        &ev,
+        json!({
+            "type": "plan_updated",
+            "entries": [
+                { "content": "step 1", "priority": "high" },
+                { "content": "step 2", "priority": "" }
+            ]
+        }),
+    );
+}
+
+#[test]
+fn turn_event_modes_updated_wire_form() {
+    let ev = TurnEvent::ModesUpdated {
+        available_modes: vec![
+            AgentMode {
+                id: "plan".to_string(),
+                label: "Plan mode".to_string(),
+                description: "Review before acting".to_string(),
+            },
+            AgentMode {
+                id: "default".to_string(),
+                label: "Default".to_string(),
+                description: String::new(),
+            },
+        ],
+        current_mode: Some("plan".to_string()),
+    };
+    assert_turn_event_roundtrips(
+        &ev,
+        json!({
+            "type": "modes_updated",
+            "available_modes": [
+                { "id": "plan", "label": "Plan mode", "description": "Review before acting" },
+                { "id": "default", "label": "Default", "description": "" }
+            ],
+            "current_mode": "plan"
+        }),
+    );
+}
+
+#[test]
+fn turn_event_modes_updated_empty_modes_omitted_from_json() {
+    // empty available_modes → skip_serializing_if → absent; only current_mode present.
+    let ev = TurnEvent::ModesUpdated {
+        available_modes: vec![],
+        current_mode: Some("default".to_string()),
+    };
+    let value = roundtrip_json(&ev);
+    assert_eq!(value.get("available_modes"), None, "empty available_modes is omitted");
+    assert_eq!(value["current_mode"], json!("default"));
+    let back: TurnEvent = serde_json::from_value(value).expect("deserialize");
+    assert_eq!(back, ev);
+}
+
+#[test]
+fn turn_event_model_changed_wire_form() {
+    assert_turn_event_roundtrips(
+        &TurnEvent::ModelChanged {
+            model: "claude-sonnet-4.6".to_string(),
+        },
+        json!({ "type": "model_changed", "model": "claude-sonnet-4.6" }),
+    );
+}
+
+#[test]
+fn turn_event_slash_commands_updated_wire_form() {
+    let ev = TurnEvent::SlashCommandsUpdated {
+        commands: vec![
+            SlashCommandInfo {
+                name: "/help".to_string(),
+                description: "Show help".to_string(),
+                argument_hint: "<topic>".to_string(),
+            },
+            SlashCommandInfo {
+                name: "/compact".to_string(),
+                description: String::new(),
+                argument_hint: String::new(),
+            },
+        ],
+    };
+    assert_turn_event_roundtrips(
+        &ev,
+        json!({
+            "type": "slash_commands_updated",
+            "commands": [
+                { "name": "/help", "description": "Show help", "argument_hint": "<topic>" },
+                { "name": "/compact", "description": "", "argument_hint": "" }
+            ]
+        }),
+    );
+}
+
+#[test]
+fn turn_event_compaction_wire_form() {
+    let ev = TurnEvent::Compaction {
+        info: CompactionInfo {
+            trigger: "manual".to_string(),
+            pre_tokens: 50_000,
+            post_tokens: 12_000,
+            cumulative_dropped_tokens: 38_000,
+            duration_ms: 1_200,
+        },
+    };
+    assert_turn_event_roundtrips(
+        &ev,
+        json!({
+            "type": "compaction",
+            "info": {
+                "trigger": "manual",
+                "pre_tokens": 50000,
+                "post_tokens": 12000,
+                "cumulative_dropped_tokens": 38000,
+                "duration_ms": 1200
+            }
+        }),
+    );
 }

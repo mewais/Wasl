@@ -947,6 +947,60 @@ impl Actor {
             ProtocolEvent::ProcessExited { code } => {
                 self.on_process_exited(code);
             }
+            // ── Informational / observability events ──────────────────
+            // These are non-turn-completing, non-gate events: emit them
+            // sequenced into the journal without changing turn/gate state,
+            // mirroring how AssistantDelta/ToolStarted are emitted.
+            ProtocolEvent::ThinkingDelta { text } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
+                if self.active.is_some() {
+                    self.emit(TurnEvent::ThinkingDelta { text });
+                }
+            }
+            ProtocolEvent::UsageUpdate { usage, context_pct } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
+                self.emit(TurnEvent::UsageUpdate { usage, context_pct });
+            }
+            ProtocolEvent::PlanUpdated { entries } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
+                self.emit(TurnEvent::PlanUpdated { entries });
+            }
+            ProtocolEvent::ModesUpdated {
+                available_modes,
+                current_mode,
+            } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
+                self.emit(TurnEvent::ModesUpdated {
+                    available_modes,
+                    current_mode,
+                });
+            }
+            ProtocolEvent::ModelChanged { model } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
+                self.emit(TurnEvent::ModelChanged { model });
+            }
+            ProtocolEvent::SlashCommandsUpdated { commands } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
+                self.emit(TurnEvent::SlashCommandsUpdated { commands });
+            }
+            ProtocolEvent::Compaction { info } => {
+                if self.is_cancelling_active() {
+                    return;
+                }
+                self.emit(TurnEvent::Compaction { info });
+            }
         }
     }
 

@@ -22,7 +22,10 @@
 //! TEST-FIRST / EXPECTED RED: will not compile until the coder creates
 //! `wasl-runtime` with the §6 `ProtocolEvent` and §5 `TurnEvent`.
 
-use wasl_runtime::{NativeGateDetail, NativeSessionId, ProtocolEvent, TurnEvent, TurnId};
+use wasl_runtime::{
+    AgentMode, CompactionInfo, NativeGateDetail, NativeSessionId, PlanEntry, ProtocolEvent,
+    SlashCommandInfo, TurnEvent, TurnId, UsageSnapshot,
+};
 
 // =====================================================================
 // (1) ProtocolEvent exists as the internal, normalized vocabulary (§6). Every
@@ -61,8 +64,28 @@ fn protocol_event_all_nine_variants_construct_and_match() {
             error: "boom".to_string(),
         },
         ProtocolEvent::ProcessExited { code: Some(0) },
+        // Informational / observability variants (additive, forward-compat).
+        ProtocolEvent::ThinkingDelta { text: "hmm".to_string() },
+        ProtocolEvent::UsageUpdate {
+            usage: UsageSnapshot::default(),
+            context_pct: Some(42),
+        },
+        ProtocolEvent::PlanUpdated {
+            entries: vec![PlanEntry { content: "step 1".to_string(), priority: "high".to_string() }],
+        },
+        ProtocolEvent::ModesUpdated {
+            available_modes: vec![AgentMode { id: "plan".to_string(), label: "Plan".to_string(), description: String::new() }],
+            current_mode: Some("plan".to_string()),
+        },
+        ProtocolEvent::ModelChanged { model: "claude-sonnet-4.6".to_string() },
+        ProtocolEvent::SlashCommandsUpdated {
+            commands: vec![SlashCommandInfo { name: "/help".to_string(), description: String::new(), argument_hint: String::new() }],
+        },
+        ProtocolEvent::Compaction {
+            info: CompactionInfo { trigger: "manual".to_string(), ..Default::default() },
+        },
     ];
-    assert_eq!(events.len(), 9, "ProtocolEvent has 9 variants (§6)");
+    assert_eq!(events.len(), 16, "ProtocolEvent has 16 variants (9 original + 7 informational)");
 
     // Exhaustive match proves every variant is present (a missing/renamed variant
     // fails to compile).
@@ -76,7 +99,14 @@ fn protocol_event_all_nine_variants_construct_and_match() {
             | ProtocolEvent::NativeGateRequested { .. }
             | ProtocolEvent::TurnCompleted { .. }
             | ProtocolEvent::TurnFailed { .. }
-            | ProtocolEvent::ProcessExited { .. } => {}
+            | ProtocolEvent::ProcessExited { .. }
+            | ProtocolEvent::ThinkingDelta { .. }
+            | ProtocolEvent::UsageUpdate { .. }
+            | ProtocolEvent::PlanUpdated { .. }
+            | ProtocolEvent::ModesUpdated { .. }
+            | ProtocolEvent::ModelChanged { .. }
+            | ProtocolEvent::SlashCommandsUpdated { .. }
+            | ProtocolEvent::Compaction { .. } => {}
         }
     }
 

@@ -22,8 +22,9 @@ use async_trait::async_trait;
 use uuid::Uuid;
 use wasit_core::{AgentDriver, GateDecision, GateRequest, ResumeMode, SpawnSpec};
 use wasl_runtime::{
-    ComposedPrompt, InteractiveProtocol, InteractiveTransport, NativeGateDetail, NativeSessionId,
-    ProtocolEvent, RuntimeCapabilities, RuntimeError, SpawnOptions,
+    AgentMode, CompactionInfo, ComposedPrompt, InteractiveProtocol, InteractiveTransport,
+    NativeGateDetail, NativeSessionId, PlanEntry, ProtocolEvent, RuntimeCapabilities,
+    RuntimeError, SlashCommandInfo, SpawnOptions, UsageSnapshot,
 };
 
 /// Identical UUIDv5 namespace to `wasl-adapter-claude::WASL_SESSION_NS`,
@@ -251,11 +252,83 @@ impl InteractiveTransport for ClaudeStreamTransport {
                 AgentEvent::ProcessExited { code } => {
                     return Some(ProtocolEvent::ProcessExited { code });
                 }
-                // Dropped variants (deferred to vocabulary-growth increment):
-                // ThinkingDelta, ToolCallUpdated, UsageUpdate, PlanUpdated,
-                // ModesUpdated, ModelChanged, SlashCommandsUpdated, Compaction,
-                // RateLimitNotice, Unknown.
-                _ => continue,
+                AgentEvent::ThinkingDelta { text, .. } => {
+                    if !text.is_empty() {
+                        return Some(ProtocolEvent::ThinkingDelta { text });
+                    }
+                    continue;
+                }
+                AgentEvent::UsageUpdate { usage, context_pct } => {
+                    return Some(ProtocolEvent::UsageUpdate {
+                        usage: UsageSnapshot {
+                            input_tokens: usage.input_tokens,
+                            output_tokens: usage.output_tokens,
+                            cache_read_tokens: usage.cache_read_tokens,
+                            cache_creation_tokens: usage.cache_creation_tokens,
+                            cost_usd: usage.cost_usd,
+                        },
+                        context_pct: context_pct
+                            .map(|p| p.clamp(0.0, 100.0).round() as u8),
+                    });
+                }
+                AgentEvent::PlanUpdated { entries } => {
+                    return Some(ProtocolEvent::PlanUpdated {
+                        entries: entries
+                            .into_iter()
+                            .map(|e| PlanEntry {
+                                content: e.content,
+                                priority: e.priority,
+                            })
+                            .collect(),
+                    });
+                }
+                AgentEvent::ModesUpdated {
+                    available_modes,
+                    current_mode,
+                } => {
+                    return Some(ProtocolEvent::ModesUpdated {
+                        available_modes: available_modes
+                            .into_iter()
+                            .map(|m| AgentMode {
+                                id: m.id,
+                                label: m.label,
+                                description: m.description,
+                            })
+                            .collect(),
+                        current_mode,
+                    });
+                }
+                AgentEvent::ModelChanged { model } => {
+                    return Some(ProtocolEvent::ModelChanged { model });
+                }
+                AgentEvent::SlashCommandsUpdated { commands } => {
+                    return Some(ProtocolEvent::SlashCommandsUpdated {
+                        commands: commands
+                            .into_iter()
+                            .map(|c| SlashCommandInfo {
+                                name: c.name,
+                                description: c.description,
+                                argument_hint: c.argument_hint,
+                            })
+                            .collect(),
+                    });
+                }
+                AgentEvent::Compaction { info } => {
+                    return Some(ProtocolEvent::Compaction {
+                        info: CompactionInfo {
+                            trigger: info.trigger,
+                            pre_tokens: info.pre_tokens,
+                            post_tokens: info.post_tokens,
+                            cumulative_dropped_tokens: info.cumulative_dropped_tokens,
+                            duration_ms: info.duration_ms,
+                        },
+                    });
+                }
+                // Silently skip: ToolCallUpdated (intermediate only, no Wasl concept),
+                // RateLimitNotice (informational, no Wasl concept), Unknown (unrecognized line).
+                AgentEvent::ToolCallUpdated { .. }
+                | AgentEvent::RateLimitNotice { .. }
+                | AgentEvent::Unknown { .. } => continue,
             }
         }
     }
