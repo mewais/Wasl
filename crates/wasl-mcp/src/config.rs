@@ -92,6 +92,8 @@ pub struct RuntimeConfig {
     pub claude_bin: Option<String>,
     /// Override the `opencode` binary path. `None` means use the system `PATH`.
     pub opencode_bin: Option<String>,
+    /// Override the `codex` binary path. `None` means use the system `PATH`.
+    pub codex_bin: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +151,7 @@ impl Default for RuntimeConfig {
             default_protocol: "claude".to_string(),
             claude_bin: None,
             opencode_bin: None,
+            codex_bin: None,
         }
     }
 }
@@ -316,6 +319,7 @@ struct RawRuntime {
     default_protocol: String,
     claude_bin: Option<String>,
     opencode_bin: Option<String>,
+    codex_bin: Option<String>,
 }
 
 impl Default for RawRuntime {
@@ -326,6 +330,7 @@ impl Default for RawRuntime {
             default_protocol: "claude".to_string(),
             claude_bin: None,
             opencode_bin: None,
+            codex_bin: None,
         }
     }
 }
@@ -402,7 +407,7 @@ impl Config {
         };
 
         match raw.runtime.default_protocol.as_str() {
-            "claude" | "opencode-acp" => {}
+            "claude" | "opencode-acp" | "codex" => {}
             other => return Err(ConfigError::UnknownProtocol(other.to_string())),
         };
 
@@ -458,6 +463,7 @@ impl Config {
                 default_protocol: raw.runtime.default_protocol,
                 claude_bin: raw.runtime.claude_bin,
                 opencode_bin: raw.runtime.opencode_bin,
+                codex_bin: raw.runtime.codex_bin,
             },
             peers,
         })

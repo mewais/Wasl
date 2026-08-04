@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use wasl_runtime::{ManagedConfig, MonotonicClock, ProtocolRoutingProvider, RuntimeProvider,
     WaslManagedRuntimeProvider};
-use wasl_runtime_protocol::{ClaudeStreamProtocol, OpenCodeAcpProtocol};
+use wasl_runtime_protocol::{ClaudeStreamProtocol, CodexAppServerProtocol, OpenCodeAcpProtocol};
 
 use wasl_audit::{AuditEntry, AuditError, AuditLog, Sink};
 use wasl_filesink::FileSink;
@@ -126,10 +126,17 @@ fn build_managed_provider(cfg: &Config) -> Arc<dyn RuntimeProvider> {
         .opencode_bin
         .clone()
         .unwrap_or_else(|| "opencode".to_string());
+    let codex_bin = cfg
+        .runtime
+        .codex_bin
+        .clone()
+        .unwrap_or_else(|| "codex".to_string());
 
     let claude_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> =
         Arc::new(Mutex::new(MemSink::new()));
     let opencode_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> =
+        Arc::new(Mutex::new(MemSink::new()));
+    let codex_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> =
         Arc::new(Mutex::new(MemSink::new()));
 
     let claude_provider: Arc<dyn RuntimeProvider> = Arc::new(
@@ -144,14 +151,23 @@ fn build_managed_provider(cfg: &Config) -> Arc<dyn RuntimeProvider> {
         WaslManagedRuntimeProvider::with_seams(
             OpenCodeAcpProtocol::new(opencode_bin),
             ManagedConfig::default(),
-            clock,
+            clock.clone(),
             opencode_sink,
+        ),
+    );
+    let codex_provider: Arc<dyn RuntimeProvider> = Arc::new(
+        WaslManagedRuntimeProvider::with_seams(
+            CodexAppServerProtocol::new(codex_bin),
+            ManagedConfig::default(),
+            clock,
+            codex_sink,
         ),
     );
 
     let mut providers = BTreeMap::new();
     providers.insert("claude".to_string(), claude_provider);
     providers.insert("opencode-acp".to_string(), opencode_provider);
+    providers.insert("codex".to_string(), codex_provider);
 
     Arc::new(ProtocolRoutingProvider::new(
         providers,

@@ -84,6 +84,7 @@ fn full_runtime_block_struct_equality() {
         default_protocol: "opencode-acp".to_string(),
         claude_bin: Some("claude".to_string()),
         opencode_bin: Some("opencode".to_string()),
+        codex_bin: None,
     };
 
     assert_eq!(
