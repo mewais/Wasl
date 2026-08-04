@@ -963,6 +963,13 @@ pub struct SpawnContext {
     /// the runtime applies it without interpreting the contents.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_config: Option<String>,
+    /// When `Some`, the NATIVE session id (claude session uuid / codex thread_id /
+    /// opencode `ses_` id) to RESUME instead of starting fresh.  The managed
+    /// provider passes this id to `InteractiveProtocol::resume(native, opts)` at
+    /// create time.  `None` (the default) means start a fresh session via `spawn`.
+    /// Existing callers / JSON that omit this field always get `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
 }
 
 /// Options a provider passes a driver at spawn/resume (bin, model, isolated env,

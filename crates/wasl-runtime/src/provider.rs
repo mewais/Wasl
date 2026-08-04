@@ -21,9 +21,9 @@ use crate::config::ManagedConfig;
 use crate::journal::Journal;
 use crate::{
     BusyPolicy, CancelReason, DeliveryTarget, EventSeq, IdempotencyKey, InteractiveProtocol,
-    NativeGateResolver, RuntimeCapabilities, RuntimeClock, RuntimeError, ShutdownMode, SpawnContext,
-    SpawnOptions, TargetId, TargetKey, TargetStatus, ToolCallAnswerer, TurnEventStream, TurnId,
-    TurnReceipt, TurnRequest,
+    NativeGateResolver, NativeSessionId, RuntimeCapabilities, RuntimeClock, RuntimeError,
+    ShutdownMode, SpawnContext, SpawnOptions, TargetId, TargetKey, TargetStatus, ToolCallAnswerer,
+    TurnEventStream, TurnId, TurnReceipt, TurnRequest,
 };
 
 /// One live managed target: the public `DeliveryTarget` handle plus a handle onto
@@ -362,11 +362,19 @@ impl<P: InteractiveProtocol + 'static> WaslManagedRuntimeProvider<P> {
         context: SpawnContext,
     ) -> Result<Arc<ManagedTarget>, RuntimeError> {
         let caps = self.protocol.capabilities();
+        // When `context.resume` is Some(native_id), re-attach to the existing native
+        // session; when None, start fresh.  The `opts` carry all other context fields
+        // (model, cwd, env, …) in both cases — the driver reads them from
+        // `opts.context()` regardless of which path is taken.
+        let resume_native = context.resume.clone().map(NativeSessionId);
         let opts = SpawnOptions {
             target_key: Some(key.clone()),
             context,
         };
-        let transport = self.protocol.spawn(&opts).await?;
+        let transport = match resume_native {
+            Some(native) => self.protocol.resume(&native, &opts).await?,
+            None => self.protocol.spawn(&opts).await?,
+        };
 
         let shared = Arc::new(Shared {
             journal: Mutex::new(Journal::new(self.config.journal_capacity)),

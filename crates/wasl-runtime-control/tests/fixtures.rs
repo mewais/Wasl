@@ -190,6 +190,7 @@ fn sample_create_request_with_context() -> CreateTargetRequest {
             bin: Some("/usr/local/bin/claude".to_string()),
             disallowed_tools: vec!["bash".to_string(), "computer".to_string()],
             mcp_config: None,
+            resume: None,
         },
     }
 }
@@ -521,6 +522,72 @@ fn error_malformed_matches_fixture() {
 }
 
 // ---------------------------------------------------------------------
+// POST /v1/targets — resume field wire round-trips
+// ---------------------------------------------------------------------
+
+/// Build the full-resume `CreateTargetRequest` that matches
+/// `create_request_with_resume.json`.
+fn sample_create_request_with_resume() -> CreateTargetRequest {
+    CreateTargetRequest {
+        key: TargetKey("ctx-42".to_string()),
+        protocol: None,
+        context: SpawnContext {
+            resume: Some("ses_07abc123def456".to_string()),
+            model: Some("claude-opus-4-5".to_string()),
+            cwd: Some("/workspace/project".to_string()),
+            ..SpawnContext::default()
+        },
+    }
+}
+
+#[test]
+fn create_request_with_resume_matches_fixture() {
+    assert_matches_fixture(
+        &sample_create_request_with_resume(),
+        "create_request_with_resume.json",
+    );
+}
+
+#[test]
+fn create_request_with_resume_round_trips() {
+    assert_round_trips::<CreateTargetRequest>("create_request_with_resume.json");
+}
+
+/// When `context.resume` is absent, it must deserialize to `None` — existing
+/// wires that have no `resume` key must still parse cleanly.
+#[test]
+fn create_request_context_without_resume_deserializes_resume_as_none() {
+    let text = r#"{"key":"ctx-42","context":{"model":"claude-opus-4-5"}}"#;
+    let parsed: CreateTargetRequest =
+        serde_json::from_str(text).expect("must deserialize");
+    assert!(
+        parsed.context.resume.is_none(),
+        "absent context.resume must deserialize to None; got {:?}",
+        parsed.context.resume
+    );
+}
+
+/// `SpawnContext::default()` (resume = None) must not emit a `resume` key when
+/// the whole context is omitted from a `CreateTargetRequest`.
+#[test]
+fn create_request_without_context_never_emits_resume_key() {
+    let text = r#"{"key":"ctx-42"}"#;
+    let parsed: CreateTargetRequest =
+        serde_json::from_str(text).expect("legacy body must deserialize");
+    assert!(
+        parsed.context.resume.is_none(),
+        "legacy body with no context must have resume = None; got {:?}",
+        parsed.context.resume
+    );
+    // Re-serializing must NOT emit a `resume` key anywhere.
+    let reser = serde_json::to_value(&parsed).expect("must serialize");
+    assert!(
+        reser.get("context").is_none(),
+        "default context must be omitted; got: {reser}"
+    );
+}
+
+// ---------------------------------------------------------------------
 // Round-trip: every fixture must also deserialize back into its real type
 // ---------------------------------------------------------------------
 
@@ -553,6 +620,7 @@ fn info_and_frames_round_trip() {
     assert_round_trips::<TargetsSnapshotResponse>("targets_snapshot.json");
     assert_round_trips::<CreateTargetRequest>("create_request.json");
     assert_round_trips::<CreateTargetRequest>("create_request_with_context.json");
+    assert_round_trips::<CreateTargetRequest>("create_request_with_resume.json");
     assert_round_trips::<SubmitTurnRequest>("submit_request.json");
     assert_round_trips::<CancelRequest>("cancel_request.json");
     assert_round_trips::<GateRequest>("gate_request_approve.json");

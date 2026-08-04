@@ -47,6 +47,7 @@ fn full_spawn_context_round_trips_with_exact_field_names() {
         bin: Some("/usr/local/bin/claude".to_string()),
         disallowed_tools: vec!["Bash".to_string(), "Write".to_string()],
         mcp_config: Some("{\"mcpServers\":{\"wasl\":{}}}".to_string()),
+        resume: None,
     };
 
     let value = roundtrip(&ctx);
@@ -361,5 +362,116 @@ fn disallowed_tools_preserves_order_on_round_trip() {
     assert_eq!(
         got, tools,
         "disallowed_tools must preserve element order on round-trip; got {got:?}"
+    );
+}
+
+// ==================================================================
+// 9. `resume` field — the new native-session-id-for-resume field.
+//
+// a) Absent from JSON → defaults to None (backward-compatible callers).
+// b) Some("id") → serializes as `"resume": "id"`, round-trips exactly.
+// c) None → omitted from serialized output (skip_serializing_if fires).
+// d) Default SpawnContext still serializes to exactly `{}` (no `resume`
+//    key added).
+// ==================================================================
+
+#[test]
+fn resume_absent_from_json_defaults_to_none() {
+    // Existing JSON that never had a `resume` key must still deserialize.
+    let ctx = from_json(json!({"cwd": "/project"}));
+    assert!(
+        ctx.resume.is_none(),
+        "missing 'resume' field must default to None (backward-compatible); got {:?}",
+        ctx.resume
+    );
+}
+
+#[test]
+fn resume_some_round_trips_verbatim() {
+    let native_id = "ses_07abc123def456".to_string();
+    let ctx = SpawnContext {
+        resume: Some(native_id.clone()),
+        ..SpawnContext::default()
+    };
+
+    // Serializes under the exact key "resume".
+    let value = roundtrip(&ctx);
+    assert_eq!(
+        value.get("resume").and_then(|v| v.as_str()),
+        Some(native_id.as_str()),
+        "Some resume must serialize as `\"resume\": \"<id>\"` under the exact key 'resume'; \
+         got: {value}"
+    );
+
+    // Deserializes back to Some(id).
+    let back: SpawnContext =
+        serde_json::from_value(value).expect("round-trip must deserialize");
+    assert_eq!(
+        back.resume,
+        Some(native_id.clone()),
+        "resume must round-trip to Some(\"{native_id}\"); got {:?}",
+        back.resume
+    );
+}
+
+#[test]
+fn resume_none_is_omitted_from_serialized_output() {
+    let ctx = SpawnContext {
+        model: Some("claude-opus-4-5".to_string()),
+        resume: None,
+        ..SpawnContext::default()
+    };
+
+    let value = roundtrip(&ctx);
+    assert!(
+        value.get("resume").is_none(),
+        "resume = None must be omitted from serialized output \
+         (skip_serializing_if = is_none must fire); got: {value}"
+    );
+}
+
+#[test]
+fn default_spawn_context_still_serializes_to_empty_object_with_resume_none() {
+    // Adding `resume` must NOT break the `{}` invariant for default.
+    let ctx = SpawnContext::default();
+    assert!(ctx.resume.is_none(), "SpawnContext::default().resume must be None");
+
+    let value = roundtrip(&ctx);
+    assert_eq!(
+        value,
+        json!({}),
+        "SpawnContext::default() must still serialize to {{}} after adding the `resume` field; \
+         got: {value}"
+    );
+}
+
+#[test]
+fn resume_field_uses_exact_key_name_resume() {
+    // Pin the wire key name so a future rename is caught immediately.
+    let ctx = SpawnContext {
+        resume: Some("ses_xyz".to_string()),
+        ..SpawnContext::default()
+    };
+
+    let value = roundtrip(&ctx);
+    // Must be keyed exactly "resume".
+    assert!(
+        value.as_object().map(|o| o.contains_key("resume")).unwrap_or(false),
+        "resume must serialize under the exact key 'resume'; got: {value}"
+    );
+    // Must NOT appear under any other alias.
+    for wrong_key in &["native_id", "native_session_id", "session_id", "native"] {
+        assert!(
+            value.get(*wrong_key).is_none(),
+            "resume must not appear under the alias '{wrong_key}'; got: {value}"
+        );
+    }
+
+    // Deserializing from the exact key name.
+    let back = from_json(json!({"resume": "ses_abc"}));
+    assert_eq!(
+        back.resume,
+        Some("ses_abc".to_string()),
+        "deserializing {{\"resume\": \"ses_abc\"}} must yield Some(\"ses_abc\")"
     );
 }

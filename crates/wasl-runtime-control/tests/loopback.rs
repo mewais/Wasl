@@ -683,6 +683,74 @@ async fn protocol_unknown_rejected_by_hub_before_provider() {
     );
 }
 
+/// POST with `context.resume` set to a native session id: the provider must
+/// receive a SpawnContext whose `resume` field equals that id.
+#[tokio::test]
+async fn create_target_with_resume_propagates_resume_to_provider() {
+    let target = ScriptedTarget::new("tgt-1", vec![]);
+    let provider = make_recording_provider(target);
+    let hub = make_hub(provider.clone());
+    let addr = spawn_router(hub).await;
+
+    post_create_target(
+        addr,
+        serde_json::json!({
+            "key": "ctx-resume-wire",
+            "context": {
+                "resume": "ses_07abc123def456",
+                "model": "claude-opus-4-5"
+            }
+        }),
+    )
+    .await;
+
+    let ctx = provider
+        .recorded_context()
+        .await
+        .expect("provider must have received a context");
+
+    assert_eq!(
+        ctx.resume.as_deref(),
+        Some("ses_07abc123def456"),
+        "context.resume must survive the wire round-trip to the provider; got {:?}",
+        ctx.resume
+    );
+    assert_eq!(
+        ctx.model.as_deref(),
+        Some("claude-opus-4-5"),
+        "other context fields must also survive the wire"
+    );
+}
+
+/// POST without `context.resume` → provider receives resume = None (backward-compat).
+#[tokio::test]
+async fn create_target_without_resume_gives_provider_resume_none() {
+    let target = ScriptedTarget::new("tgt-1", vec![]);
+    let provider = make_recording_provider(target);
+    let hub = make_hub(provider.clone());
+    let addr = spawn_router(hub).await;
+
+    post_create_target(
+        addr,
+        serde_json::json!({
+            "key": "ctx-no-resume",
+            "context": { "model": "claude-opus-4-5" }
+        }),
+    )
+    .await;
+
+    let ctx = provider
+        .recorded_context()
+        .await
+        .expect("provider must have received a context");
+
+    assert!(
+        ctx.resume.is_none(),
+        "absent context.resume must give the provider resume = None; got {:?}",
+        ctx.resume
+    );
+}
+
 /// Same precedence test as above but with context.protocol being the unknown
 /// value: hub validates the effective protocol (context wins), so the bad
 /// value in context still gets rejected.

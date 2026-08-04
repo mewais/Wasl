@@ -1,0 +1,8 @@
+{
+  "key": "ctx-42",
+  "context": {
+    "resume": "ses_07abc123def456",
+    "model": "claude-opus-4-5",
+    "cwd": "/workspace/project"
+  }
+}
