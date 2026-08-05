@@ -105,6 +105,7 @@ impl ClaudeStreamProtocol {
             session,
             pending_gate: None,
             session_ready_seen: false,
+            synthetic_ready_emitted: false,
         }))
     }
 }
@@ -144,6 +145,18 @@ struct ClaudeStreamTransport {
     /// `SessionReady` is emitted by claude's `system/init` on EVERY turn;
     /// the R1 actor only wants it once (first turn). Suppress repeats.
     session_ready_seen: bool,
+    /// Whether the synthetic session-establishment `SessionReady` has been
+    /// emitted. Claude — UNLIKE codex (`thread/started`) and opencode
+    /// (`session/new`) — does NOT emit a proactive readiness event: its
+    /// `system/init` (→ `SessionReady`) arrives only at the START of a turn. The
+    /// managed actor waits for `SessionReady` before it dispatches a queued turn,
+    /// so without a proactive one nothing is ever sent (deadlock). We emit one
+    /// synthetic `SessionReady { native: None }` on the first poll so the actor
+    /// goes Idle and dispatches the first turn (exactly as Marsad's own non-wasl
+    /// path sends the prompt right after the initialize handshake); the turn's
+    /// real `system/init` then flows through as a second `SessionReady` carrying
+    /// claude's actual session id.
+    synthetic_ready_emitted: bool,
 }
 
 #[async_trait]
@@ -187,6 +200,16 @@ impl InteractiveTransport for ClaudeStreamTransport {
 
     async fn next_event(&mut self) -> Option<ProtocolEvent> {
         use wasit_core::AgentEvent;
+        // Proactive session-establishment readiness (see `synthetic_ready_emitted`):
+        // claude has no proactive ready event, so emit one synthetic
+        // `SessionReady { native: None }` on the first poll to unblock the actor's
+        // "wait for SessionReady before dispatching" invariant. The real
+        // `system/init` follows as a second `SessionReady` with claude's actual
+        // session id (recorded by the actor; captured by the control server).
+        if !self.synthetic_ready_emitted {
+            self.synthetic_ready_emitted = true;
+            return Some(ProtocolEvent::SessionReady { native: None });
+        }
         loop {
             let ev = self.session.next_event().await?;
             match ev {
