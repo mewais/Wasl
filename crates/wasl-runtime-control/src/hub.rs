@@ -238,7 +238,9 @@ impl RuntimeControlHub {
 
 fn validate_protocol(protocol: Option<&str>) -> Result<(), ErrorBody> {
     match protocol {
-        None | Some("claude") | Some("opencode-acp") | Some("opencode-serve") => Ok(()),
+        None | Some("claude") | Some("opencode-acp") | Some("opencode-serve") | Some("codex") => {
+            Ok(())
+        }
         Some(other) => Err(ErrorBody {
             error: "malformed".to_string(),
             detail: format!("unknown protocol: {other}"),
