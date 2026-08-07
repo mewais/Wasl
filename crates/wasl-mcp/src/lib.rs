@@ -363,14 +363,13 @@ pub fn run() {
         let handler = build_handler(&cfg, hub);
         let peers = handler.registry_handle();
 
-        // ── RUNTIME-CONTROL wiring — IO SHELL, UNTESTED HERE ──────────────────
+        // ── RUNTIME-CONTROL wiring ────────────────────────────────────────────
         //
         // When `runtime.kind = managed` AND `runtime.control_bind` is set, spin
         // up the runtime-control HTTP API (wasl_runtime_control::serve) backed
         // by a ProtocolRoutingProvider that delegates to per-protocol managed
-        // WaslManagedRuntimeProvider instances. The serve body and the managed-
-        // provider constructor are COMPILE-ONLY SHELLS (`todo!()` inside
-        // `build_managed_provider`); the actual logic lands in Phase-2.
+        // WaslManagedRuntimeProvider instances. The serve body and
+        // `build_managed_provider` are fully implemented and serve live sessions.
         if matches!(cfg.runtime.kind, RuntimeKind::Managed) {
             if let Some(bind) = cfg.runtime.control_bind.clone() {
                 match bind.parse::<std::net::SocketAddr>() {
