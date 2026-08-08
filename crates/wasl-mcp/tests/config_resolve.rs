@@ -35,7 +35,41 @@ fn env_with_all_four_value_overrides() -> EnvOverrides {
         host_id: Some("env-host".to_string()),
         audit_path: Some("/env/audit.jsonl".to_string()),
         a2a_bind: Some("127.0.0.1:9999".to_string()),
+        content: None,
     }
+}
+
+/// Machine-independent delivery: `WASL_CONFIG_CONTENT` (inline TOML) is loaded
+/// by VALUE and must take precedence over a `WASL_CONFIG` file PATH — a path
+/// minted on the caller's machine is meaningless where wasl-mcpd actually runs
+/// (a remote node). This is what lets Marsad hand a worker's A2A MCP server its
+/// peer config without shipping a filesystem path across hosts.
+#[test]
+fn load_with_inline_content_takes_precedence_over_bogus_path() {
+    let env = EnvOverrides {
+        content: Some(file_with_identity_audit_bind().to_string()),
+        // A path that does NOT exist anywhere: if content weren't preferred, this
+        // explicit path would make load_with fail with ConfigError::Read.
+        config: Some("/no/such/wasl-worker-abc.toml".to_string()),
+        ..Default::default()
+    };
+    let cfg = Config::load_with(&env).expect("inline WASL_CONFIG_CONTENT must load, ignoring path");
+    assert_eq!(cfg.identity.agent_id, "file-agent");
+    assert_eq!(cfg.identity.host_id, "file-host");
+    assert_eq!(cfg.a2a.bind, Some("127.0.0.1:1111".to_string()));
+}
+
+/// Env-var overlays still apply ON TOP of inline content, same as for a file.
+#[test]
+fn load_with_inline_content_still_honors_env_overrides() {
+    let env = EnvOverrides {
+        content: Some(file_with_identity_audit_bind().to_string()),
+        agent_id: Some("env-agent".to_string()),
+        ..Default::default()
+    };
+    let cfg = Config::load_with(&env).expect("inline content loads");
+    assert_eq!(cfg.identity.agent_id, "env-agent", "env override wins over inline content");
+    assert_eq!(cfg.identity.host_id, "file-host", "un-overridden inline value kept");
 }
 
 // ---------------------------------------------------------------------

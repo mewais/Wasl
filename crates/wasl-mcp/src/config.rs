@@ -358,6 +358,13 @@ pub struct EnvOverrides {
     pub host_id: Option<String>,
     pub audit_path: Option<String>,
     pub a2a_bind: Option<String>,
+    /// The WHOLE config as inline TOML content (`WASL_CONFIG_CONTENT`), an
+    /// alternative to the `WASL_CONFIG` file PATH. Takes precedence over the path.
+    /// This exists so a caller that spawns `wasl-mcpd` on a DIFFERENT machine
+    /// (e.g. Marsad launching a worker's A2A MCP server on a remote node) can
+    /// deliver the config by VALUE — a path minted on the caller's filesystem is
+    /// meaningless on the node's. Empty string is treated as unset.
+    pub content: Option<String>,
 }
 
 impl EnvOverrides {
@@ -371,6 +378,9 @@ impl EnvOverrides {
             host_id: std::env::var("WASL_HOST_ID").ok(),
             audit_path: std::env::var("WASL_AUDIT_PATH").ok(),
             a2a_bind: std::env::var("WASL_A2A_BIND").ok(),
+            content: std::env::var("WASL_CONFIG_CONTENT")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }
@@ -528,6 +538,14 @@ impl Config {
     /// `PathBuf` used as the no-path sentinel reliably fails with
     /// `NotFound`, same as a genuinely missing default-path file.
     pub fn load_with(env: &EnvOverrides) -> Result<Config, ConfigError> {
+        // Inline content (WASL_CONFIG_CONTENT) takes precedence over any file
+        // path — a machine-independent delivery so a caller spawning wasl-mcpd on
+        // another host need not (and cannot) ship a filesystem path. Env overlays
+        // still apply on top, exactly as for the file path.
+        if let Some(content) = &env.content {
+            let cfg = Config::from_toml_str(content)?;
+            return Ok(cfg.apply_env(env));
+        }
         let explicit = env.config.is_some();
         let path = Config::resolve_path(env).unwrap_or_default();
         let cfg = match std::fs::read_to_string(&path) {
