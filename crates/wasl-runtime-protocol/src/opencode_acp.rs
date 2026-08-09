@@ -199,11 +199,13 @@ impl InteractiveTransport for OpenCodeAcpTransport {
                     self.accumulated_reply.push_str(&text);
                     return Some(ProtocolEvent::AssistantDelta { text });
                 }
-                AgentEvent::ToolCallStarted { name, .. } => {
-                    return Some(ProtocolEvent::ToolStarted { name });
+                AgentEvent::ToolCallStarted { name, input, .. } => {
+                    return Some(ProtocolEvent::ToolStarted { name, input });
                 }
-                AgentEvent::ToolCallFinished { name, ok, .. } => {
-                    return Some(ProtocolEvent::ToolFinished { name, ok });
+                AgentEvent::ToolCallFinished {
+                    name, ok, result, ..
+                } => {
+                    return Some(ProtocolEvent::ToolFinished { name, ok, result });
                 }
                 AgentEvent::GateRequested { gate } => {
                     let detail = gate_detail(&gate);

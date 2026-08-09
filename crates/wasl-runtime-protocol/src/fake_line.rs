@@ -633,6 +633,9 @@ fn map_event_line(line: &str) -> Option<ProtocolEvent> {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string(),
+            // Optional `input` on the fake wire → the tool's JSON input; absent
+            // → `Null` (mirrors a driver that doesn't surface args).
+            input: v.get("input").cloned().unwrap_or(Value::Null),
         }),
         "tool_end" => Some(ProtocolEvent::ToolFinished {
             name: v
@@ -641,6 +644,9 @@ fn map_event_line(line: &str) -> Option<ProtocolEvent> {
                 .unwrap_or("")
                 .to_string(),
             ok: v.get("ok").and_then(Value::as_bool).unwrap_or(false),
+            // Optional `result` on the fake wire → the tool's output; absent →
+            // `None` (mirrors a driver that only reports success/failure).
+            result: v.get("result").cloned(),
         }),
         "gate" => Some(ProtocolEvent::NativeGateRequested {
             detail: NativeGateDetail {
@@ -735,30 +741,35 @@ mod tests {
     #[test]
     fn maps_tool_start_and_end_incl_missing_fields() {
         assert_eq!(
-            m(r#"{"ev":"tool_start","name":"grep"}"#),
+            m(r#"{"ev":"tool_start","name":"grep","input":{"pattern":"foo"}}"#),
             Some(ProtocolEvent::ToolStarted {
-                name: "grep".to_string()
+                name: "grep".to_string(),
+                input: serde_json::json!({"pattern": "foo"}),
             })
         );
+        // Missing `name`/`input` → empty name, Null input fallback.
         assert_eq!(
             m(r#"{"ev":"tool_start"}"#),
             Some(ProtocolEvent::ToolStarted {
-                name: String::new()
+                name: String::new(),
+                input: Value::Null,
             })
         );
         assert_eq!(
-            m(r#"{"ev":"tool_end","name":"grep","ok":true}"#),
+            m(r#"{"ev":"tool_end","name":"grep","ok":true,"result":"3 matches"}"#),
             Some(ProtocolEvent::ToolFinished {
                 name: "grep".to_string(),
-                ok: true
+                ok: true,
+                result: Some(Value::String("3 matches".to_string())),
             })
         );
-        // Missing `name`/`ok` → empty name, ok=false fallback.
+        // Missing `name`/`ok`/`result` → empty name, ok=false, None result.
         assert_eq!(
             m(r#"{"ev":"tool_end"}"#),
             Some(ProtocolEvent::ToolFinished {
                 name: String::new(),
-                ok: false
+                ok: false,
+                result: None,
             })
         );
     }

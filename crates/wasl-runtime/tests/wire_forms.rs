@@ -206,8 +206,27 @@ fn turn_event_tool_started_wire_form() {
         &TurnEvent::ToolStarted {
             turn_id: tid(),
             name: "grep".to_string(),
+            input: json!({ "pattern": "foo" }),
         },
-        json!({ "type": "tool_started", "turn_id": "turn-7", "name": "grep" }),
+        json!({
+            "type": "tool_started", "turn_id": "turn-7", "name": "grep",
+            "input": { "pattern": "foo" }
+        }),
+    );
+}
+
+#[test]
+fn turn_event_tool_started_wire_form_null_input() {
+    // Absent driver args → `input: Null`, which serializes as `"input": null`
+    // (the field is `#[serde(default)]`, not skip-on-null, so it is always
+    // present on the wire — a stable shape for observers).
+    assert_turn_event_roundtrips(
+        &TurnEvent::ToolStarted {
+            turn_id: tid(),
+            name: "grep".to_string(),
+            input: serde_json::Value::Null,
+        },
+        json!({ "type": "tool_started", "turn_id": "turn-7", "name": "grep", "input": null }),
     );
 }
 
@@ -218,6 +237,26 @@ fn turn_event_tool_finished_wire_form() {
             turn_id: tid(),
             name: "grep".to_string(),
             ok: true,
+            result: Some(json!("3 matches")),
+        },
+        json!({
+            "type": "tool_finished", "turn_id": "turn-7", "name": "grep", "ok": true,
+            "result": "3 matches"
+        }),
+    );
+}
+
+#[test]
+fn turn_event_tool_finished_wire_form_no_result() {
+    // Absent driver output → `result: None`, which is skipped on the wire
+    // (`skip_serializing_if = "Option::is_none"`), keeping the finished frame
+    // lean when the driver reports only success/failure (e.g. codex).
+    assert_turn_event_roundtrips(
+        &TurnEvent::ToolFinished {
+            turn_id: tid(),
+            name: "grep".to_string(),
+            ok: true,
+            result: None,
         },
         json!({
             "type": "tool_finished", "turn_id": "turn-7", "name": "grep", "ok": true
@@ -347,11 +386,13 @@ fn turn_event_all_fourteen_variant_tags_are_snake_case_and_distinct() {
         TurnEvent::ToolStarted {
             turn_id: tid(),
             name: String::new(),
+            input: serde_json::Value::Null,
         },
         TurnEvent::ToolFinished {
             turn_id: tid(),
             name: String::new(),
             ok: false,
+            result: None,
         },
         TurnEvent::NativeGateRequested {
             turn_id: tid(),

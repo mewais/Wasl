@@ -324,6 +324,7 @@ fn turn_event_tool_started_matches_fixture() {
     let ev = TurnEvent::ToolStarted {
         turn_id: TurnId("turn-7".to_string()),
         name: "ask_wasl".to_string(),
+        input: serde_json::json!({ "question": "ready?" }),
     };
     assert_matches_fixture(&ev, "turn_event_tool_started.json");
 }

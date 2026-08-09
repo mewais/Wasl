@@ -599,14 +599,20 @@ pub enum TurnEvent {
         /// The delta text.
         text: String,
     },
-    /// A tool call began (name only; args/results are audit provenance).
+    /// A tool call began. Carries the tool's JSON input (when the driver
+    /// surfaces it) so observers can render the arguments, not just the name.
     ToolStarted {
         /// The turn this tool call belongs to.
         turn_id: TurnId,
         /// The tool name.
         name: String,
+        /// The tool's JSON input as the driver reported it (`Null` when the
+        /// driver does not surface it, e.g. codex).
+        #[serde(default)]
+        input: serde_json::Value,
     },
-    /// A tool call finished.
+    /// A tool call finished. Carries the tool's result content (when the driver
+    /// surfaces it) so observers can render the output.
     ToolFinished {
         /// The turn this tool call belongs to.
         turn_id: TurnId,
@@ -614,6 +620,10 @@ pub enum TurnEvent {
         name: String,
         /// Whether the tool succeeded.
         ok: bool,
+        /// The tool's result content, if the driver surfaces it (`None` when
+        /// absent, e.g. codex which only reports an exit code).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<serde_json::Value>,
     },
     /// The session entered a native gate (`AwaitingGate`). Resolvable via §9.
     NativeGateRequested {
@@ -849,6 +859,11 @@ pub enum ProtocolEvent {
     ToolStarted {
         /// The tool name.
         name: String,
+        /// The tool's JSON input as the driver reported it (`Null` when the
+        /// driver does not surface it, e.g. codex). Carried so observers can
+        /// render the tool's arguments, not just its name. (Internal enum — not
+        /// serialized; the wire form is [`TurnEvent::ToolStarted`].)
+        input: serde_json::Value,
     },
     /// A tool call finished.
     ToolFinished {
@@ -856,6 +871,11 @@ pub enum ProtocolEvent {
         name: String,
         /// Whether the tool succeeded.
         ok: bool,
+        /// The tool's result content, if the driver surfaces it (`None` when
+        /// absent, e.g. codex which only reports an exit code). Carried so
+        /// observers can render the tool's output. (Internal enum — not
+        /// serialized; the wire form is [`TurnEvent::ToolFinished`].)
+        result: Option<serde_json::Value>,
     },
     /// The session entered a native permission gate.
     NativeGateRequested {

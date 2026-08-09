@@ -892,7 +892,7 @@ impl Actor {
                     self.emit(TurnEvent::AssistantDelta { turn_id, text });
                 }
             }
-            ProtocolEvent::ToolStarted { name } => {
+            ProtocolEvent::ToolStarted { name, input } => {
                 if self.is_cancelling_active() {
                     return;
                 }
@@ -902,10 +902,14 @@ impl Actor {
                     // bidirectional callback can be answered by name (Phase-2C).
                     self.running_tool = Some(name.clone());
                     self.set_busy(BusyPhase::RunningTool);
-                    self.emit(TurnEvent::ToolStarted { turn_id, name });
+                    self.emit(TurnEvent::ToolStarted {
+                        turn_id,
+                        name,
+                        input,
+                    });
                 }
             }
-            ProtocolEvent::ToolFinished { name, ok } => {
+            ProtocolEvent::ToolFinished { name, ok, result } => {
                 if self.is_cancelling_active() {
                     return;
                 }
@@ -913,7 +917,12 @@ impl Actor {
                     let turn_id = a.id.clone();
                     self.running_tool = None;
                     self.set_busy(BusyPhase::Generating);
-                    self.emit(TurnEvent::ToolFinished { turn_id, name, ok });
+                    self.emit(TurnEvent::ToolFinished {
+                        turn_id,
+                        name,
+                        ok,
+                        result,
+                    });
                 }
             }
             ProtocolEvent::NativeGateRequested { detail } => {

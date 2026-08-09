@@ -234,12 +234,14 @@ async fn tool_started_then_finished_transitions_phase_and_surfaces_events() {
             .emit(ProtocolEvent::TurnAccepted { native_turn: None })
             .emit(ProtocolEvent::ToolStarted {
                 name: "grep".into(),
+                input: serde_json::Value::Null,
             })
             .gated(
                 "finish_tool",
                 ProtocolEvent::ToolFinished {
                     name: "grep".into(),
                     ok: true,
+                    result: None,
                 },
             )
             .emit(ProtocolEvent::TurnCompleted {
@@ -268,7 +270,7 @@ async fn tool_started_then_finished_transitions_phase_and_surfaces_events() {
     let prefix_evs = events_of(&prefix);
     assert!(
         prefix_evs.iter().any(|e| matches!(
-            e, TurnEvent::ToolStarted { turn_id: t, name } if *t == turn_id && name == "grep"
+            e, TurnEvent::ToolStarted { turn_id: t, name, .. } if *t == turn_id && name == "grep"
         )),
         "the tool start surfaces ToolStarted (§5/§7.4), got {prefix_evs:?}"
     );
@@ -292,7 +294,7 @@ async fn tool_started_then_finished_transitions_phase_and_surfaces_events() {
     let evs = events_of(&items);
     assert!(
         evs.iter().any(|e| matches!(
-            e, TurnEvent::ToolFinished { turn_id: t, name, ok: true } if *t == turn_id && name == "grep"
+            e, TurnEvent::ToolFinished { turn_id: t, name, ok: true, .. } if *t == turn_id && name == "grep"
         )),
         "the tool finish surfaces ToolFinished{{ok:true}} (§5/§7.4), got {evs:?}"
     );

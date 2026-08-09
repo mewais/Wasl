@@ -46,10 +46,12 @@ fn protocol_event_all_nine_variants_construct_and_match() {
         },
         ProtocolEvent::ToolStarted {
             name: "grep".to_string(),
+            input: serde_json::Value::Null,
         },
         ProtocolEvent::ToolFinished {
             name: "grep".to_string(),
             ok: true,
+            result: None,
         },
         ProtocolEvent::NativeGateRequested {
             detail: NativeGateDetail {
