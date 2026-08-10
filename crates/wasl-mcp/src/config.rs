@@ -43,6 +43,13 @@ pub struct Config {
 pub struct IdentityConfig {
     pub agent_id: String,
     pub host_id: String,
+    /// The USER-facing display name of the host this node serves (from Marsad's
+    /// host registry `PersistedHost.label`). Distinct from the opaque `host_id`
+    /// (e.g. `"host-16"`): this is what a human named the machine (e.g.
+    /// `"gpu-box"`). Empty when unknown (older config / un-upgraded caller).
+    /// Surfaced to the inner agent via `list_peers`'s self identity so it can
+    /// describe its OWN host by name.
+    pub host_name: String,
 }
 
 /// The A2A receive bind. Stored as a string (not `SocketAddr`) even though the
@@ -118,6 +125,17 @@ pub struct PeerEntry {
     pub agent_id: String,
     pub host_id: String,
     pub url: String,
+    /// The peer node's USER-facing display name (the sibling session's
+    /// `SessionView.name`, e.g. `"Writer"`), so the inner agent can address a
+    /// peer by the name a human gave it rather than an opaque
+    /// `draft-node-<uuid>` agent_id. Empty when unknown (older roster / an
+    /// un-upgraded caller that did not emit names). Serde-defaulted so a
+    /// name-less `[[peers]]` block from an un-upgraded Marsad still parses.
+    pub name: String,
+    /// The peer node's host display name (its host's `PersistedHost.label`,
+    /// e.g. `"gpu-box"`), distinct from the opaque `host_id`. Empty when
+    /// unknown. Serde-defaulted (forward-compatible).
+    pub host_name: String,
 }
 
 impl Default for Config {
@@ -126,6 +144,7 @@ impl Default for Config {
             identity: IdentityConfig {
                 agent_id: "wasl-local".to_string(),
                 host_id: "localhost".to_string(),
+                host_name: String::new(),
             },
             a2a: A2aConfig::default(),
             operator: OperatorConfig::default(),
@@ -250,6 +269,9 @@ struct RawConfig {
 struct RawIdentity {
     agent_id: String,
     host_id: String,
+    /// User-facing host display name. Serde-defaulted (empty) so an un-upgraded
+    /// config with no `host_name` still parses.
+    host_name: String,
 }
 
 impl Default for RawIdentity {
@@ -257,6 +279,7 @@ impl Default for RawIdentity {
         RawIdentity {
             agent_id: "wasl-local".to_string(),
             host_id: "localhost".to_string(),
+            host_name: String::new(),
         }
     }
 }
@@ -335,12 +358,17 @@ impl Default for RawRuntime {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Deserialize, Default)]
+#[serde(deny_unknown_fields, default)]
 struct RawPeer {
     agent_id: String,
     host_id: String,
     url: String,
+    /// Peer display name; serde-defaulted (empty) so a name-less `[[peers]]`
+    /// block from an un-upgraded Marsad still parses.
+    name: String,
+    /// Peer host display name; serde-defaulted (empty).
+    host_name: String,
 }
 
 // ---------------------------------------------------------------------
@@ -447,6 +475,8 @@ impl Config {
                 agent_id: p.agent_id,
                 host_id: p.host_id,
                 url: p.url,
+                name: p.name,
+                host_name: p.host_name,
             })
             .collect();
 
@@ -454,6 +484,7 @@ impl Config {
             identity: IdentityConfig {
                 agent_id: raw.identity.agent_id,
                 host_id: raw.identity.host_id,
+                host_name: raw.identity.host_name,
             },
             a2a: A2aConfig { bind: a2a_bind },
             operator: OperatorConfig {
@@ -612,6 +643,35 @@ pub fn registry_from_peers(peers: &[PeerEntry]) -> wasl_registry::PeerRegistry {
         });
     }
     registry
+}
+
+/// One peer's USER-facing display names, keyed by `agent_id` in [`peer_names`].
+/// Kept alongside (not inside) the frozen `wasl_registry`/`wasl_proto::AgentCard`
+/// so the name surface is additive and does not perturb the peer-routing types.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PeerName {
+    /// The peer node's display name (e.g. `"Writer"`). Empty when unknown.
+    pub name: String,
+    /// The peer node's host display name (e.g. `"gpu-box"`). Empty when unknown.
+    pub host_name: String,
+}
+
+/// Build the `agent_id -> PeerName` map from the config's peer entries — the
+/// human-name side-table the `list_peers` tool and the name-alias resolver read.
+/// Deterministic (a `BTreeMap`) and pure.
+pub fn peer_names(peers: &[PeerEntry]) -> std::collections::BTreeMap<String, PeerName> {
+    peers
+        .iter()
+        .map(|p| {
+            (
+                p.agent_id.clone(),
+                PeerName {
+                    name: p.name.clone(),
+                    host_name: p.host_name.clone(),
+                },
+            )
+        })
+        .collect()
 }
 
 /// The receive-side adapter selected by config: an exhaustive-match

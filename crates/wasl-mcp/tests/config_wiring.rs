@@ -47,11 +47,15 @@ fn two_peer_entries() -> Vec<PeerEntry> {
             agent_id: "reviewer".to_string(),
             host_id: "hostB".to_string(),
             url: "http://10.0.0.7:4242/".to_string(),
+            name: String::new(),
+            host_name: String::new(),
         },
         PeerEntry {
             agent_id: "builder".to_string(),
             host_id: "hostA".to_string(),
             url: "http://127.0.0.1:4343/".to_string(),
+            name: String::new(),
+            host_name: String::new(),
         },
     ]
 }

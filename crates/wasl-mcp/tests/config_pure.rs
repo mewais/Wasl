@@ -8,6 +8,7 @@
 //! re-exported from the crate root: that failure is the test-first baseline.
 
 use wasl_mcp::{
+    config::{peer_names, PeerName},
     A2aConfig, AdapterConfig, AdapterKind, AuditConfig, Config, ConfigError, GateConfig,
     IdentityConfig, OperatorConfig, PeerEntry, RuntimeConfig,
 };
@@ -56,6 +57,7 @@ fn full_parse_every_field_exact() {
         identity: IdentityConfig {
             agent_id: "planner".to_string(),
             host_id: "hostA".to_string(),
+            host_name: String::new(),
         },
         a2a: A2aConfig {
             bind: Some("127.0.0.1:4242".to_string()),
@@ -77,11 +79,15 @@ fn full_parse_every_field_exact() {
                 agent_id: "reviewer".to_string(),
                 host_id: "hostB".to_string(),
                 url: "http://10.0.0.7:4242/".to_string(),
+                name: String::new(),
+                host_name: String::new(),
             },
             PeerEntry {
                 agent_id: "builder".to_string(),
                 host_id: "hostA".to_string(),
                 url: "http://127.0.0.1:4343/".to_string(),
+                name: String::new(),
+                host_name: String::new(),
             },
         ],
     };
@@ -137,6 +143,66 @@ fn operator_bind_is_parsed_but_unused() {
     assert_eq!(cfg.a2a.bind, None);
     assert_eq!(cfg.adapter.kind, AdapterKind::Claude);
     assert!(cfg.peers.is_empty());
+}
+
+// ---------------------------------------------------------------------
+// Feature A — USER-facing names on identity + peers
+// ---------------------------------------------------------------------
+
+/// The names (`identity.host_name`, `peers[].name`, `peers[].host_name`) parse
+/// when present and populate the name side-table `list_peers` reads.
+#[test]
+fn names_parse_on_identity_and_peers() {
+    let toml = r#"
+[identity]
+agent_id = "draft-node-abc"
+host_id  = "host-16"
+host_name = "gpu-box"
+
+[[peers]]
+agent_id = "draft-node-writer"
+host_id  = "host-17"
+url      = "http://10.0.0.7:48000/"
+name = "Writer"
+host_name = "cpu-box"
+"#;
+    let cfg = Config::from_toml_str(toml).expect("names must parse");
+    assert_eq!(cfg.identity.host_name, "gpu-box");
+    assert_eq!(cfg.peers.len(), 1);
+    assert_eq!(cfg.peers[0].name, "Writer");
+    assert_eq!(cfg.peers[0].host_name, "cpu-box");
+
+    let names = peer_names(&cfg.peers);
+    assert_eq!(
+        names.get("draft-node-writer"),
+        Some(&PeerName {
+            name: "Writer".to_string(),
+            host_name: "cpu-box".to_string(),
+        }),
+        "peer_names maps agent_id -> display names"
+    );
+}
+
+/// Forward-compat: a roster from an un-upgraded Marsad that emits NO name /
+/// host_name keys still parses, with the names defaulting to empty (never a
+/// hard error). This is the graceful-degradation guarantee for the existing
+/// ArchAttention roster before its first re-derivation.
+#[test]
+fn nameless_peer_and_identity_still_parse() {
+    let toml = r#"
+[identity]
+agent_id = "draft-node-abc"
+host_id  = "host-16"
+
+[[peers]]
+agent_id = "draft-node-writer"
+host_id  = "host-17"
+url      = "http://10.0.0.7:48000/"
+"#;
+    let cfg = Config::from_toml_str(toml).expect("a name-less roster must still parse");
+    assert_eq!(cfg.identity.host_name, "", "absent host_name defaults empty");
+    assert_eq!(cfg.peers[0].name, "", "absent peer name defaults empty");
+    assert_eq!(cfg.peers[0].host_name, "", "absent peer host_name defaults empty");
 }
 
 // ---------------------------------------------------------------------

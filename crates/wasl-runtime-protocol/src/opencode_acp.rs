@@ -15,8 +15,9 @@ use std::path::PathBuf;
 use wasit_core::{AgentDriver, GateDecision, GateRequest, ResumeMode, SpawnSpec};
 use wasl_runtime::{
     AgentMode, CompactionInfo, ComposedPrompt, InteractiveProtocol, InteractiveTransport,
-    NativeGateDetail, NativeSessionId, PlanEntry, ProtocolEvent, RuntimeCapabilities,
-    RuntimeError, SlashCommandInfo, SpawnOptions, UsageSnapshot,
+    McpServerInfo, NativeGateDetail, NativeSessionId, PlanEntry, ProtocolEvent,
+    RuntimeCapabilities, RuntimeError, SessionCapabilities, SlashCommandInfo, SpawnOptions,
+    UsageSnapshot,
 };
 
 /// Translate Wasl `SpawnOptions` into a Wasit `SpawnSpec` for opencode.
@@ -94,6 +95,7 @@ impl InteractiveProtocol for OpenCodeAcpProtocol {
             pending_gate: None,
             session_ready_seen: false,
             accumulated_reply: String::new(),
+            pending_capabilities: None,
         }))
     }
 
@@ -120,6 +122,7 @@ impl InteractiveProtocol for OpenCodeAcpProtocol {
             pending_gate: None,
             session_ready_seen: false,
             accumulated_reply: String::new(),
+            pending_capabilities: None,
         }))
     }
 }
@@ -135,6 +138,11 @@ struct OpenCodeAcpTransport {
     session_ready_seen: bool,
     /// Accumulated reply text from `AssistantDelta` events this turn.
     accumulated_reply: String,
+    /// Feature B: buffered session-init capability catalog, emitted on the poll
+    /// after `SessionReady` (see `claude_stream.rs` for the rationale). opencode
+    /// reports its available modes (from `configOptions`) at init; tools /
+    /// mcp_servers / slash_commands are empty (it announces them differently).
+    pending_capabilities: Option<ProtocolEvent>,
 }
 
 #[async_trait]
@@ -177,14 +185,58 @@ impl InteractiveTransport for OpenCodeAcpTransport {
 
     async fn next_event(&mut self) -> Option<ProtocolEvent> {
         use wasit_core::AgentEvent;
+        // Feature B: drain the buffered capability catalog first (emitted the poll
+        // after SessionReady).
+        if let Some(caps) = self.pending_capabilities.take() {
+            return Some(caps);
+        }
         loop {
             let ev = self.session.next_event().await?;
             match ev {
-                AgentEvent::SessionInit { native_session_id, .. } => {
+                AgentEvent::SessionInit {
+                    native_session_id,
+                    tools,
+                    mcp_servers,
+                    slash_commands,
+                    permission_mode,
+                    available_modes,
+                    current_mode,
+                    ..
+                } => {
                     if self.session_ready_seen {
                         continue;
                     }
                     self.session_ready_seen = true;
+                    self.pending_capabilities = Some(ProtocolEvent::SessionCapabilities {
+                        capabilities: SessionCapabilities {
+                            tools,
+                            mcp_servers: mcp_servers
+                                .into_iter()
+                                .map(|m| McpServerInfo {
+                                    name: m.name,
+                                    status: m.status,
+                                })
+                                .collect(),
+                            slash_commands: slash_commands
+                                .into_iter()
+                                .map(|c| SlashCommandInfo {
+                                    name: c.name,
+                                    description: c.description,
+                                    argument_hint: c.argument_hint,
+                                })
+                                .collect(),
+                            available_modes: available_modes
+                                .into_iter()
+                                .map(|m| AgentMode {
+                                    id: m.id,
+                                    label: m.label,
+                                    description: m.description,
+                                })
+                                .collect(),
+                            current_mode,
+                            permission_mode,
+                        },
+                    });
                     return Some(ProtocolEvent::SessionReady {
                         native: native_session_id.map(NativeSessionId),
                     });

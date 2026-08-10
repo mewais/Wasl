@@ -67,10 +67,12 @@ async fn lists_the_five_tools() {
             "command".to_string(),
             "commit".to_string(),
             "consult".to_string(),
+            // Feature A: roster-discovery tool now advertised.
+            "list_peers".to_string(),
             "message".to_string(),
             "transfer".to_string(),
         ],
-        "the five Wasl tools (post-W4: + commit) must be advertised"
+        "the Wasl tools (post-W4: + commit; Feature A: + list_peers) must be advertised"
     );
 
     client.cancel().await.expect("client shutdown");

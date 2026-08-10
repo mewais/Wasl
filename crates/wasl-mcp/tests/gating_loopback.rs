@@ -1428,11 +1428,80 @@ async fn smoke_lists_the_five_tools_including_commit() {
             "command".to_string(),
             "commit".to_string(),
             "consult".to_string(),
+            // Feature A: the roster-discovery tool is now advertised alongside
+            // the send/commit tools so the inner agent can map names -> agent_ids.
+            "list_peers".to_string(),
             "message".to_string(),
             "transfer".to_string(),
         ],
-        "the five Wasl tools (post-W4: + commit) must be advertised"
+        "the Wasl tools (post-W4: + commit; Feature A: + list_peers) must be advertised"
     );
+
+    client.cancel().await.expect("client shutdown");
+    server.cancel().await.expect("server shutdown");
+}
+
+// =======================================================================
+// Feature A — list_peers returns the roster by NAME + self identity, and the
+// send tools accept a name alias.
+// =======================================================================
+
+/// `list_peers` joins the routing registry (agent_id/host/url) with the
+/// config-delivered name side-table (name/host_name) and reports this node's own
+/// identity by name — the mapping the manager uses to address "Writer" instead
+/// of an opaque `draft-node-<uuid>`.
+#[tokio::test]
+async fn list_peers_reports_roster_by_name_and_self_identity() {
+    use std::collections::BTreeMap;
+    use wasl_mcp::config::PeerName;
+
+    // A registry with one reachable peer (routing data), plus a name side-table
+    // giving it a human name — exactly what `build_handler` wires from config.
+    let mut registry = PeerRegistry::new();
+    registry.register(AgentCard {
+        id: AgentId("draft-node-writer".to_string()),
+        host: HostId("host-17".to_string()),
+        endpoint: Some("http://10.0.0.7:48000".to_string()),
+    });
+    let mut names = BTreeMap::new();
+    names.insert(
+        "draft-node-writer".to_string(),
+        PeerName {
+            name: "Writer".to_string(),
+            host_name: "cpu-box".to_string(),
+        },
+    );
+
+    let state = WaslState::new(AuditLog::new(SharedSink::default()), http_client(), PanicRunner);
+    let handler = WaslMcp::with_seams(
+        agent("draft-node-self"),
+        host("host-16"),
+        registry,
+        state,
+        GateAuthority::default(),
+        None,
+        Arc::new(CounterTokenIds::default()),
+    )
+    .with_names("gpu-box", names);
+
+    let (client, server) = connect(handler, ()).await;
+    let result = call(&client, "list_peers", json!({})).await;
+    let text = text_of(&result);
+    assert!(!text.is_empty(), "list_peers returns a text block");
+    let reply: Value = serde_json::from_str(&text).expect("list_peers returns JSON");
+
+    let peers = reply["peers"].as_array().expect("peers array");
+    assert_eq!(peers.len(), 1, "the one reachable peer is listed");
+    assert_eq!(peers[0]["name"], "Writer");
+    assert_eq!(peers[0]["agent_id"], "draft-node-writer");
+    assert_eq!(peers[0]["host"], "host-17");
+    assert_eq!(peers[0]["host_name"], "cpu-box");
+    assert_eq!(peers[0]["url"], "http://10.0.0.7:48000");
+
+    // Self identity carries the node's own host display name.
+    assert_eq!(reply["self"]["agent_id"], "draft-node-self");
+    assert_eq!(reply["self"]["host"], "host-16");
+    assert_eq!(reply["self"]["host_name"], "gpu-box");
 
     client.cancel().await.expect("client shutdown");
     server.cancel().await.expect("server shutdown");

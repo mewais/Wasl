@@ -14,8 +14,8 @@ mod support;
 use std::sync::Arc;
 
 use wasl_runtime::{
-    AgentMode, BusyPolicy, CompactionInfo, DeliveryTarget, EventSeq, PlanEntry, ProtocolEvent,
-    SlashCommandInfo, TurnEvent, TurnReceipt, UsageSnapshot,
+    AgentMode, BusyPolicy, CompactionInfo, DeliveryTarget, EventSeq, McpServerInfo, PlanEntry,
+    ProtocolEvent, SessionCapabilities, SlashCommandInfo, TurnEvent, TurnReceipt, UsageSnapshot,
 };
 
 use support::{
@@ -391,6 +391,75 @@ async fn compaction_mid_turn_surfaces_as_turn_event() {
     assert!(
         evs.iter().any(|e| matches!(e, TurnEvent::TurnCompleted { .. })),
         "turn completes normally after Compaction, got {evs:?}"
+    );
+}
+
+// =========================================================================
+// 7b. SessionCapabilities — emits TurnEvent::SessionCapabilities. This one is
+//     processed IMMEDIATELY (not parked while idle), since it arrives at session
+//     establishment; here it is exercised mid-turn (still emitted verbatim).
+// =========================================================================
+
+#[tokio::test]
+async fn session_capabilities_mid_turn_surfaces_as_turn_event() {
+    let proto = ScriptedProtocol::new();
+    proto.install(
+        "ctx-caps",
+        mid_turn_script(vec![ProtocolEvent::SessionCapabilities {
+            capabilities: SessionCapabilities {
+                tools: vec!["Read".to_string(), "Edit".to_string()],
+                mcp_servers: vec![McpServerInfo {
+                    name: "wasl".to_string(),
+                    status: "connected".to_string(),
+                }],
+                slash_commands: vec![SlashCommandInfo {
+                    name: "/compact".to_string(),
+                    description: "Compact".to_string(),
+                    argument_hint: String::new(),
+                }],
+                available_modes: vec![AgentMode {
+                    id: "default".to_string(),
+                    label: "Default".to_string(),
+                    description: String::new(),
+                }],
+                current_mode: "default".to_string(),
+                permission_mode: "acceptEdits".to_string(),
+            },
+        }]),
+    );
+    let clock = TestClock::new();
+    let sink = sink_arc(RecordingSink::default());
+    let prov = provider(proto, info_config(), clock, sink);
+    let target: Arc<dyn DeliveryTarget> =
+        prov.target_for(&key("ctx-caps")).await.expect("target");
+
+    let _ = target
+        .submit_turn(consult("ctx-caps", "caps"), BusyPolicy::Reject)
+        .await;
+
+    let stream = target.events(EventSeq(0)).await;
+    let items = drain_items(stream, 32).await;
+    let evs = events_of(&items);
+
+    let found = evs
+        .iter()
+        .find(|e| matches!(e, TurnEvent::SessionCapabilities { .. }));
+    assert!(
+        found.is_some(),
+        "SessionCapabilities ProtocolEvent → TurnEvent::SessionCapabilities, got {evs:?}"
+    );
+    if let Some(TurnEvent::SessionCapabilities { capabilities }) = found {
+        assert_eq!(capabilities.tools, vec!["Read", "Edit"]);
+        assert_eq!(capabilities.mcp_servers.len(), 1);
+        assert_eq!(capabilities.mcp_servers[0].name, "wasl");
+        assert_eq!(capabilities.slash_commands.len(), 1);
+        assert_eq!(capabilities.available_modes.len(), 1);
+        assert_eq!(capabilities.current_mode, "default");
+        assert_eq!(capabilities.permission_mode, "acceptEdits");
+    }
+    assert!(
+        evs.iter().any(|e| matches!(e, TurnEvent::TurnCompleted { .. })),
+        "turn completes normally after SessionCapabilities, got {evs:?}"
     );
 }
 

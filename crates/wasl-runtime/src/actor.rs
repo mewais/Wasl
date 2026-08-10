@@ -479,7 +479,14 @@ impl Actor {
     async fn on_pumped_event(&mut self, ev: ProtocolEvent) {
         let is_lifecycle = matches!(
             ev,
-            ProtocolEvent::SessionReady { .. } | ProtocolEvent::ProcessExited { .. }
+            ProtocolEvent::SessionReady { .. }
+                | ProtocolEvent::ProcessExited { .. }
+                // The session-global init capability catalog is NOT a per-turn
+                // event: it arrives at session establishment (right after
+                // SessionReady, before any turn). Process it immediately rather
+                // than parking it until the first turn — otherwise an observer's
+                // Config surface would stay blank until the user sent a prompt.
+                | ProtocolEvent::SessionCapabilities { .. }
         );
         if self.active.is_none() && self.ready && !is_lifecycle {
             // A turn event with no active turn and a ready session: it is the
@@ -1009,6 +1016,14 @@ impl Actor {
                     return;
                 }
                 self.emit(TurnEvent::Compaction { info });
+            }
+            ProtocolEvent::SessionCapabilities { capabilities } => {
+                // Session-global init catalog: emit it verbatim so the observer's
+                // Config surface can render tools/mcp_servers/slash_commands/modes.
+                // Not gated on an active turn (it arrives at session establishment,
+                // before/around the first turn); a mid-cancel is irrelevant to a
+                // static catalog, so no `is_cancelling_active` guard.
+                self.emit(TurnEvent::SessionCapabilities { capabilities });
             }
         }
     }

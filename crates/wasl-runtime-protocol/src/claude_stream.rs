@@ -23,8 +23,9 @@ use uuid::Uuid;
 use wasit_core::{AgentDriver, GateDecision, GateRequest, ResumeMode, SpawnSpec};
 use wasl_runtime::{
     AgentMode, CompactionInfo, ComposedPrompt, InteractiveProtocol, InteractiveTransport,
-    NativeGateDetail, NativeSessionId, PlanEntry, ProtocolEvent, RuntimeCapabilities,
-    RuntimeError, SlashCommandInfo, SpawnOptions, UsageSnapshot,
+    McpServerInfo, NativeGateDetail, NativeSessionId, PlanEntry, ProtocolEvent,
+    RuntimeCapabilities, RuntimeError, SessionCapabilities, SlashCommandInfo, SpawnOptions,
+    UsageSnapshot,
 };
 
 /// Identical UUIDv5 namespace to `wasl-adapter-claude::WASL_SESSION_NS`,
@@ -106,6 +107,7 @@ impl ClaudeStreamProtocol {
             pending_gate: None,
             session_ready_seen: false,
             synthetic_ready_emitted: false,
+            pending_capabilities: None,
         }))
     }
 }
@@ -157,6 +159,13 @@ struct ClaudeStreamTransport {
     /// real `system/init` then flows through as a second `SessionReady` carrying
     /// claude's actual session id.
     synthetic_ready_emitted: bool,
+    /// Feature B: the session-init capability catalog (tools / MCP servers /
+    /// slash commands / modes / permission mode), captured from the FIRST real
+    /// `system/init` and buffered here so the poll AFTER `SessionReady` returns it
+    /// as a `ProtocolEvent::SessionCapabilities`. `next_event` yields one event
+    /// per poll, so the caps ride the next poll rather than replacing the ready
+    /// signal. `None` once emitted (or when the driver reports no init catalog).
+    pending_capabilities: Option<ProtocolEvent>,
 }
 
 #[async_trait]
@@ -210,15 +219,65 @@ impl InteractiveTransport for ClaudeStreamTransport {
             self.synthetic_ready_emitted = true;
             return Some(ProtocolEvent::SessionReady { native: None });
         }
+        // Feature B: the poll right after the first real `system/init` returns the
+        // buffered capability catalog (the init arm below emits SessionReady, then
+        // stashes the caps here for this next poll — one event per poll).
+        if let Some(caps) = self.pending_capabilities.take() {
+            return Some(caps);
+        }
         loop {
             let ev = self.session.next_event().await?;
             match ev {
-                AgentEvent::SessionInit { native_session_id, .. } => {
+                AgentEvent::SessionInit {
+                    native_session_id,
+                    tools,
+                    mcp_servers,
+                    slash_commands,
+                    permission_mode,
+                    available_modes,
+                    current_mode,
+                    ..
+                } => {
                     if self.session_ready_seen {
-                        // Claude emits system/init on every turn; suppress repeats.
+                        // Claude emits system/init on every turn; suppress repeats
+                        // (both SessionReady AND the caps catalog — it is static).
                         continue;
                     }
                     self.session_ready_seen = true;
+                    // Buffer the capability catalog for the NEXT poll so this poll
+                    // returns the (order-sensitive) SessionReady first. Honest:
+                    // only what claude actually reported — codex/opencode leave
+                    // these empty (they announce nothing at init), so no fabrication.
+                    self.pending_capabilities = Some(ProtocolEvent::SessionCapabilities {
+                        capabilities: SessionCapabilities {
+                            tools,
+                            mcp_servers: mcp_servers
+                                .into_iter()
+                                .map(|m| McpServerInfo {
+                                    name: m.name,
+                                    status: m.status,
+                                })
+                                .collect(),
+                            slash_commands: slash_commands
+                                .into_iter()
+                                .map(|c| SlashCommandInfo {
+                                    name: c.name,
+                                    description: c.description,
+                                    argument_hint: c.argument_hint,
+                                })
+                                .collect(),
+                            available_modes: available_modes
+                                .into_iter()
+                                .map(|m| AgentMode {
+                                    id: m.id,
+                                    label: m.label,
+                                    description: m.description,
+                                })
+                                .collect(),
+                            current_mode,
+                            permission_mode,
+                        },
+                    });
                     return Some(ProtocolEvent::SessionReady {
                         native: native_session_id.map(NativeSessionId),
                     });

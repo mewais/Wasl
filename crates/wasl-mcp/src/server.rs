@@ -141,6 +141,45 @@ pub struct CommitArgs {
     pub token: String,
 }
 
+/// `list_peers` tool arguments — none (the whole roster is returned).
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct ListPeersArgs {}
+
+/// One entry in the `list_peers` reply — the human-and-machine roster the inner
+/// agent uses to map a name (e.g. `"Writer"`) to the `agent_id` the send tools
+/// (`consult`/`command`/`message`) actually address. Serialized as the tool's
+/// JSON content.
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerListEntry {
+    /// The peer's USER-facing display name (empty when unknown).
+    pub name: String,
+    /// The peer's opaque host id (e.g. `"host-16"`).
+    pub host: String,
+    /// The peer's USER-facing host display name (empty when unknown).
+    pub host_name: String,
+    /// The peer's opaque agent id — what the send tools address.
+    pub agent_id: String,
+    /// The peer's A2A endpoint URL, if known.
+    pub url: Option<String>,
+}
+
+/// The full `list_peers` reply: the peer roster plus this node's own identity so
+/// the inner agent knows who IT is by name too.
+#[derive(Debug, Clone, Serialize)]
+pub struct PeerListReply {
+    pub peers: Vec<PeerListEntry>,
+    #[serde(rename = "self")]
+    pub self_identity: SelfIdentity,
+}
+
+/// This node's own identity in the `list_peers` reply.
+#[derive(Debug, Clone, Serialize)]
+pub struct SelfIdentity {
+    pub agent_id: String,
+    pub host: String,
+    pub host_name: String,
+}
+
 // ---------------------------------------------------------------------
 // 1. Mutable state (behind the async lock)
 // ---------------------------------------------------------------------
@@ -278,6 +317,16 @@ pub struct WaslMcp<K: Sink, R: Runner> {
     /// Tier-2 approval-token minting (`RandomTokenIds` in production; a
     /// deterministic sequence only under `with_seams`, for tests).
     token_ids: Arc<dyn TokenIds>,
+    /// The USER-facing display name of THIS node's host (from config
+    /// `identity.host_name`). Empty when unknown. Surfaced as the self identity
+    /// in `list_peers`. Cheaply cloneable `Arc<str>`.
+    self_host_name: Arc<str>,
+    /// USER-facing peer names keyed by `agent_id` (config `peers[].name` /
+    /// `peers[].host_name`), the human-name side-table `list_peers` returns and
+    /// the send tools use to resolve a NAME alias to its `agent_id`. Behind an
+    /// `Arc<RwLock<..>>` to mirror the runtime-mutable peer registry; wired at
+    /// construction from config, additive to the routing registry.
+    peer_names: Arc<std::sync::RwLock<std::collections::BTreeMap<String, crate::config::PeerName>>>,
 }
 
 impl<K, R> WaslMcp<K, R>
@@ -349,6 +398,28 @@ where
             authority,
             hub,
             token_ids,
+            self_host_name: Arc::from(""),
+            peer_names: Arc::new(std::sync::RwLock::new(std::collections::BTreeMap::new())),
+        }
+    }
+
+    /// Attach the USER-facing name surface (Feature A): the peer name side-table
+    /// and this node's own host display name, both from the wasl-mcp config.
+    /// Builder-style (consumes + returns `self`) so it composes onto any of the
+    /// constructors above without changing their signatures — every existing
+    /// call site that does not care about names is unaffected (names default to
+    /// empty). `run()`/`build_handler` calls this with the config-derived values
+    /// so `list_peers` can report the roster by name.
+    pub fn with_names(
+        self,
+        self_host_name: impl Into<String>,
+        peer_names: std::collections::BTreeMap<String, crate::config::PeerName>,
+    ) -> Self {
+        let self_host_name: String = self_host_name.into();
+        Self {
+            self_host_name: Arc::from(self_host_name.as_str()),
+            peer_names: Arc::new(std::sync::RwLock::new(peer_names)),
+            ..self
         }
     }
 
@@ -631,14 +702,17 @@ where
     R: Runner + Send + Sync + 'static,
 {
     #[tool(
-        description = "Consult one or more peer agents with a question and collect their replies"
+        description = "Consult one or more peer agents with a question and collect their replies. \
+                       Each entry in `peers` may be a peer's agent_id OR its display name (as \
+                       shown by `list_peers`); names are resolved to agent_ids before sending."
     )]
     async fn consult(
         &self,
         Parameters(args): Parameters<ConsultArgs>,
         peer: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let params: ConsultParams = args.into();
+        let mut params: ConsultParams = args.into();
+        params.peers = self.resolve_peer_aliases(params.peers);
         let targets = peer_targets(&params.peers);
         let preview = truncate(&params.question);
         self.gated_call(peer, GateKind::Consult, targets, preview, || {
@@ -647,13 +721,18 @@ where
         .await
     }
 
-    #[tool(description = "Command one or more peer agents to run a task and collect their replies")]
+    #[tool(
+        description = "Command one or more peer agents to run a task and collect their replies. \
+                       Each entry in `peers` may be a peer's agent_id OR its display name (see \
+                       `list_peers`); names are resolved to agent_ids before sending."
+    )]
     async fn command(
         &self,
         Parameters(args): Parameters<CommandArgs>,
         peer: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let params: CommandParams = args.into();
+        let mut params: CommandParams = args.into();
+        params.peers = self.resolve_peer_aliases(params.peers);
         let targets = peer_targets(&params.peers);
         let preview = truncate(&params.task);
         self.gated_call(peer, GateKind::Command, targets, preview, || {
@@ -662,13 +741,18 @@ where
         .await
     }
 
-    #[tool(description = "Send a one-way message to one or more peer agents")]
+    #[tool(
+        description = "Send a one-way message to one or more peer agents. Each entry in `peers` \
+                       may be a peer's agent_id OR its display name (see `list_peers`); names are \
+                       resolved to agent_ids before sending."
+    )]
     async fn message(
         &self,
         Parameters(args): Parameters<MessageArgs>,
         peer: Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let params: MessageParams = args.into();
+        let mut params: MessageParams = args.into();
+        params.peers = self.resolve_peer_aliases(params.peers);
         let targets = peer_targets(&params.peers);
         let preview = truncate(&params.payload);
         self.gated_call(peer, GateKind::Message, targets, preview, || {
@@ -780,6 +864,94 @@ where
             }
         }
     }
+
+    #[tool(
+        description = "List the A2A peer agents this node can reach — each with its display name, \
+                       agent_id, host, host display name, and endpoint — plus this node's own \
+                       identity. Use it to map a peer's human name (e.g. \"Writer\") to the \
+                       agent_id that consult/command/message address."
+    )]
+    async fn list_peers(
+        &self,
+        Parameters(_args): Parameters<ListPeersArgs>,
+        _peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        // Join the runtime-mutable routing registry (host/endpoint/agent_id) with
+        // the config-delivered name side-table (name/host_name). The registry is
+        // the authoritative set of reachable peers; a name is attached when known.
+        let registry = self.registry_snapshot();
+        let names = self.peer_names.read().expect("peer_names lock poisoned");
+        let mut peers: Vec<PeerListEntry> = registry
+            .list()
+            .into_iter()
+            .map(|card| {
+                let n = names.get(card.id.as_str()).cloned().unwrap_or_default();
+                PeerListEntry {
+                    name: n.name,
+                    host: card.host.as_str().to_string(),
+                    host_name: n.host_name,
+                    agent_id: card.id.as_str().to_string(),
+                    url: card.endpoint.clone(),
+                }
+            })
+            .collect();
+        // Deterministic order (registry.list already sorts by id, but be explicit).
+        peers.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        drop(names);
+
+        let reply = PeerListReply {
+            peers,
+            self_identity: SelfIdentity {
+                agent_id: self.self_id.as_str().to_string(),
+                host: self.self_host.as_str().to_string(),
+                host_name: self.self_host_name.to_string(),
+            },
+        };
+        let json = serde_json::to_string(&reply)
+            .unwrap_or_else(|_| "{\"peers\":[],\"self\":{}}".to_string());
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+}
+
+impl<K, R> WaslMcp<K, R>
+where
+    K: Sink + Send + Sync + 'static,
+    R: Runner + Send + Sync + 'static,
+{
+    /// Resolve each incoming peer identifier to a routable `agent_id`: if the
+    /// identifier matches a KNOWN peer's display name (from the config name
+    /// side-table) AND is not itself already a known agent_id, rewrite it to that
+    /// peer's agent_id. An identifier that is already an agent_id, or matches no
+    /// name, passes through verbatim (the registry then decides reachability, so
+    /// an unknown target still surfaces the existing "unknown peer" outcome — no
+    /// silent drop). Case-sensitive exact match. Pure over a name-table snapshot.
+    fn resolve_peer_aliases(&self, peers: Vec<AgentId>) -> Vec<AgentId> {
+        let names = self.peer_names.read().expect("peer_names lock poisoned");
+        if names.is_empty() {
+            return peers;
+        }
+        // Build name -> agent_id once (skip empty names). A name that collides
+        // with a real agent_id never shadows it (the agent_id passthrough wins).
+        let mut by_name: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for (agent_id, pn) in names.iter() {
+            if !pn.name.is_empty() {
+                by_name.entry(pn.name.as_str()).or_insert(agent_id.as_str());
+            }
+        }
+        peers
+            .into_iter()
+            .map(|p| {
+                // Already a known agent_id → keep as-is (agent_id wins over name).
+                if names.contains_key(p.as_str()) {
+                    return p;
+                }
+                match by_name.get(p.as_str()) {
+                    Some(agent_id) => AgentId((*agent_id).to_string()),
+                    None => p,
+                }
+            })
+            .collect()
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -799,9 +971,11 @@ where
             server_info: Implementation::from_build_env(),
             instructions: Some(
                 "Wasl agent-to-agent MCP server: consult/command/message peers and transfer \
-                 files. Every call is gated by a permission-before-send tier (elicitation, an \
-                 operator, or prepare/commit) and audited; a `Pending` reply carries a token to \
-                 redeem later with the `commit` tool."
+                 files. Call `list_peers` first to see the reachable peers by their display \
+                 names and map a name to its agent_id (consult/command/message also accept a \
+                 name directly and resolve it). Every call is gated by a permission-before-send \
+                 tier (elicitation, an operator, or prepare/commit) and audited; a `Pending` \
+                 reply carries a token to redeem later with the `commit` tool."
                     .to_string(),
             ),
         }

@@ -554,6 +554,50 @@ pub struct SlashCommandInfo {
     pub argument_hint: String,
 }
 
+/// One MCP server announced at session init (mirrored from
+/// `wasit_core::McpServerInfo`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct McpServerInfo {
+    pub name: String,
+    #[serde(default)]
+    pub status: String,
+}
+
+/// The session's static capability catalog reported by the inner agent at init
+/// (claude `system/init`): the tool names, MCP servers, slash commands, and mode
+/// list/current-mode/permission-mode it advertises. Session-global (no per-turn
+/// correlation), surfaced ONCE per session so an observer (Marsad's Config tab)
+/// can render it exactly as a native session does. Every field defaults so a
+/// driver that reports only some of them (or none — codex) still round-trips.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub struct SessionCapabilities {
+    /// Tool names advertised (claude `system/init.tools`). Empty for drivers that
+    /// do not announce a tool list (codex, opencode).
+    #[serde(default)]
+    pub tools: Vec<String>,
+    /// MCP servers connected (claude `system/init.mcp_servers`). Empty otherwise.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerInfo>,
+    /// Slash commands available at init (claude `system/init.slash_commands`).
+    /// Empty for codex; opencode emits these via `SlashCommandsUpdated` instead.
+    #[serde(default)]
+    pub slash_commands: Vec<SlashCommandInfo>,
+    /// The available agent/permission modes (driver-reported, never hardcoded).
+    /// Empty when the driver reports none (codex).
+    #[serde(default)]
+    pub available_modes: Vec<AgentMode>,
+    /// The current mode id at init (claude permissionMode / opencode current
+    /// mode). Empty when unknown.
+    #[serde(default)]
+    pub current_mode: String,
+    /// The permission-mode string (claude `default`/`acceptEdits`/`plan`/
+    /// `bypassPermissions`). Empty for drivers without one.
+    #[serde(default)]
+    pub permission_mode: String,
+}
+
 // `UsageSnapshot` uses f64 which is not Eq; provide a manual Eq via bit-equality
 // (sufficient for test assertions / round-trip checks).
 impl Eq for UsageSnapshot {}
@@ -729,6 +773,14 @@ pub enum TurnEvent {
     Compaction {
         /// Compaction metadata.
         info: CompactionInfo,
+    },
+    /// The session's static capability catalog at init (tools / MCP servers /
+    /// slash commands / modes / permission mode). Emitted once per session so an
+    /// observer can populate its "Config" surface exactly as a native session
+    /// does. Session-global (no `turn_id`).
+    SessionCapabilities {
+        /// The reported capability catalog.
+        capabilities: SessionCapabilities,
     },
 }
 
@@ -938,6 +990,13 @@ pub enum ProtocolEvent {
     Compaction {
         /// Compaction metadata.
         info: CompactionInfo,
+    },
+    /// The session's static capability catalog at init (tools / MCP servers /
+    /// slash commands / modes / permission mode), reported by the driver from the
+    /// inner agent's init event. Session-global.
+    SessionCapabilities {
+        /// The reported capability catalog.
+        capabilities: SessionCapabilities,
     },
 }
 

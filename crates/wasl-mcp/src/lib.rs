@@ -213,7 +213,12 @@ fn build_handler(cfg: &Config, hub: Option<OperatorHub>) -> WaslMcp<RunSink, Pro
     let audit = AuditLog::new(run_sink);
     let http = reqwest::Client::new();
     let state = WaslState::new(audit, http, ProcessRunner::new());
+    // Feature A: attach the USER-facing name surface (self host_name + the peer
+    // name side-table) from config so `list_peers` reports the roster by name and
+    // the send tools accept a name alias. Config-defaulted to empty for an
+    // un-upgraded roster, so this is additive/forward-compatible.
     WaslMcp::with_gating(self_id, self_host, registry, state, cfg.gate.authority, hub)
+        .with_names(cfg.identity.host_name.clone(), config::peer_names(&cfg.peers))
 }
 
 // ---------------------------------------------------------------------

@@ -86,8 +86,19 @@ fn protocol_event_all_nine_variants_construct_and_match() {
         ProtocolEvent::Compaction {
             info: CompactionInfo { trigger: "manual".to_string(), ..Default::default() },
         },
+        // Feature B: the session-init capability catalog variant.
+        ProtocolEvent::SessionCapabilities {
+            capabilities: wasl_runtime::SessionCapabilities {
+                tools: vec!["Read".to_string()],
+                ..Default::default()
+            },
+        },
     ];
-    assert_eq!(events.len(), 16, "ProtocolEvent has 16 variants (9 original + 7 informational)");
+    assert_eq!(
+        events.len(),
+        17,
+        "ProtocolEvent has 17 variants (9 original + 7 informational + SessionCapabilities)"
+    );
 
     // Exhaustive match proves every variant is present (a missing/renamed variant
     // fails to compile).
@@ -108,7 +119,8 @@ fn protocol_event_all_nine_variants_construct_and_match() {
             | ProtocolEvent::ModesUpdated { .. }
             | ProtocolEvent::ModelChanged { .. }
             | ProtocolEvent::SlashCommandsUpdated { .. }
-            | ProtocolEvent::Compaction { .. } => {}
+            | ProtocolEvent::Compaction { .. }
+            | ProtocolEvent::SessionCapabilities { .. } => {}
         }
     }
 
