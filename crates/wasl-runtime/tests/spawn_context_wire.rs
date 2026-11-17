@@ -69,10 +69,7 @@ fn full_spawn_context_round_trips_with_exact_field_names() {
         value["posture"], "bypassPermissions",
         "field must be named 'posture'"
     );
-    assert_eq!(
-        value["setup"], "npm install",
-        "field must be named 'setup'"
-    );
+    assert_eq!(value["setup"], "npm install", "field must be named 'setup'");
     assert_eq!(
         value["bin"], "/usr/local/bin/claude",
         "field must be named 'bin'"
@@ -356,7 +353,11 @@ fn disallowed_tools_preserves_order_on_round_trip() {
 
     let got: Vec<String> = arr
         .iter()
-        .map(|v| v.as_str().expect("array element must be a string").to_string())
+        .map(|v| {
+            v.as_str()
+                .expect("array element must be a string")
+                .to_string()
+        })
         .collect();
 
     assert_eq!(
@@ -404,8 +405,7 @@ fn resume_some_round_trips_verbatim() {
     );
 
     // Deserializes back to Some(id).
-    let back: SpawnContext =
-        serde_json::from_value(value).expect("round-trip must deserialize");
+    let back: SpawnContext = serde_json::from_value(value).expect("round-trip must deserialize");
     assert_eq!(
         back.resume,
         Some(native_id.clone()),
@@ -434,7 +434,10 @@ fn resume_none_is_omitted_from_serialized_output() {
 fn default_spawn_context_still_serializes_to_empty_object_with_resume_none() {
     // Adding `resume` must NOT break the `{}` invariant for default.
     let ctx = SpawnContext::default();
-    assert!(ctx.resume.is_none(), "SpawnContext::default().resume must be None");
+    assert!(
+        ctx.resume.is_none(),
+        "SpawnContext::default().resume must be None"
+    );
 
     let value = roundtrip(&ctx);
     assert_eq!(
@@ -456,7 +459,10 @@ fn resume_field_uses_exact_key_name_resume() {
     let value = roundtrip(&ctx);
     // Must be keyed exactly "resume".
     assert!(
-        value.as_object().map(|o| o.contains_key("resume")).unwrap_or(false),
+        value
+            .as_object()
+            .map(|o| o.contains_key("resume"))
+            .unwrap_or(false),
         "resume must serialize under the exact key 'resume'; got: {value}"
     );
     // Must NOT appear under any other alias.

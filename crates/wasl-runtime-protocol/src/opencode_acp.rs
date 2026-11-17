@@ -77,11 +77,7 @@ impl InteractiveProtocol for OpenCodeAcpProtocol {
         &self,
         opts: &SpawnOptions,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        let bin_str = self
-            .bin
-            .to_str()
-            .unwrap_or("opencode")
-            .to_string();
+        let bin_str = self.bin.to_str().unwrap_or("opencode").to_string();
         let spec = context_to_spec(opts, None);
         let driver = wasit_opencode::OpencodeDriver::new(bin_str);
         let session = driver
@@ -104,11 +100,7 @@ impl InteractiveProtocol for OpenCodeAcpProtocol {
         native: &NativeSessionId,
         opts: &SpawnOptions,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        let bin_str = self
-            .bin
-            .to_str()
-            .unwrap_or("opencode")
-            .to_string();
+        let bin_str = self.bin.to_str().unwrap_or("opencode").to_string();
         let spec = context_to_spec(opts, Some(&native.0));
         let driver = wasit_opencode::OpencodeDriver::new(bin_str);
         let session = driver
@@ -264,7 +256,9 @@ impl InteractiveTransport for OpenCodeAcpTransport {
                     self.pending_gate = Some(gate);
                     return Some(ProtocolEvent::NativeGateRequested { detail });
                 }
-                AgentEvent::TurnCompleted { end_reason, reply, .. } => {
+                AgentEvent::TurnCompleted {
+                    end_reason, reply, ..
+                } => {
                     use wasit_core::EndReason;
                     let final_reply = reply
                         .filter(|r| !r.is_empty())
@@ -287,9 +281,7 @@ impl InteractiveTransport for OpenCodeAcpTransport {
                         }
                         Some(EndReason::ExecutionError) => {
                             self.accumulated_reply.clear();
-                            return Some(ProtocolEvent::TurnFailed {
-                                error: final_reply,
-                            });
+                            return Some(ProtocolEvent::TurnFailed { error: final_reply });
                         }
                         Some(EndReason::CompactionNeeded) => {
                             self.accumulated_reply.clear();
@@ -317,8 +309,7 @@ impl InteractiveTransport for OpenCodeAcpTransport {
                             cache_creation_tokens: usage.cache_creation_tokens,
                             cost_usd: usage.cost_usd,
                         },
-                        context_pct: context_pct
-                            .map(|p| p.clamp(0.0, 100.0).round() as u8),
+                        context_pct: context_pct.map(|p| p.clamp(0.0, 100.0).round() as u8),
                     });
                 }
                 AgentEvent::PlanUpdated { entries } => {

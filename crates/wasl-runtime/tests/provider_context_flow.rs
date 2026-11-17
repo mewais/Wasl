@@ -257,8 +257,7 @@ async fn legacy_target_for_yields_default_spawn_context() {
         "spawn must be called exactly once"
     );
 
-    let seen = RecordingProtocol::last_context(&record)
-        .expect("spawn must have been called");
+    let seen = RecordingProtocol::last_context(&record).expect("spawn must have been called");
 
     assert_eq!(
         seen,
@@ -447,7 +446,6 @@ async fn default_trait_impl_delegates_to_target_for_ignoring_context() {
     );
 }
 
-
 // ==================================================================
 // 6. ProtocolRoutingProvider overrides target_for_with_context and threads
 //    the context's `protocol` field to the matching sub-provider's spawn.
@@ -482,39 +480,61 @@ struct LabeledTarget(TargetId);
 
 #[async_trait::async_trait]
 impl DeliveryTarget for LabeledTarget {
-    fn target_id(&self) -> &TargetId { &self.0 }
+    fn target_id(&self) -> &TargetId {
+        &self.0
+    }
     fn capabilities(&self) -> RuntimeCapabilities {
         RuntimeCapabilities {
-            persistent_process: false, persistent_conversation: false,
-            structured_turns: false, streaming_output: false,
-            attachable: false, interruptible: false,
-            structured_provenance: false, resumable: false,
+            persistent_process: false,
+            persistent_conversation: false,
+            structured_turns: false,
+            streaming_output: false,
+            attachable: false,
+            interruptible: false,
+            structured_provenance: false,
+            resumable: false,
         }
     }
-    async fn status(&self) -> TargetStatus { TargetStatus::Offline }
+    async fn status(&self) -> TargetStatus {
+        TargetStatus::Offline
+    }
     async fn submit_turn(&self, _r: TurnRequest, _p: BusyPolicy) -> TurnReceipt {
-        TurnReceipt::RejectedUnavailable { status: TargetStatus::Offline }
+        TurnReceipt::RejectedUnavailable {
+            status: TargetStatus::Offline,
+        }
     }
     async fn events(&self, _a: EventSeq) -> TurnEventStream {
         Box::pin(futures::stream::empty())
     }
     async fn cancel_turn(&self, _t: TurnId, _r: CancelReason) -> Result<(), RuntimeError> {
-        Err(RuntimeError::Unsupported { operation: "cancel".into() })
+        Err(RuntimeError::Unsupported {
+            operation: "cancel".into(),
+        })
     }
-    async fn shutdown(&self, _m: ShutdownMode) -> Result<(), RuntimeError> { Ok(()) }
+    async fn shutdown(&self, _m: ShutdownMode) -> Result<(), RuntimeError> {
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
 impl NativeGateResolver for LabeledTarget {
-    async fn resolve_native_gate(&self, _t: TurnId, _d: wasl_proto::GateDecision) -> Result<(), RuntimeError> {
-        Err(RuntimeError::Unsupported { operation: "gate".into() })
+    async fn resolve_native_gate(
+        &self,
+        _t: TurnId,
+        _d: wasl_proto::GateDecision,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Unsupported {
+            operation: "gate".into(),
+        })
     }
 }
 
 #[async_trait::async_trait]
 impl ToolCallAnswerer for LabeledTarget {
     async fn answer_tool_call(&self, _t: TurnId, _v: String) -> Result<(), RuntimeError> {
-        Err(RuntimeError::Unsupported { operation: "tool".into() })
+        Err(RuntimeError::Unsupported {
+            operation: "tool".into(),
+        })
     }
 }
 
@@ -522,16 +542,26 @@ impl ToolCallAnswerer for LabeledTarget {
 impl RuntimeProvider for RoutingRecordingProvider {
     async fn target_for(&self, k: &TargetKey) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
         self.record.lock().unwrap().push(SpawnContext::default());
-        Ok(Arc::new(LabeledTarget(TargetId(format!("{}/{}", self.label, k.0)))))
+        Ok(Arc::new(LabeledTarget(TargetId(format!(
+            "{}/{}",
+            self.label, k.0
+        )))))
     }
 
     async fn list_targets(&self) -> Vec<TargetId> {
         vec![TargetId(format!("{}/listed", self.label))]
     }
 
-    async fn target_for_with_context(&self, k: &TargetKey, ctx: SpawnContext) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
+    async fn target_for_with_context(
+        &self,
+        k: &TargetKey,
+        ctx: SpawnContext,
+    ) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
         self.record.lock().unwrap().push(ctx);
-        Ok(Arc::new(LabeledTarget(TargetId(format!("{}/{}", self.label, k.0)))))
+        Ok(Arc::new(LabeledTarget(TargetId(format!(
+            "{}/{}",
+            self.label, k.0
+        )))))
     }
 }
 
@@ -543,7 +573,10 @@ fn routing_provider_with_two_protocols(
 ) -> ProtocolRoutingProvider {
     let mut map: BTreeMap<String, Arc<dyn RuntimeProvider>> = BTreeMap::new();
     map.insert("claude".to_string(), claude as Arc<dyn RuntimeProvider>);
-    map.insert("opencode-acp".to_string(), opencode as Arc<dyn RuntimeProvider>);
+    map.insert(
+        "opencode-acp".to_string(),
+        opencode as Arc<dyn RuntimeProvider>,
+    );
     ProtocolRoutingProvider::new(map, "claude".to_string())
 }
 
@@ -569,7 +602,11 @@ async fn routing_provider_threads_full_context_to_sub_provider_spawn() {
         .expect("routing must succeed");
 
     let seen = RoutingRecordingProvider::contexts_seen(&claude_rec);
-    assert_eq!(seen.len(), 1, "claude sub-provider must be called exactly once");
+    assert_eq!(
+        seen.len(),
+        1,
+        "claude sub-provider must be called exactly once"
+    );
     let seen_ctx = &seen[0];
     assert_eq!(
         seen_ctx.model,

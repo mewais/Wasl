@@ -200,9 +200,15 @@ host_id  = "host-17"
 url      = "http://10.0.0.7:48000/"
 "#;
     let cfg = Config::from_toml_str(toml).expect("a name-less roster must still parse");
-    assert_eq!(cfg.identity.host_name, "", "absent host_name defaults empty");
+    assert_eq!(
+        cfg.identity.host_name, "",
+        "absent host_name defaults empty"
+    );
     assert_eq!(cfg.peers[0].name, "", "absent peer name defaults empty");
-    assert_eq!(cfg.peers[0].host_name, "", "absent peer host_name defaults empty");
+    assert_eq!(
+        cfg.peers[0].host_name, "",
+        "absent peer host_name defaults empty"
+    );
 }
 
 // ---------------------------------------------------------------------

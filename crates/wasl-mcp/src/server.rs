@@ -436,7 +436,10 @@ where
     /// keeps the `std::sync::RwLock` read lock from being held across the
     /// dispatch `.await`.
     pub fn registry_snapshot(&self) -> PeerRegistry {
-        self.registry.read().expect("peer registry lock poisoned").clone()
+        self.registry
+            .read()
+            .expect("peer registry lock poisoned")
+            .clone()
     }
 
     /// Tier-1: surface the gate via MCP `elicitation/create`. Mirrored

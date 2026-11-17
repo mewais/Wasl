@@ -75,8 +75,8 @@ fn full_runtime_block_all_fields_exact() {
 fn full_runtime_block_struct_equality() {
     // Same as above but checked via PartialEq against the expected struct,
     // catching any accidental field swap.
-    let cfg = Config::from_toml_str(full_runtime_toml())
-        .expect("the full [runtime] block must parse");
+    let cfg =
+        Config::from_toml_str(full_runtime_toml()).expect("the full [runtime] block must parse");
 
     let expected_runtime = RuntimeConfig {
         kind: RuntimeKind::Managed,
@@ -101,8 +101,7 @@ fn full_runtime_block_struct_equality() {
 fn no_runtime_section_all_new_fields_default() {
     // A config written before the new fields existed must parse byte-identically:
     // kind == Ephemeral (existing default), all new fields at their defaults.
-    let cfg = Config::from_toml_str("")
-        .expect("an empty config must still parse");
+    let cfg = Config::from_toml_str("").expect("an empty config must still parse");
 
     assert_eq!(
         cfg.runtime.kind,
@@ -168,7 +167,8 @@ fn runtime_kind_managed_only_new_fields_default() {
 fn runtime_default_protocol_claude_is_the_default() {
     // Confirm "claude" is the hard-coded default_protocol, matching RuntimeConfig::default().
     assert_eq!(
-        RuntimeConfig::default().default_protocol, "claude",
+        RuntimeConfig::default().default_protocol,
+        "claude",
         "RuntimeConfig::default().default_protocol must be \"claude\""
     );
 }
@@ -204,9 +204,8 @@ fn runtime_control_bind_only_sets_only_that_field() {
 
 #[test]
 fn runtime_claude_bin_only_sets_only_that_field() {
-    let cfg =
-        Config::from_toml_str("[runtime]\nclaude_bin = \"/opt/claude/claude\"\n")
-            .expect("[runtime] with claude_bin only must parse");
+    let cfg = Config::from_toml_str("[runtime]\nclaude_bin = \"/opt/claude/claude\"\n")
+        .expect("[runtime] with claude_bin only must parse");
 
     assert_eq!(
         cfg.runtime.claude_bin,
@@ -220,9 +219,8 @@ fn runtime_claude_bin_only_sets_only_that_field() {
 
 #[test]
 fn runtime_opencode_bin_only_sets_only_that_field() {
-    let cfg =
-        Config::from_toml_str("[runtime]\nopencode_bin = \"/usr/local/bin/opencode\"\n")
-            .expect("[runtime] with opencode_bin only must parse");
+    let cfg = Config::from_toml_str("[runtime]\nopencode_bin = \"/usr/local/bin/opencode\"\n")
+        .expect("[runtime] with opencode_bin only must parse");
 
     assert_eq!(
         cfg.runtime.opencode_bin,
@@ -236,9 +234,8 @@ fn runtime_opencode_bin_only_sets_only_that_field() {
 
 #[test]
 fn runtime_default_protocol_only_sets_only_that_field() {
-    let cfg =
-        Config::from_toml_str("[runtime]\ndefault_protocol = \"claude\"\n")
-            .expect("[runtime] with explicit default_protocol = \"claude\" must parse");
+    let cfg = Config::from_toml_str("[runtime]\ndefault_protocol = \"claude\"\n")
+        .expect("[runtime] with explicit default_protocol = \"claude\" must parse");
 
     assert_eq!(cfg.runtime.default_protocol, "claude");
     // Everything else at default.
@@ -285,9 +282,9 @@ fn bad_control_bind_is_rejected_with_invalid_bind() {
                 "the offending value must be preserved verbatim"
             );
         }
-        other => panic!(
-            "expected ConfigError::InvalidBind {{ section: \"runtime\", … }}, got {other:?}"
-        ),
+        other => {
+            panic!("expected ConfigError::InvalidBind {{ section: \"runtime\", … }}, got {other:?}")
+        }
     }
 }
 
@@ -301,9 +298,8 @@ fn bad_control_bind_is_rejected_with_invalid_bind() {
 fn unknown_default_protocol_is_rejected() {
     // "rpc-over-carrier-pigeon" is not a protocol Wasl knows about;
     // only "claude" and "opencode-acp" are valid.
-    let result = Config::from_toml_str(
-        "[runtime]\ndefault_protocol = \"rpc-over-carrier-pigeon\"\n",
-    );
+    let result =
+        Config::from_toml_str("[runtime]\ndefault_protocol = \"rpc-over-carrier-pigeon\"\n");
     assert!(
         result.is_err(),
         "an unknown default_protocol must be rejected — currently returns Ok (RED)"
@@ -318,8 +314,7 @@ fn unknown_default_protocol_is_rejected() {
 #[test]
 fn default_protocol_match_is_case_sensitive() {
     // "Claude" (capital C) must NOT silently match the valid value "claude".
-    let result =
-        Config::from_toml_str("[runtime]\ndefault_protocol = \"Claude\"\n");
+    let result = Config::from_toml_str("[runtime]\ndefault_protocol = \"Claude\"\n");
     assert!(
         result.is_err(),
         "default_protocol match must be case-sensitive; \"Claude\" is not \"claude\" (RED)"

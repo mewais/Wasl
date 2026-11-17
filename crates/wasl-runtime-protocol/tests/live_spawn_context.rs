@@ -78,8 +78,8 @@ async fn claude_session_runs_in_requested_cwd() {
         .expect("WASL_LIVE_NONCE must be set to run live_spawn_context tests");
 
     // Use a cheap model; allow the caller to override via env.
-    let model = std::env::var("MARSAD_LIVE_MODEL")
-        .unwrap_or_else(|_| "claude-haiku-4-5".to_string());
+    let model =
+        std::env::var("MARSAD_LIVE_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
 
     // A predictable temp dir we can assert against.
     let tmp = std::env::temp_dir();
@@ -148,15 +148,21 @@ async fn claude_session_runs_in_requested_cwd() {
         target.events(EventSeq(0)).await,
         Duration::from_secs(90),
         |evs| {
-            evs.iter().any(|e| matches!(e, TurnEvent::TurnCompleted { turn_id: t, .. } if t == &turn_id))
+            evs.iter()
+                .any(|e| matches!(e, TurnEvent::TurnCompleted { turn_id: t, .. } if t == &turn_id))
         },
     )
     .await;
 
-    let reply = events.iter().find_map(|e| match e {
-        TurnEvent::TurnCompleted { turn_id: t, reply, .. } if t == &turn_id => Some(reply.clone()),
-        _ => None,
-    }).unwrap_or_else(|| panic!("no TurnCompleted observed within 90s; events: {events:?}"));
+    let reply = events
+        .iter()
+        .find_map(|e| match e {
+            TurnEvent::TurnCompleted {
+                turn_id: t, reply, ..
+            } if t == &turn_id => Some(reply.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no TurnCompleted observed within 90s; events: {events:?}"));
 
     // The model may include trailing newlines or minor formatting — trim.
     let reply_trimmed = reply.trim();
@@ -178,8 +184,8 @@ async fn claude_session_starts_with_explicit_model() {
     let nonce = std::env::var("WASL_LIVE_NONCE")
         .expect("WASL_LIVE_NONCE must be set to run live_spawn_context tests");
 
-    let model = std::env::var("MARSAD_LIVE_MODEL")
-        .unwrap_or_else(|_| "claude-haiku-4-5".to_string());
+    let model =
+        std::env::var("MARSAD_LIVE_MODEL").unwrap_or_else(|_| "claude-haiku-4-5".to_string());
 
     let context = SpawnContext {
         model: Some(model.clone()),
@@ -205,7 +211,10 @@ async fn claude_session_starts_with_explicit_model() {
     let events = drain_until(
         target.events(EventSeq(0)).await,
         Duration::from_secs(60),
-        |evs| evs.iter().any(|e| matches!(e, wasl_runtime::TurnEvent::SessionReady { .. })),
+        |evs| {
+            evs.iter()
+                .any(|e| matches!(e, wasl_runtime::TurnEvent::SessionReady { .. }))
+        },
     )
     .await;
 

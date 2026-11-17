@@ -67,24 +67,42 @@ fn protocol_event_all_nine_variants_construct_and_match() {
         },
         ProtocolEvent::ProcessExited { code: Some(0) },
         // Informational / observability variants (additive, forward-compat).
-        ProtocolEvent::ThinkingDelta { text: "hmm".to_string() },
+        ProtocolEvent::ThinkingDelta {
+            text: "hmm".to_string(),
+        },
         ProtocolEvent::UsageUpdate {
             usage: UsageSnapshot::default(),
             context_pct: Some(42),
         },
         ProtocolEvent::PlanUpdated {
-            entries: vec![PlanEntry { content: "step 1".to_string(), priority: "high".to_string() }],
+            entries: vec![PlanEntry {
+                content: "step 1".to_string(),
+                priority: "high".to_string(),
+            }],
         },
         ProtocolEvent::ModesUpdated {
-            available_modes: vec![AgentMode { id: "plan".to_string(), label: "Plan".to_string(), description: String::new() }],
+            available_modes: vec![AgentMode {
+                id: "plan".to_string(),
+                label: "Plan".to_string(),
+                description: String::new(),
+            }],
             current_mode: Some("plan".to_string()),
         },
-        ProtocolEvent::ModelChanged { model: "claude-sonnet-4.6".to_string() },
+        ProtocolEvent::ModelChanged {
+            model: "claude-sonnet-4.6".to_string(),
+        },
         ProtocolEvent::SlashCommandsUpdated {
-            commands: vec![SlashCommandInfo { name: "/help".to_string(), description: String::new(), argument_hint: String::new() }],
+            commands: vec![SlashCommandInfo {
+                name: "/help".to_string(),
+                description: String::new(),
+                argument_hint: String::new(),
+            }],
         },
         ProtocolEvent::Compaction {
-            info: CompactionInfo { trigger: "manual".to_string(), ..Default::default() },
+            info: CompactionInfo {
+                trigger: "manual".to_string(),
+                ..Default::default()
+            },
         },
         // Feature B: the session-init capability catalog variant.
         ProtocolEvent::SessionCapabilities {

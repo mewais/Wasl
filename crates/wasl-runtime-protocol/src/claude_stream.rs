@@ -89,11 +89,7 @@ impl ClaudeStreamProtocol {
         opts: &SpawnOptions,
         resume: bool,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        let bin_str = self
-            .bin
-            .to_str()
-            .unwrap_or("claude")
-            .to_string();
+        let bin_str = self.bin.to_str().unwrap_or("claude").to_string();
         let spec = context_to_spec(opts, session_id, resume);
         let driver = wasit_claude::ClaudeDriver::new(bin_str);
         let session = driver
@@ -303,7 +299,9 @@ impl InteractiveTransport for ClaudeStreamTransport {
                     self.pending_gate = Some(gate);
                     return Some(ProtocolEvent::NativeGateRequested { detail });
                 }
-                AgentEvent::TurnCompleted { end_reason, reply, .. } => {
+                AgentEvent::TurnCompleted {
+                    end_reason, reply, ..
+                } => {
                     use wasit_core::EndReason;
                     match end_reason {
                         None => {
@@ -351,8 +349,7 @@ impl InteractiveTransport for ClaudeStreamTransport {
                             cache_creation_tokens: usage.cache_creation_tokens,
                             cost_usd: usage.cost_usd,
                         },
-                        context_pct: context_pct
-                            .map(|p| p.clamp(0.0, 100.0).round() as u8),
+                        context_pct: context_pct.map(|p| p.clamp(0.0, 100.0).round() as u8),
                     });
                 }
                 AgentEvent::PlanUpdated { entries } => {

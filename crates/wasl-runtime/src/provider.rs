@@ -342,7 +342,8 @@ impl<P: InteractiveProtocol + 'static> WaslManagedRuntimeProvider<P> {
         &self,
         key: &TargetKey,
     ) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
-        self.target_for_with_context(key, SpawnContext::default()).await
+        self.target_for_with_context(key, SpawnContext::default())
+            .await
     }
 
     /// List currently-known targets (§10, R3 `list`). Inherent; the trait impl

@@ -55,30 +55,27 @@ fn build_three_provider_router(default_protocol: &str) -> ProtocolRoutingProvide
     let opencode_sink: Arc<Mutex<dyn Sink + Send>> = Arc::new(Mutex::new(LocalMemSink));
     let codex_sink: Arc<Mutex<dyn Sink + Send>> = Arc::new(Mutex::new(LocalMemSink));
 
-    let claude_provider: Arc<dyn RuntimeProvider> = Arc::new(
-        WaslManagedRuntimeProvider::with_seams(
+    let claude_provider: Arc<dyn RuntimeProvider> =
+        Arc::new(WaslManagedRuntimeProvider::with_seams(
             ClaudeStreamProtocol::new("claude".to_string()),
             ManagedConfig::default(),
             clock.clone(),
             claude_sink,
-        ),
-    );
-    let opencode_provider: Arc<dyn RuntimeProvider> = Arc::new(
-        WaslManagedRuntimeProvider::with_seams(
+        ));
+    let opencode_provider: Arc<dyn RuntimeProvider> =
+        Arc::new(WaslManagedRuntimeProvider::with_seams(
             OpenCodeAcpProtocol::new("opencode".to_string()),
             ManagedConfig::default(),
             clock.clone(),
             opencode_sink,
-        ),
-    );
-    let codex_provider: Arc<dyn RuntimeProvider> = Arc::new(
-        WaslManagedRuntimeProvider::with_seams(
+        ));
+    let codex_provider: Arc<dyn RuntimeProvider> =
+        Arc::new(WaslManagedRuntimeProvider::with_seams(
             CodexAppServerProtocol::new("codex".to_string()),
             ManagedConfig::default(),
             clock,
             codex_sink,
-        ),
-    );
+        ));
 
     let mut providers: BTreeMap<String, Arc<dyn RuntimeProvider>> = BTreeMap::new();
     providers.insert("claude".to_string(), claude_provider);

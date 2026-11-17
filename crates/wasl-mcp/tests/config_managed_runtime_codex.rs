@@ -36,10 +36,7 @@ fn default_protocol_codex_is_accepted() {
             );
     assert_eq!(cfg.runtime.default_protocol, "codex");
     assert_eq!(cfg.runtime.kind, RuntimeKind::Managed);
-    assert_eq!(
-        cfg.runtime.control_bind,
-        Some("127.0.0.1:9000".to_string())
-    );
+    assert_eq!(cfg.runtime.control_bind, Some("127.0.0.1:9000".to_string()));
 }
 
 #[test]
@@ -66,14 +63,10 @@ fn codex_bin_is_captured_verbatim_in_full_runtime_block() {
         "default_protocol = \"codex\"\n",
         "codex_bin        = \"/opt/codex/codex\"\n",
     );
-    let cfg = Config::from_toml_str(toml)
-        .expect("full [runtime] block with codex_bin must parse");
+    let cfg = Config::from_toml_str(toml).expect("full [runtime] block with codex_bin must parse");
 
     assert_eq!(cfg.runtime.kind, RuntimeKind::Managed);
-    assert_eq!(
-        cfg.runtime.control_bind,
-        Some("127.0.0.1:9100".to_string())
-    );
+    assert_eq!(cfg.runtime.control_bind, Some("127.0.0.1:9100".to_string()));
     assert_eq!(cfg.runtime.default_protocol, "codex");
     assert_eq!(
         cfg.runtime.codex_bin,
@@ -153,9 +146,8 @@ fn runtime_kind_only_leaves_codex_bin_at_none() {
 
 #[test]
 fn codex_bin_only_sets_only_that_field() {
-    let cfg =
-        Config::from_toml_str("[runtime]\ncodex_bin = \"/usr/local/bin/codex\"\n")
-            .expect("[runtime] with codex_bin only must parse");
+    let cfg = Config::from_toml_str("[runtime]\ncodex_bin = \"/usr/local/bin/codex\"\n")
+        .expect("[runtime] with codex_bin only must parse");
 
     assert_eq!(
         cfg.runtime.codex_bin,
@@ -183,8 +175,7 @@ fn all_three_known_protocols_are_accepted() {
         let cfg = Config::from_toml_str(&toml)
             .unwrap_or_else(|e| panic!("protocol {proto:?} must be accepted; got: {e:?}"));
         assert_eq!(
-            cfg.runtime.default_protocol,
-            *proto,
+            cfg.runtime.default_protocol, *proto,
             "default_protocol must be captured verbatim for {proto:?}"
         );
     }
@@ -197,9 +188,8 @@ fn all_three_known_protocols_are_accepted() {
 #[test]
 fn truly_unknown_protocol_is_still_rejected() {
     // "grpc-over-carrier-pigeon" is not and will never be a Wasl protocol.
-    let result = Config::from_toml_str(
-        "[runtime]\ndefault_protocol = \"grpc-over-carrier-pigeon\"\n",
-    );
+    let result =
+        Config::from_toml_str("[runtime]\ndefault_protocol = \"grpc-over-carrier-pigeon\"\n");
     assert!(
         result.is_err(),
         "a genuinely unknown default_protocol must still be rejected"
@@ -209,9 +199,7 @@ fn truly_unknown_protocol_is_still_rejected() {
             p, "grpc-over-carrier-pigeon",
             "the rejected value must be preserved verbatim"
         ),
-        other => panic!(
-            "expected ConfigError::UnknownProtocol, got {other:?}"
-        ),
+        other => panic!("expected ConfigError::UnknownProtocol, got {other:?}"),
     }
 }
 

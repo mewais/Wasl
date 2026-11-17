@@ -60,11 +60,12 @@ impl crate::RuntimeProvider for ProtocolRoutingProvider {
                 .unwrap_or_else(|| self.default_protocol.clone())
         };
         // Delegate to the sub-provider (lock is released before the await).
-        let sub = self.providers.get(&proto).ok_or_else(|| {
-            crate::RuntimeError::AdmissionRefused {
-                detail: format!("no sub-provider registered for protocol '{proto}'"),
-            }
-        })?;
+        let sub =
+            self.providers
+                .get(&proto)
+                .ok_or_else(|| crate::RuntimeError::AdmissionRefused {
+                    detail: format!("no sub-provider registered for protocol '{proto}'"),
+                })?;
         sub.target_for(key).await
     }
 
@@ -89,11 +90,12 @@ impl crate::RuntimeProvider for ProtocolRoutingProvider {
             .unwrap_or_else(|| self.default_protocol.clone());
 
         // Look up the sub-provider before recording or awaiting anything.
-        let sub = self.providers.get(&proto).ok_or_else(|| {
-            crate::RuntimeError::AdmissionRefused {
-                detail: format!("no sub-provider registered for protocol '{proto}'"),
-            }
-        })?;
+        let sub =
+            self.providers
+                .get(&proto)
+                .ok_or_else(|| crate::RuntimeError::AdmissionRefused {
+                    detail: format!("no sub-provider registered for protocol '{proto}'"),
+                })?;
         let sub = sub.clone();
 
         // Record the chosen protocol for this key (so a later context-free

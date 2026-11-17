@@ -20,8 +20,10 @@ pub mod server;
 // Needed for the managed-runtime / runtime-control wiring in `run()`.
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
-use wasl_runtime::{ManagedConfig, MonotonicClock, ProtocolRoutingProvider, RuntimeProvider,
-    WaslManagedRuntimeProvider};
+use wasl_runtime::{
+    ManagedConfig, MonotonicClock, ProtocolRoutingProvider, RuntimeProvider,
+    WaslManagedRuntimeProvider,
+};
 use wasl_runtime_protocol::{ClaudeStreamProtocol, CodexAppServerProtocol, OpenCodeAcpProtocol};
 
 use wasl_audit::{AuditEntry, AuditError, AuditLog, Sink};
@@ -132,37 +134,32 @@ fn build_managed_provider(cfg: &Config) -> Arc<dyn RuntimeProvider> {
         .clone()
         .unwrap_or_else(|| "codex".to_string());
 
-    let claude_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> =
-        Arc::new(Mutex::new(MemSink::new()));
+    let claude_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> = Arc::new(Mutex::new(MemSink::new()));
     let opencode_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> =
         Arc::new(Mutex::new(MemSink::new()));
-    let codex_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> =
-        Arc::new(Mutex::new(MemSink::new()));
+    let codex_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> = Arc::new(Mutex::new(MemSink::new()));
 
-    let claude_provider: Arc<dyn RuntimeProvider> = Arc::new(
-        WaslManagedRuntimeProvider::with_seams(
+    let claude_provider: Arc<dyn RuntimeProvider> =
+        Arc::new(WaslManagedRuntimeProvider::with_seams(
             ClaudeStreamProtocol::new(claude_bin),
             ManagedConfig::default(),
             clock.clone(),
             claude_sink,
-        ),
-    );
-    let opencode_provider: Arc<dyn RuntimeProvider> = Arc::new(
-        WaslManagedRuntimeProvider::with_seams(
+        ));
+    let opencode_provider: Arc<dyn RuntimeProvider> =
+        Arc::new(WaslManagedRuntimeProvider::with_seams(
             OpenCodeAcpProtocol::new(opencode_bin),
             ManagedConfig::default(),
             clock.clone(),
             opencode_sink,
-        ),
-    );
-    let codex_provider: Arc<dyn RuntimeProvider> = Arc::new(
-        WaslManagedRuntimeProvider::with_seams(
+        ));
+    let codex_provider: Arc<dyn RuntimeProvider> =
+        Arc::new(WaslManagedRuntimeProvider::with_seams(
             CodexAppServerProtocol::new(codex_bin),
             ManagedConfig::default(),
             clock,
             codex_sink,
-        ),
-    );
+        ));
 
     let mut providers = BTreeMap::new();
     providers.insert("claude".to_string(), claude_provider);
@@ -217,8 +214,10 @@ fn build_handler(cfg: &Config, hub: Option<OperatorHub>) -> WaslMcp<RunSink, Pro
     // name side-table) from config so `list_peers` reports the roster by name and
     // the send tools accept a name alias. Config-defaulted to empty for an
     // un-upgraded roster, so this is additive/forward-compatible.
-    WaslMcp::with_gating(self_id, self_host, registry, state, cfg.gate.authority, hub)
-        .with_names(cfg.identity.host_name.clone(), config::peer_names(&cfg.peers))
+    WaslMcp::with_gating(self_id, self_host, registry, state, cfg.gate.authority, hub).with_names(
+        cfg.identity.host_name.clone(),
+        config::peer_names(&cfg.peers),
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -397,9 +396,7 @@ pub fn run() {
                         let peers = peers.clone();
                         tokio::spawn(async move {
                             if let Err(err) = wasl_runtime_control::serve(hub, peers, addr).await {
-                                eprintln!(
-                                    "wasl-mcpd: runtime-control server terminated: {err}"
-                                );
+                                eprintln!("wasl-mcpd: runtime-control server terminated: {err}");
                             }
                         });
                     }

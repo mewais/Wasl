@@ -1472,7 +1472,11 @@ async fn list_peers_reports_roster_by_name_and_self_identity() {
         },
     );
 
-    let state = WaslState::new(AuditLog::new(SharedSink::default()), http_client(), PanicRunner);
+    let state = WaslState::new(
+        AuditLog::new(SharedSink::default()),
+        http_client(),
+        PanicRunner,
+    );
     let handler = WaslMcp::with_seams(
         agent("draft-node-self"),
         host("host-16"),

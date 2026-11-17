@@ -269,7 +269,10 @@ async fn peers_crud_round_trip() {
     assert_eq!(listed["peers"].as_array().expect("array").len(), 2);
     assert_eq!(listed["peers"][0]["id"], json!("peer-a"));
     assert_eq!(listed["peers"][0]["host"], json!("host-1"));
-    assert_eq!(listed["peers"][0]["endpoint"], json!("http://10.0.0.1:8080"));
+    assert_eq!(
+        listed["peers"][0]["endpoint"],
+        json!("http://10.0.0.1:8080")
+    );
     assert_eq!(listed["peers"][1]["id"], json!("peer-z"));
 
     // Re-register peer-a with a new endpoint → idempotent overwrite, still 2.
@@ -289,7 +292,10 @@ async fn peers_crud_round_trip() {
         .await
         .expect("json");
     assert_eq!(listed["peers"].as_array().expect("array").len(), 2);
-    assert_eq!(listed["peers"][0]["endpoint"], json!("http://10.0.0.2:9999"));
+    assert_eq!(
+        listed["peers"][0]["endpoint"],
+        json!("http://10.0.0.2:9999")
+    );
 
     // Delete peer-z → 204.
     let r = c
@@ -633,11 +639,7 @@ async fn protocol_precedence_neither_yields_none() {
     let hub = make_hub(provider.clone());
     let addr = spawn_router(hub).await;
 
-    post_create_target(
-        addr,
-        json!({ "key": "ctx-42" }),
-    )
-    .await;
+    post_create_target(addr, json!({ "key": "ctx-42" })).await;
 
     let ctx = provider
         .recorded_context()
@@ -645,8 +647,7 @@ async fn protocol_precedence_neither_yields_none() {
         .expect("provider must have received a context");
 
     assert_eq!(
-        ctx.protocol,
-        None,
+        ctx.protocol, None,
         "with no protocol in body, context.protocol must be None"
     );
 }
@@ -672,7 +673,8 @@ async fn protocol_unknown_rejected_by_hub_before_provider() {
         "unknown protocol must be rejected with 400"
     );
     assert_eq!(
-        body["error"], json!("malformed"),
+        body["error"],
+        json!("malformed"),
         "error body must carry 'malformed' error code"
     );
 
@@ -777,7 +779,8 @@ async fn protocol_unknown_in_context_also_rejected() {
         "unknown protocol in context must be rejected with 400"
     );
     assert_eq!(
-        body["error"], json!("malformed"),
+        body["error"],
+        json!("malformed"),
         "error body must carry 'malformed' error code"
     );
 

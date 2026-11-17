@@ -97,7 +97,11 @@ impl RuntimeControlHub {
         &self,
         req: CreateTargetRequest,
     ) -> Result<TargetSnapshot, ErrorBody> {
-        let effective_protocol = req.context.protocol.clone().or_else(|| req.protocol.clone());
+        let effective_protocol = req
+            .context
+            .protocol
+            .clone()
+            .or_else(|| req.protocol.clone());
         validate_protocol(effective_protocol.as_deref())?;
         let mut context = req.context;
         context.protocol = effective_protocol;

@@ -34,9 +34,9 @@
 use serde_json::json;
 
 use wasl_runtime::{
-    AgentMode, BusyPhase, BusyPolicy, Causation, CompactionInfo, NativeGateDetail,
-    PlanEntry, RuntimeCapabilities, SlashCommandInfo, TargetStatus, TurnEvent, TurnId,
-    TurnReceipt, TurnSource, UsageSnapshot,
+    AgentMode, BusyPhase, BusyPolicy, Causation, CompactionInfo, NativeGateDetail, PlanEntry,
+    RuntimeCapabilities, SlashCommandInfo, TargetStatus, TurnEvent, TurnId, TurnReceipt,
+    TurnSource, UsageSnapshot,
 };
 
 // wasl_proto owns DeliveryCertainty (§8.1); TurnEvent re-uses it verbatim.
@@ -425,7 +425,9 @@ fn turn_event_all_fourteen_variant_tags_are_snake_case_and_distinct() {
         },
         TurnEvent::ProcessExited { code: None },
         // Informational / observability (additive, 7 new variants).
-        TurnEvent::ThinkingDelta { text: String::new() },
+        TurnEvent::ThinkingDelta {
+            text: String::new(),
+        },
         TurnEvent::UsageUpdate {
             usage: UsageSnapshot::default(),
             context_pct: None,
@@ -435,7 +437,9 @@ fn turn_event_all_fourteen_variant_tags_are_snake_case_and_distinct() {
             available_modes: vec![],
             current_mode: None,
         },
-        TurnEvent::ModelChanged { model: String::new() },
+        TurnEvent::ModelChanged {
+            model: String::new(),
+        },
         TurnEvent::SlashCommandsUpdated { commands: vec![] },
         TurnEvent::Compaction {
             info: CompactionInfo::default(),
@@ -466,7 +470,11 @@ fn turn_event_all_fourteen_variant_tags_are_snake_case_and_distinct() {
         "slash_commands_updated",
         "compaction",
     ];
-    assert_eq!(events.len(), expected_tags.len(), "21 TurnEvent variants (14 original + 7 informational)");
+    assert_eq!(
+        events.len(),
+        expected_tags.len(),
+        "21 TurnEvent variants (14 original + 7 informational)"
+    );
 
     let mut seen = std::collections::BTreeSet::new();
     for (ev, expected_tag) in events.iter().zip(expected_tags.iter()) {
@@ -922,8 +930,15 @@ fn turn_event_usage_update_wire_form_no_context_pct() {
     };
     let value = roundtrip_json(&ev);
     // context_pct is None → skip_serializing_if → absent from JSON.
-    assert_eq!(value.get("context_pct"), None, "context_pct is omitted when None");
-    assert_eq!(value.get("type").and_then(|t| t.as_str()), Some("usage_update"));
+    assert_eq!(
+        value.get("context_pct"),
+        None,
+        "context_pct is omitted when None"
+    );
+    assert_eq!(
+        value.get("type").and_then(|t| t.as_str()),
+        Some("usage_update")
+    );
     let back: TurnEvent = serde_json::from_value(value).expect("deserialize");
     assert_eq!(back, ev);
 }
@@ -932,8 +947,14 @@ fn turn_event_usage_update_wire_form_no_context_pct() {
 fn turn_event_plan_updated_wire_form() {
     let ev = TurnEvent::PlanUpdated {
         entries: vec![
-            PlanEntry { content: "step 1".to_string(), priority: "high".to_string() },
-            PlanEntry { content: "step 2".to_string(), priority: String::new() },
+            PlanEntry {
+                content: "step 1".to_string(),
+                priority: "high".to_string(),
+            },
+            PlanEntry {
+                content: "step 2".to_string(),
+                priority: String::new(),
+            },
         ],
     };
     assert_turn_event_roundtrips(
@@ -986,7 +1007,11 @@ fn turn_event_modes_updated_empty_modes_omitted_from_json() {
         current_mode: Some("default".to_string()),
     };
     let value = roundtrip_json(&ev);
-    assert_eq!(value.get("available_modes"), None, "empty available_modes is omitted");
+    assert_eq!(
+        value.get("available_modes"),
+        None,
+        "empty available_modes is omitted"
+    );
     assert_eq!(value["current_mode"], json!("default"));
     let back: TurnEvent = serde_json::from_value(value).expect("deserialize");
     assert_eq!(back, ev);

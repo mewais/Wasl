@@ -68,8 +68,14 @@ fn load_with_inline_content_still_honors_env_overrides() {
         ..Default::default()
     };
     let cfg = Config::load_with(&env).expect("inline content loads");
-    assert_eq!(cfg.identity.agent_id, "env-agent", "env override wins over inline content");
-    assert_eq!(cfg.identity.host_id, "file-host", "un-overridden inline value kept");
+    assert_eq!(
+        cfg.identity.agent_id, "env-agent",
+        "env override wins over inline content"
+    );
+    assert_eq!(
+        cfg.identity.host_id, "file-host",
+        "un-overridden inline value kept"
+    );
 }
 
 // ---------------------------------------------------------------------

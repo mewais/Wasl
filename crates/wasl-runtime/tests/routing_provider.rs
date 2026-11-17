@@ -25,9 +25,9 @@ use std::sync::{Arc, Mutex};
 
 use wasl_runtime::{
     BusyPolicy, CancelReason, DeliveryTarget, EphemeralRuntimeProvider, EventSeq,
-    NativeGateResolver, ProtocolRoutingProvider, RuntimeCapabilities, RuntimeError, RuntimeProvider,
-    ShutdownMode, SpawnContext, TargetId, TargetKey, TargetStatus, ToolCallAnswerer,
-    TurnEventStream, TurnId, TurnReceipt, TurnRequest,
+    NativeGateResolver, ProtocolRoutingProvider, RuntimeCapabilities, RuntimeError,
+    RuntimeProvider, ShutdownMode, SpawnContext, TargetId, TargetKey, TargetStatus,
+    ToolCallAnswerer, TurnEventStream, TurnId, TurnReceipt, TurnRequest,
 };
 
 fn key(s: &str) -> TargetKey {
@@ -150,10 +150,7 @@ impl StubProvider {
 
 #[async_trait::async_trait]
 impl RuntimeProvider for StubProvider {
-    async fn target_for(
-        &self,
-        key: &TargetKey,
-    ) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
+    async fn target_for(&self, key: &TargetKey) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
         self.keys_seen.lock().unwrap().push(key.clone());
         let id = TargetId(format!("{}/{}", self.label, key.0));
         Ok(Arc::new(StubTarget { id }))
@@ -191,10 +188,7 @@ fn two_provider_router(
 
 #[tokio::test]
 async fn routes_to_claude_when_context_protocol_is_claude() {
-    let claude = StubProvider::new(
-        "claude",
-        vec![TargetId("claude/existing".to_string())],
-    );
+    let claude = StubProvider::new("claude", vec![TargetId("claude/existing".to_string())]);
     let opencode = StubProvider::new("opencode-acp", vec![]);
     let router = two_provider_router(claude.clone(), opencode.clone());
 
@@ -263,7 +257,10 @@ async fn falls_back_to_default_protocol_when_context_protocol_is_none() {
 
     // context.protocol = None → must use default "claude"
     let ctx = SpawnContext::default();
-    assert!(ctx.protocol.is_none(), "precondition: context has no protocol");
+    assert!(
+        ctx.protocol.is_none(),
+        "precondition: context has no protocol"
+    );
 
     let target = router
         .target_for_with_context(&key("ctx-c"), ctx)

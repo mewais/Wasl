@@ -64,9 +64,9 @@ pub use opencode_acp::{map_acp_line_correlated, opencode_session_params, OpenCod
 pub use process_supervision::next_wait;
 
 // Wasit re-exports so callers can use SpawnSpec / AgentEvent via this crate.
-pub use wasit_core;
 pub use wasit_claude;
 pub use wasit_codex;
+pub use wasit_core;
 pub use wasit_opencode;
 
 // The R1-owned generic driver contract every R2 driver implements/maps onto.

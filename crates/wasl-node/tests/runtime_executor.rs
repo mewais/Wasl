@@ -70,7 +70,11 @@ impl DeliveryTarget for FakeTarget {
             .collect();
         Box::pin(stream::iter(items))
     }
-    async fn cancel_turn(&self, _turn_id: TurnId, _reason: CancelReason) -> Result<(), RuntimeError> {
+    async fn cancel_turn(
+        &self,
+        _turn_id: TurnId,
+        _reason: CancelReason,
+    ) -> Result<(), RuntimeError> {
         Ok(())
     }
     async fn shutdown(&self, _mode: ShutdownMode) -> Result<(), RuntimeError> {
@@ -103,10 +107,7 @@ struct FakeProvider {
 
 #[async_trait::async_trait]
 impl RuntimeProvider for FakeProvider {
-    async fn target_for(
-        &self,
-        _key: &TargetKey,
-    ) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
+    async fn target_for(&self, _key: &TargetKey) -> Result<Arc<dyn DeliveryTarget>, RuntimeError> {
         Ok(Arc::clone(&self.target) as Arc<dyn DeliveryTarget>)
     }
     async fn list_targets(&self) -> Vec<TargetId> {
@@ -125,7 +126,10 @@ fn inbound(from: &str, kind: &str, text: &str) -> Message {
     m
 }
 
-fn fake(receipt: TurnReceipt, events: Vec<TurnEvent>) -> (RuntimeExecutor, Arc<Mutex<Vec<TurnRequest>>>) {
+fn fake(
+    receipt: TurnReceipt,
+    events: Vec<TurnEvent>,
+) -> (RuntimeExecutor, Arc<Mutex<Vec<TurnRequest>>>) {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let target = Arc::new(FakeTarget {
         id: TargetId("fake".to_string()),
@@ -171,7 +175,12 @@ async fn submits_agent_turn_and_returns_the_turn_reply() {
         .execute("ctx-1".to_string(), inbound("wasl-b", "consult", "ping"))
         .await
         .expect("execute ok");
-    assert_eq!(out, vec![Part::Text { text: "pong".to_string() }]);
+    assert_eq!(
+        out,
+        vec![Part::Text {
+            text: "pong".to_string()
+        }]
+    );
 
     // The submitted turn carried the peer as the source and the delivery verbatim.
     let reqs = captured.lock().unwrap();
@@ -257,5 +266,10 @@ async fn ignores_events_for_other_turns() {
         .execute("ctx-1".to_string(), inbound("wasl-b", "consult", "ping"))
         .await
         .expect("execute ok");
-    assert_eq!(out, vec![Part::Text { text: "ours".to_string() }]);
+    assert_eq!(
+        out,
+        vec![Part::Text {
+            text: "ours".to_string()
+        }]
+    );
 }

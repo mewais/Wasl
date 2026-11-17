@@ -728,7 +728,6 @@ pub enum TurnEvent {
     },
 
     // ── Informational / observability events (additive, forward-compat) ──
-
     /// An incremental reasoning/thinking text chunk (extended-thinking mode).
     /// Produced by claude (extended thinking) and opencode (`agent_thought_chunk`).
     ThinkingDelta {
@@ -951,7 +950,6 @@ pub enum ProtocolEvent {
     },
 
     // ── Informational / observability events (additive, forward-compat) ──
-
     /// A reasoning/thinking text delta (extended-thinking mode).
     ThinkingDelta {
         /// The thinking text.

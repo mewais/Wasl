@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use wasit_core::{AgentDriver, GateDecision, GateRequest, ResumeMode, SpawnSpec};
 use wasl_runtime::{
     AgentMode, CompactionInfo, ComposedPrompt, InteractiveProtocol, InteractiveTransport,
-    NativeGateDetail, NativeSessionId, PlanEntry, ProtocolEvent, RuntimeCapabilities,
-    RuntimeError, SlashCommandInfo, SpawnOptions, UsageSnapshot,
+    NativeGateDetail, NativeSessionId, PlanEntry, ProtocolEvent, RuntimeCapabilities, RuntimeError,
+    SlashCommandInfo, SpawnOptions, UsageSnapshot,
 };
 
 /// Translate Wasl `SpawnOptions` into a Wasit `SpawnSpec` for codex.
@@ -77,11 +77,7 @@ impl InteractiveProtocol for CodexAppServerProtocol {
         &self,
         opts: &SpawnOptions,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        let bin_str = self
-            .bin
-            .to_str()
-            .unwrap_or("codex")
-            .to_string();
+        let bin_str = self.bin.to_str().unwrap_or("codex").to_string();
         let spec = context_to_spec(opts, None);
         let driver = wasit_codex::CodexDriver::new(bin_str);
         let session = driver
@@ -102,11 +98,7 @@ impl InteractiveProtocol for CodexAppServerProtocol {
         native: &NativeSessionId,
         opts: &SpawnOptions,
     ) -> Result<Box<dyn InteractiveTransport>, RuntimeError> {
-        let bin_str = self
-            .bin
-            .to_str()
-            .unwrap_or("codex")
-            .to_string();
+        let bin_str = self.bin.to_str().unwrap_or("codex").to_string();
         let spec = context_to_spec(opts, Some(&native.0));
         let driver = wasit_codex::CodexDriver::new(bin_str);
         let session = driver
@@ -175,7 +167,9 @@ impl InteractiveTransport for CodexAppServerTransport {
         loop {
             let ev = self.session.next_event().await?;
             match ev {
-                AgentEvent::SessionInit { native_session_id, .. } => {
+                AgentEvent::SessionInit {
+                    native_session_id, ..
+                } => {
                     if self.session_ready_seen {
                         continue;
                     }
@@ -205,7 +199,9 @@ impl InteractiveTransport for CodexAppServerTransport {
                     self.pending_gate = Some(gate);
                     return Some(ProtocolEvent::NativeGateRequested { detail });
                 }
-                AgentEvent::TurnCompleted { end_reason, reply, .. } => {
+                AgentEvent::TurnCompleted {
+                    end_reason, reply, ..
+                } => {
                     use wasit_core::EndReason;
                     match end_reason {
                         None => {
@@ -253,8 +249,7 @@ impl InteractiveTransport for CodexAppServerTransport {
                             cache_creation_tokens: usage.cache_creation_tokens,
                             cost_usd: usage.cost_usd,
                         },
-                        context_pct: context_pct
-                            .map(|p| p.clamp(0.0, 100.0).round() as u8),
+                        context_pct: context_pct.map(|p| p.clamp(0.0, 100.0).round() as u8),
                     });
                 }
                 AgentEvent::PlanUpdated { entries } => {

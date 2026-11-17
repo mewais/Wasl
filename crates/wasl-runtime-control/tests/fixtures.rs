@@ -224,8 +224,7 @@ fn legacy_create_request_no_context_deserializes() {
     );
     // Re-serializing a default context must omit the `context` key entirely
     // (all context fields carry skip_serializing_if = is_none / is_empty).
-    let reserialized =
-        serde_json::to_value(&parsed).expect("must serialize");
+    let reserialized = serde_json::to_value(&parsed).expect("must serialize");
     assert!(
         reserialized.get("context").is_none(),
         "default SpawnContext must be omitted from the serialized output; got: {reserialized}"
@@ -252,8 +251,7 @@ fn legacy_create_request_protocol_no_context_deserializes() {
         "absent context field must yield SpawnContext::default()"
     );
     // Re-serializing must emit `protocol` but omit `context`.
-    let reserialized =
-        serde_json::to_value(&parsed).expect("must serialize");
+    let reserialized = serde_json::to_value(&parsed).expect("must serialize");
     assert_eq!(
         reserialized["protocol"],
         serde_json::json!("claude"),
@@ -559,8 +557,7 @@ fn create_request_with_resume_round_trips() {
 #[test]
 fn create_request_context_without_resume_deserializes_resume_as_none() {
     let text = r#"{"key":"ctx-42","context":{"model":"claude-opus-4-5"}}"#;
-    let parsed: CreateTargetRequest =
-        serde_json::from_str(text).expect("must deserialize");
+    let parsed: CreateTargetRequest = serde_json::from_str(text).expect("must deserialize");
     assert!(
         parsed.context.resume.is_none(),
         "absent context.resume must deserialize to None; got {:?}",
