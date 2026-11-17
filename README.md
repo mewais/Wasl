@@ -1,7 +1,7 @@
 # Wasl — وصل
 
 **A standalone MCP server for agent-to-agent connection** — lets AI coding-agent CLIs (Claude Code,
-Codex, Gemini, …) **consult**, **command**, **message**, and **transfer data** with each other, within a
+Codex, …) **consult**, **command**, **message**, and **transfer data** with each other, within a
 host and **across hosts**, with a **human-in-the-loop gate before every send**.
 
 Fully standalone. Wasl gates itself via MCP elicitation (or a tool-level `prepare`/`commit` fallback), and

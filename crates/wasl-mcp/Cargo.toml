@@ -53,9 +53,6 @@ wasl-adapter-claude = { workspace = true }
 # W7b (`docs/specs/adapter-codex.md`): the receive-side codex-backed
 # NodeAdapter variant (`build_adapter` in src/config.rs).
 wasl-adapter-codex = { workspace = true }
-# W8'b (`docs/specs/adapter-antigravity.md`): the receive-side agy-backed
-# NodeAdapter variant (`build_adapter` in src/config.rs).
-wasl-adapter-antigravity = { workspace = true }
 # W9 (`docs/specs/adapter-opencode.md`): the receive-side opencode-backed
 # NodeAdapter variant (`build_adapter` in src/config.rs).
 wasl-adapter-opencode = { workspace = true }

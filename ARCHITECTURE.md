@@ -1,7 +1,7 @@
 # Wasl — Architecture
 
 **Wasl** (وصل, "to connect/link") is a **standalone MCP server** that lets AI coding-agent CLIs
-(Claude Code, Codex, Gemini, …) **consult**, **command**, **message**, and **transfer data** with one
+(Claude Code, Codex, …) **consult**, **command**, **message**, and **transfer data** with one
 another — within a host and **across hosts** — with a **human-in-the-loop gate before every send**.
 
 It is fully standalone. Wasl gates itself via MCP elicitation (or a tool-level `prepare`/`commit`
@@ -15,7 +15,7 @@ requires no specific external system.
   `Sink` (observation) traits.
 - **Three-tier gate** (permission-before-send):
   1. **MCP elicitation** (`elicitation/create`) when the calling client supports it (Claude Code, Codex).
-  2. **Self-owned `prepare`→`commit`** handshake for clients without elicitation (Gemini) and whenever a
+  2. **Self-owned `prepare`→`commit`** handshake for clients without elicitation and whenever a
      real human sign-off must be guaranteed (elicitation can be auto-answered by client policy).
   3. **Optional external authority** (`GateMode::External`): surface the gate to an external supervisor via
      the generic `Surfacer` seam + emit an observation feed (the generic audit `Sink`) for EVERY connection
@@ -58,14 +58,13 @@ Status: ✅ implemented + tested (100% line+region where a coverage unit; green 
 | E2 | `wasl-procrunner` | L1 | ✅ | Real `wasl_transfer::Runner`: runs a transfer argv as a child process. Plumbing genuine 100% via stand-in commands; real scp/rsync across hosts UNTESTED HERE. |
 | E3 | `wasl-adapter-claude` | L2 | ✅ | Concrete `AgentAdapter` driving the Claude Code CLI. **CLI contract VERIFIED live** (claude 2.1.198): UUIDv5 session ids, `--session-id`→`--resume` turns, symmetric retry; `live-cli` suite passes against the real binary. 100%. |
 | E4 | `wasl-adapter-codex` | L2 | ✅ | `AgentAdapter` driving `codex exec`/`exec resume`. **VERIFIED live** (codex-cli 0.142.5): context→thread ledger, blind continuation retry. 100%. |
-| E5 | `wasl-adapter-antigravity` | L2 | ✅ | `AgentAdapter` driving `agy -p`/`--conversation`. **VERIFIED live** (agy 1.0.15): hidden `--output-format json`, prompt-last argv, response-presence success mapping; permission probe showed headless auto-allow (`--sandbox` is containment). 100%. |
 | E2E | `wasl-e2e` | — | ✅ | Cross-crate scenario suite: gate(server) → dispatch over **live loopback A2A** → audit (external authority via `Surfacer`). Migrated off the retired daemon; scenario coverage preserved 1:1. |
-| MCP | `wasl-mcp` (`wasl-mcpd`) | L2 | ✅ | **The MCP server / runnable node.** 4 tools over rmcp 0.9/stdio; TOML config populates the peer registry + selects the adapter (claude/codex/antigravity); real three-tier gating (caps detection, operator-decided Tier-3, prepare→commit Tier-2); dispatches over **real A2A**; optional operator surface (`WO`). **Live-verified end-to-end** by the W5 two-node dress rehearsal (`scripts/live-verify.sh`). |
+| MCP | `wasl-mcp` (`wasl-mcpd`) | L2 | ✅ | **The MCP server / runnable node.** 4 tools over rmcp 0.9/stdio; TOML config populates the peer registry + selects the adapter (claude/codex/opencode); real three-tier gating (caps detection, operator-decided Tier-3, prepare→commit Tier-2); dispatches over **real A2A**; optional operator surface (`WO`). **Live-verified end-to-end** by the W5 two-node dress rehearsal (`scripts/live-verify.sh`). |
 
 **Dependency DAG (acyclic):** `proto ← gate, registry, transfer, audit`;
 `proto,gate,audit ← server`; `server,audit ← operator`; `a2a-types ← a2a-server, a2a-client, adapter`;
 `proto,a2a-types,a2a-client,registry ← dispatch`; `server,dispatch,a2a-server,adapter,gate ← node`;
-`audit ← filesink`; `transfer ← procrunner`; `adapter ← adapter-{claude,codex,antigravity}`;
+`audit ← filesink`; `transfer ← procrunner`; `adapter ← adapter-{claude,codex,opencode}`;
 `server,dispatch,operator,adapter-* ← mcp`; all ← `e2e`. (The retired `wasl-daemon` + `wasl-mailbox` crates are deleted.)
 
 **Testability honesty:** loopback on `127.0.0.1` (different ports) stands in for cross-host — same code path.

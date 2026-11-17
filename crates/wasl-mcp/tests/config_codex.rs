@@ -119,12 +119,6 @@ fn build_adapter_selects_the_codex_variant_for_adapter_kind_codex() {
     match adapter {
         NodeAdapter::Codex(_) => {}
         NodeAdapter::Claude(_) => panic!("kind Codex must build NodeAdapter::Codex"),
-        // W8'b (`docs/specs/adapter-antigravity.md`) adds a third `NodeAdapter`
-        // variant; this frozen file's match must stay exhaustive to compile
-        // (a compile-level, not behavioral, necessity — same precedent
-        // `crates/wasl-mcp/AGENTS.md`'s W4 section documents for
-        // `tests/config_pure.rs`'s `GateConfig` field addition).
-        NodeAdapter::Antigravity(_) => panic!("kind Codex must build NodeAdapter::Codex"),
         NodeAdapter::Opencode(_) => panic!("kind Codex must build NodeAdapter::Codex"),
     }
 }
@@ -141,9 +135,6 @@ fn build_adapter_still_selects_the_claude_variant_for_adapter_kind_claude() {
     match adapter {
         NodeAdapter::Claude(_) => {}
         NodeAdapter::Codex(_) => panic!("kind Claude must build NodeAdapter::Claude"),
-        // W8'b adds a third `NodeAdapter` variant; see the comment on the
-        // sibling match above.
-        NodeAdapter::Antigravity(_) => panic!("kind Claude must build NodeAdapter::Claude"),
         NodeAdapter::Opencode(_) => panic!("kind Claude must build NodeAdapter::Claude"),
     }
 }

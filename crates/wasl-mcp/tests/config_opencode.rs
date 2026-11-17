@@ -1,7 +1,6 @@
 //! Opencode adapter selectability tests (W9), per
 //! `docs/specs/adapter-opencode.md`'s "Node-config integration" delta on top of
-//! `docs/specs/node-config.md` (mirroring W7b's `config_codex.rs` and W8′b's
-//! `config_antigravity.rs`).
+//! `docs/specs/node-config.md` (mirroring W7b's `config_codex.rs`).
 //!
 //! `tests/config_pure.rs` is FROZEN (a pinned acceptance fixture for W2/W4) so
 //! this is a NEW file rather than an extension of it. It covers:
@@ -13,7 +12,7 @@
 //!      literal string `"opencode"` is — plus a clearly-bogus kind).
 //!   4. `build_adapter` returns the opencode-backed `NodeAdapter::Opencode`
 //!      variant for `AdapterKind::Opencode` (the exhaustive-match delegating
-//!      enum from the spec), and the pre-existing Claude/Codex/Antigravity arms
+//!      enum from the spec), and the pre-existing Claude/Codex arms
 //!      are undisturbed.
 //!   5. a full config -> registry -> loopback A2A dispatch proof where the
 //!      RECEIVE side is a real `NodeAdapter::Opencode` (built via
@@ -59,7 +58,7 @@ fn kind_opencode_parses_to_adapter_kind_opencode() {
     assert_eq!(cfg.adapter.kind, AdapterKind::Opencode);
     assert_eq!(
         cfg.adapter.bin, None,
-        "no bin key -> absent, same meaning as the claude/codex/antigravity arms \
+        "no bin key -> absent, same meaning as the claude/codex arms \
          (default bin is \"opencode\")"
     );
 }
@@ -132,7 +131,6 @@ fn build_adapter_selects_the_opencode_variant_for_adapter_kind_opencode() {
         NodeAdapter::Opencode(_) => {}
         NodeAdapter::Claude(_) => panic!("kind Opencode must build NodeAdapter::Opencode"),
         NodeAdapter::Codex(_) => panic!("kind Opencode must build NodeAdapter::Opencode"),
-        NodeAdapter::Antigravity(_) => panic!("kind Opencode must build NodeAdapter::Opencode"),
     }
 }
 
@@ -146,7 +144,6 @@ fn build_adapter_still_selects_the_claude_variant_for_adapter_kind_claude() {
     match adapter {
         NodeAdapter::Claude(_) => {}
         NodeAdapter::Codex(_) => panic!("kind Claude must build NodeAdapter::Claude"),
-        NodeAdapter::Antigravity(_) => panic!("kind Claude must build NodeAdapter::Claude"),
         NodeAdapter::Opencode(_) => panic!("kind Claude must build NodeAdapter::Claude"),
     }
 }
@@ -161,23 +158,7 @@ fn build_adapter_still_selects_the_codex_variant_for_adapter_kind_codex() {
     match adapter {
         NodeAdapter::Codex(_) => {}
         NodeAdapter::Claude(_) => panic!("kind Codex must build NodeAdapter::Codex"),
-        NodeAdapter::Antigravity(_) => panic!("kind Codex must build NodeAdapter::Codex"),
         NodeAdapter::Opencode(_) => panic!("kind Codex must build NodeAdapter::Codex"),
-    }
-}
-
-#[test]
-fn build_adapter_still_selects_the_antigravity_variant_for_adapter_kind_antigravity() {
-    let cfg = AdapterConfig {
-        kind: AdapterKind::Antigravity,
-        bin: None,
-    };
-    let adapter = build_adapter(&cfg);
-    match adapter {
-        NodeAdapter::Antigravity(_) => {}
-        NodeAdapter::Claude(_) => panic!("kind Antigravity must build NodeAdapter::Antigravity"),
-        NodeAdapter::Codex(_) => panic!("kind Antigravity must build NodeAdapter::Antigravity"),
-        NodeAdapter::Opencode(_) => panic!("kind Antigravity must build NodeAdapter::Antigravity"),
     }
 }
 
@@ -310,8 +291,8 @@ async fn config_opencode_receive_composes_over_real_loopback_a2a() {
     // real NodeAdapter::Opencode driving the stub `opencode` bin.
     let peer = spawn_opencode_receiver(&stub).await;
 
-    // SEND side: config -> registry, exactly mirroring config_codex.rs's /
-    // config_antigravity.rs's loopback proof, but pointed at the
+    // SEND side: config -> registry, exactly mirroring config_codex.rs's
+    // loopback proof, but pointed at the
     // opencode-backed receiver above.
     let toml = format!(
         "[[peers]]\nagent_id = \"opencode-peer\"\nhost_id = \"loopback\"\nurl = \"{}\"\n",

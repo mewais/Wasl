@@ -39,7 +39,6 @@ TURN_TIMEOUT_SECS="${WASL_SPIKE_TURN_TIMEOUT:-90}"
 OPENCODE_BIN="${WASL_SPIKE_OPENCODE_BIN:-}"
 CLAUDE_BIN="${WASL_SPIKE_CLAUDE_BIN:-claude}"
 CODEX_BIN="${WASL_SPIKE_CODEX_BIN:-codex}"
-AGY_BIN="${WASL_SPIKE_AGY_BIN:-agy}"
 
 # Isolated temp root for opencode (own XDG dirs + minimal config). Cleaned on exit.
 TMP_ROOT=""
@@ -129,16 +128,14 @@ if [ -z "$OPENCODE_BIN" ]; then
 fi
 
 # which each CLI
-HAVE_CLAUDE=0; HAVE_CODEX=0; HAVE_AGY=0; HAVE_OPENCODE=0
+HAVE_CLAUDE=0; HAVE_CODEX=0; HAVE_OPENCODE=0
 command -v "$CLAUDE_BIN" >/dev/null 2>&1 && HAVE_CLAUDE=1
 command -v "$CODEX_BIN"  >/dev/null 2>&1 && HAVE_CODEX=1
-command -v "$AGY_BIN"    >/dev/null 2>&1 && HAVE_AGY=1
 [ -n "$OPENCODE_BIN" ] && [ -x "$OPENCODE_BIN" ] && HAVE_OPENCODE=1
 
 printf "  %-9s %s\n" "claude"   "$([ $HAVE_CLAUDE   = 1 ] && echo "found ($(command -v "$CLAUDE_BIN"))" || echo "NOT installed -> SKIP")"
 printf "  %-9s %s\n" "codex"    "$([ $HAVE_CODEX    = 1 ] && echo "found ($(command -v "$CODEX_BIN"))"  || echo "NOT installed -> SKIP")"
 printf "  %-9s %s\n" "opencode" "$([ $HAVE_OPENCODE = 1 ] && echo "found ($OPENCODE_BIN)"               || echo "NOT installed -> SKIP")"
-printf "  %-9s %s\n" "agy"      "$([ $HAVE_AGY      = 1 ] && echo "found ($(command -v "$AGY_BIN"))"    || echo "NOT installed -> SKIP")"
 echo
 echo "  per-probe timeout: ${PROBE_TIMEOUT_SECS}s   per-turn timeout: ${TURN_TIMEOUT_SECS}s"
 echo "  artifacts:         $OUT_DIR/<cli>/"
@@ -150,8 +147,8 @@ if [ "$PREREQ_OK" = 0 ]; then
 fi
 
 # Fresh output dirs for a clean, idempotent re-run (keep the dir, wipe contents).
-rm -rf "$OUT_DIR/claude" "$OUT_DIR/opencode" "$OUT_DIR/codex" "$OUT_DIR/antigravity" 2>/dev/null
-mkdir -p "$OUT_DIR/claude" "$OUT_DIR/opencode" "$OUT_DIR/codex" "$OUT_DIR/antigravity"
+rm -rf "$OUT_DIR/claude" "$OUT_DIR/opencode" "$OUT_DIR/codex" 2>/dev/null
+mkdir -p "$OUT_DIR/claude" "$OUT_DIR/opencode" "$OUT_DIR/codex"
 
 # --------------------------------------------------------------------------- #
 # Verdict accumulators (state per CLI). States:
@@ -161,7 +158,6 @@ mkdir -p "$OUT_DIR/claude" "$OUT_DIR/opencode" "$OUT_DIR/codex" "$OUT_DIR/antigr
 CLAUDE_STATE="not-installed"; CLAUDE_P="not-installed"; CLAUDE_C="not-installed"; CLAUDE_B="not-installed"; CLAUDE_ID="-"; CLAUDE_INT="unknown"; CLAUDE_TRANSCRIPT="-"
 OPENCODE_STATE="not-installed"; OPENCODE_P="not-installed"; OPENCODE_C="not-installed"; OPENCODE_B="not-installed"; OPENCODE_ID="-"; OPENCODE_INT="unknown"; OPENCODE_TRANSCRIPT="-"
 CODEX_STATE="not-installed"; CODEX_P="not-installed"; CODEX_C="not-installed"; CODEX_B="not-installed"; CODEX_ID="-"; CODEX_INT="unknown"; CODEX_TRANSCRIPT="-"
-AGY_STATE="not-installed"; AGY_P="not-installed"; AGY_C="not-installed"; AGY_B="not-installed"; AGY_ID="-"; AGY_INT="unknown"; AGY_TRANSCRIPT="-"
 
 ANY_PASS=0
 
@@ -344,28 +340,6 @@ else
 fi
 
 # --------------------------------------------------------------------------- #
-# ANTIGRAVITY (agy): absent -> not installed; else brief persistent-mode check
-# --------------------------------------------------------------------------- #
-if [ $HAVE_AGY = 1 ]; then
-    echo
-    echo "[antigravity] checking for any long-lived mode ..."
-    "$AGY_BIN" --help > "$OUT_DIR/antigravity/help.txt" 2>&1 || true
-    AGY_STATE="unsupported-by-documented-interface"
-    AGY_P="unsupported-by-documented-interface"
-    AGY_C="verified-true"     # --conversation resume retains context (resume-based)
-    AGY_B="verified-true"     # single-line JSON result per -p turn
-    AGY_ID="agy-minted conversation_id"
-    AGY_INT="unknown"
-    AGY_TRANSCRIPT="out/antigravity/help.txt"
-    echo "[antigravity] VERDICT: persistent_process=unsupported-by-documented-interface (agy -p is per-turn);"
-    echo "              persistent_conversation=true (--conversation resume)."
-else
-    echo
-    echo "[antigravity] SKIP -- 'agy' not installed (recorded as not-installed, not a failure)."
-    AGY_STATE="not-installed"; AGY_P="not-installed"; AGY_C="not-installed"; AGY_B="not-installed"
-fi
-
-# --------------------------------------------------------------------------- #
 # Capability matrix
 # --------------------------------------------------------------------------- #
 {
@@ -386,14 +360,12 @@ echo "|---|---|---|---|---|---|---|"
 echo "| claude (stream-json duplex) | $CLAUDE_P | $CLAUDE_C | $CLAUDE_B | $CLAUDE_ID | $CLAUDE_INT | $CLAUDE_TRANSCRIPT |"
 echo "| opencode (serve/acp) | $OPENCODE_P | $OPENCODE_C | $OPENCODE_B | $OPENCODE_ID | $OPENCODE_INT | $OPENCODE_TRANSCRIPT |"
 echo "| codex (exec/resume) | $CODEX_P | $CODEX_C | $CODEX_B | $CODEX_ID | $CODEX_INT | $CODEX_TRANSCRIPT |"
-echo "| antigravity (agy -p) | $AGY_P | $AGY_C | $AGY_B | $AGY_ID | $AGY_INT | $AGY_TRANSCRIPT |"
 echo
 echo "## Per-CLI overall state"
 echo
 echo "- **claude:** $CLAUDE_STATE"
 echo "- **opencode:** $OPENCODE_STATE"
 echo "- **codex:** $CODEX_STATE (persistent_conversation=true; persistent_process via contracted \`exec\` is per-turn)"
-echo "- **antigravity:** $AGY_STATE"
 echo
 echo "## Notes"
 echo
@@ -424,7 +396,7 @@ else
     GATE_RC=1
 fi
 echo "==============================================================================="
-echo " Per-CLI: claude=$CLAUDE_STATE  opencode=$OPENCODE_STATE  codex=$CODEX_STATE  antigravity=$AGY_STATE"
+echo " Per-CLI: claude=$CLAUDE_STATE  opencode=$OPENCODE_STATE  codex=$CODEX_STATE"
 echo " Full matrix: $MATRIX"
 echo "==============================================================================="
 

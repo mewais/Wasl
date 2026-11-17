@@ -4,7 +4,7 @@
 //! and assert the ledger contract from `docs/specs/adapter-opencode.md`:
 //! compose -> ledger lookup (First vs. Continuation, per-context) -> invoke
 //! (prompt travels in ARGV as the LAST element, stdin is EMPTY — opencode's
-//! deliberate seam shape, like agy) -> the MATCHED single fresh-First retry
+//! deliberate seam shape) -> the MATCHED single fresh-First retry
 //! (Continuation-only, ONLY when the invoker error contains "Session not
 //! found") -> parse -> ledger update (ONLY on full success).
 //!

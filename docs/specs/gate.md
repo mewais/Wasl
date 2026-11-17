@@ -20,9 +20,9 @@ pub enum GateMode { Elicitation, external authority, PrepareCommit }
 ```
 `pub fn choose_mode(caps: &ClientCaps) -> GateMode` — **priority: elicitation > external > prepare_commit.**
 - `elicitation` true → `Elicitation` (clean in-band path; Claude/Codex).
-- else `external` true → `external authority` (no client elicitation but external authority present, e.g. Gemini+external authority — surface
+- else `external` true → `external authority` (no client elicitation but external authority present, e.g. an external-authority-only client — surface
   direct to external authority).
-- else → `PrepareCommit` (self-owned handshake; standalone Gemini / any no-elicitation client).
+- else → `PrepareCommit` (self-owned handshake; any standalone no-elicitation client).
 
 ## 2. Building the human-facing gate + elicitation
 ```rust

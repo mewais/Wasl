@@ -21,7 +21,7 @@ Four drivers:
    the `serve` HTTP path) → `ProtocolEvent` (impl-plan Phase 5).
 4. **`CodexAppServerProtocol`** — maps codex `app-server --stdio` JSON-RPC → `ProtocolEvent` (Phase-0
    follow-up capture + Phase-6 impl). This is the Phase-0 follow-up the original Phase-0′ spike explicitly
-   deferred (§"codex / antigravity" below, historical) — `codex exec`/`exec resume` is genuinely per-turn (that
+   deferred (§"codex `app-server`" below, historical) — `codex exec`/`exec resume` is genuinely per-turn (that
    finding stands unchanged), but `app-server --stdio` is a SEPARATE, persistent JSON-RPC-over-stdio substrate
    Phase-0′ never investigated. It was captured and VERIFIED in the follow-up capture (CONTRACT STATUS below)
    and is a real R2 managed driver, not out of scope.
@@ -118,15 +118,9 @@ checked and are correctly NOT used — `app-server --stdio` is the only one of t
 | `codex exec-server` (remote/websocket cloud-registration mode) | checked and correctly NOT USED — a different substrate entirely (remote host registration, not a local stdio driver) |
 | `codex mcp-server` (codex as an MCP tool PROVIDER) | checked and correctly NOT USED — the wrong direction for a managed driver (we need codex as the AGENT, not as a tool codex exposes to some other caller) |
 
-### antigravity — out of scope
-
-| Claim | Status |
-|---|---|
-| antigravity (`agy`) | 🅰 ASSUMED per-turn like codex `exec`; **`not-installed`** on the spike host (`out/capability-matrix.md` antigravity row); no R2 driver |
-
 **GATE PASSED** is real: `out/capability-matrix.md` records claude=`verified-true`, opencode=`verified-true`
 (serve + acp), codex `exec`=`unsupported-by-documented-interface` (superseded for managed-driver purposes by
-`app-server`'s own `verified-true` above), antigravity=`not-installed` — ≥1 CLI proven same-process multi-turn,
+`app-server`'s own `verified-true` above), — ≥1 CLI proven same-process multi-turn,
 so the go/no-go the whole core rests on is satisfied (and is now satisfied twice over, independently, by
 codex `app-server` too).
 

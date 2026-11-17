@@ -240,7 +240,7 @@ finite ephemeral stream and an infinite live managed one. Mirrored identically i
 
 ## Phase-3 scope (LANDED) — `EphemeralRuntimeProvider`/`EphemeralTarget`
 
-Phase 3 wraps today's headless adapters (claude/codex/antigravity/opencode, via `wasl_adapter::AgentAdapter`)
+Phase 3 wraps today's headless adapters (claude/codex/opencode, via `wasl_adapter::AgentAdapter`)
 as `EphemeralTarget: DeliveryTarget` with ZERO behavior change — the always-available default path — plus
 the shared capability-gated conformance suite (`tests/conformance_suite.rs`, reused unchanged in Phase 4/5)
 and the differential-equivalence proof (`tests/differential_equivalence.rs`: calling `AgentAdapter::deliver`

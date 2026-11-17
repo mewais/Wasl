@@ -16,7 +16,7 @@ model" note in §1): Wasl spawns and owns the session and holds the sole input h
 stays the default and unchanged.
 
 **Hard constraint (locked):** this capability is designed, implemented, and proven **entirely within the
-Wasl repository**, using **only Wasl's own existing CLI adapter targets** (claude / codex / antigravity /
+Wasl repository**, using **only Wasl's own existing CLI adapter targets** (claude / codex /
 opencode), with **zero dependency on, or knowledge of, any external supervisor/consumer.** No
 project-specific code, type, field name, or assumption from any external tool may enter Wasl's core. An
 external supervisor MAY later plug in — but only as an optional, pluggable, generic extension, designed and
@@ -59,15 +59,14 @@ pub trait AgentAdapter: Send + Sync {
 is called to inject it into the local agent and return the reply. This is `request -> reply`: one shot, no
 lifecycle, no observability, no notion of "the session is busy."
 
-**The reality across all four concrete adapters today** (`E3 claude`, `E4 codex`, `E5 antigravity`, `W9
+**The reality across all three concrete adapters today** (`E3 claude`, `E4 codex`, `W9
 opencode`) is that every `deliver` **spawns a brand-new headless CLI process**:
 
 - claude: `claude -p --output-format json --session-id|--resume <uuid>`, prompt on stdin, process exits.
 - codex: `codex exec` / `exec resume`, per-turn process.
-- antigravity: `agy -p` / `--conversation`, per-turn process.
 - opencode: `opencode run --format json [-s <id>]`, per-turn process that self-terminates on `step_finish`.
 
-Continuity, where it exists, is **resume-based** (claude's `--resume`, opencode's `-s`, codex/agy's thread
+Continuity, where it exists, is **resume-based** (claude's `--resume`, opencode's `-s`, codex's thread
 ledger) — context is *recovered* by re-attaching to a stored session on each new process, not *held* in a
 live one. Consequences:
 
@@ -105,7 +104,7 @@ See §9 (Non-goals).
 
 ## 2. Core design: a capability model, not a binary "live" flag
 
-A single `live: bool` would lie. The four adapters have **genuinely different** properties, and forcing
+A single `live: bool` would lie. The three adapters have **genuinely different** properties, and forcing
 symmetry across them is exactly the dishonesty the block regime forbids ("no block claims end-to-end 'it
 works' on the strength of fakes alone"). Instead, a target reports an explicit **capability set**, and every
 test and every scheduler decision is **gated on the specific capability it needs.**
@@ -145,7 +144,6 @@ until verified):**
 | claude (stream-json stdin) | **candidate: true** | true | likely true | candidate | Strongest near-term candidate — a resumable multi-turn stdin protocol already exists. |
 | opencode (ACP / JSON-RPC) | **candidate: true** | true | likely true | candidate | Second target; structurally different from claude → proves the abstraction is generic. |
 | codex | likely **false** | true | resume-based | — | May only ever honestly claim `persistent_conversation` unless a spike finds a real long-lived protocol. |
-| antigravity | likely **false** | true | resume-based | — | Same as codex. Do not force `persistent_process` on it. |
 
 The `EphemeralRuntimeProvider` (§3.2) — today's spawn-per-turn behavior — reports
 `persistent_process: false, persistent_conversation: true, structured_turns: false` and so on: it is a
@@ -623,11 +621,11 @@ to `scripts/live-verify.sh`). The end-to-end proof, entirely standalone:
 
 Do not skip ahead. Each phase is provable before the next begins.
 
-- **Phase 0 — Feasibility spikes (per existing adapter).** For claude / codex / antigravity / opencode:
+- **Phase 0 — Feasibility spikes (per existing adapter).** For claude / codex / opencode:
   does it support multi-turn *same-process* delivery? What is the **exact** ready signal, turn-boundary
   signal, and completion signal? Is there a stable **native session id**? Is it interruptible? Output: an
   **honest capability matrix** (fills in the §2 table with verified values). **Do not force symmetry** — it
-  is an acceptable and expected result that codex/antigravity report only `persistent_conversation`.
+  is an acceptable and expected result that codex reports only `persistent_conversation`.
 
 - **Phase 1 — Contracts + spec.** Freeze the generic traits/types (§3) and the full state-machine spec (§4)
   in per-crate specs + inline rustdoc **before** any scheduler code exists. (This document is the input to
@@ -714,7 +712,7 @@ generic, consumer-named-by-nobody, optional). Nothing in this plan builds it.
   persistence.
 - **No external supervisor/consumer integration work of any kind.** (The seam sketch in §8 is a future,
   separate effort.)
-- **No claim of `persistent_process` for adapters that do not genuinely have it.** codex/antigravity may
+- **No claim of `persistent_process` for adapters that do not genuinely have it.** codex may
   honestly ship with only `persistent_conversation` — that is a correct outcome, not a shortfall.
 - **No PTY-based screen-scraping as a primary mechanism.** Only ever an explicitly-weaker, clearly-labelled
   fallback (`structured_turns: false`), if ever — never the default and never a phase-4/5 target.

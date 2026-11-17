@@ -22,7 +22,7 @@ futures = { workspace = true }
 # code-agent may not edit (`tests/**`, owned by the test-agent). `src/` is clean
 # of every one of these — verified: `cargo clippy -p wasl-runtime --lib --
 # -D warnings` passes with none of these allowances. Same repo convention as
-# wasl-adapter-claude/-codex/-opencode/-antigravity (per-package frozen-test
+# wasl-adapter-claude/-codex/-opencode (per-package frozen-test
 # lint carve-outs).
 [lints.rust]
 # tests/support/mod.rs (frozen) does `use wasl_runtime::NativeGateResolver;` to

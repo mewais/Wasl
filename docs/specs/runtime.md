@@ -35,7 +35,7 @@ before the Phase-4/5 driver commits an API around it.
 
 The spike was **re-run** and `spikes/live-substrate/out/` now holds real, redacted, secret-free artifacts;
 the gate PASSED (`out/capability-matrix.md`: claude=`verified-true`, opencode serve/acp=`verified-true`,
-codex=`unsupported-by-documented-interface`, antigravity=`not-installed`). **The token-only probe prompts
+codex=`unsupported-by-documented-interface`). **The token-only probe prompts
 ("remember … / recall …") never invoked a tool and never tripped a native permission gate**, so any
 tool-call or gate wire shape is **ASSUMED, not VERIFIED** — see the tool/gate rows below and §6/§7.4.
 
@@ -51,7 +51,7 @@ tool-call or gate wire shape is **ASSUMED, not VERIFIED** — see the tool/gate 
 | the `sessionID` (serve, uppercase-D) vs `sessionId` (acp, camelCase) native-id casing divergence | ✅ VERIFIED — `out/opencode/serve/turn_*_message.txt` (`"sessionID":"ses_…"`) vs `out/opencode/acp/messages.jsonl` line 40 (`"sessionId":"ses_…"`) |
 | claude `tool_use`/`tool_result` content-block shapes (→ `ToolStarted`/`ToolFinished` mapping) | 🅰 ASSUMED — **NOT captured**: the token-only prompt invoked no tool; `out/claude/events.jsonl` contains zero `tool_use`/`tool_result` blocks (`permission_denials: []`). Needs a follow-up capture that exercises a tool before a driver commits the mapping |
 | opencode `acp`/`serve` tool-activity + permission/native-gate wire shapes (→ `ToolStarted`/`ToolFinished`/`NativeGateRequested`) | 🅰 ASSUMED — **NOT captured**: `out/opencode/acp/messages.jsonl` shows only `session/update` (`available_commands_update`/`agent_message_chunk`/`usage_update`), no tool call and no permission request. Needs a follow-up capture that exercises a tool/gate |
-| ephemeral spawn-per-turn adapters retain conversation via resume (`persistent_conversation`) | ✅ VERIFIED (elsewhere) — `docs/specs/adapter-{claude,codex,opencode,antigravity}.md` live suites |
+| ephemeral spawn-per-turn adapters retain conversation via resume (`persistent_conversation`) | ✅ VERIFIED (elsewhere) — `docs/specs/adapter-{claude,codex,opencode}.md` live suites |
 | **Interruptibility** (`cancel_turn` actually aborts an in-flight turn on a real substrate) | ⛔ **UNKNOWN** — UNTESTED on every substrate (`out/capability-matrix.md` `interruptible=unknown` for all rows; Notes: "not probed in Phase 0'"); the core's cancel state-machine is fully specified & fake-tested, but no real driver may claim `interruptible: true` until a **Phase-1-follow-up interrupt capture** confirms it |
 | **Streaming granularity** for claude + opencode-`serve` (whether/when partial deltas arrive vs whole blocks) | ⛔ **UNKNOWN** — claude `assistant` events carried WHOLE content blocks, NO token deltas observed (`out/claude/events.jsonl` lines 89-90,101-102); opencode-`serve` returned a final message. Only opencode-`acp` showed deltas. A driver on claude/serve MUST report `streaming_output: false` (or run a **Phase-1-follow-up streaming capture**) — do NOT assume deltas |
 | Cross-node-restart durability of live state | 🅰 ASSUMED-NONE — in-memory only by contract (§State durability); the one exception is command write-ahead durability (below) |

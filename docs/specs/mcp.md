@@ -11,7 +11,7 @@ pure request→reply mapping) is unit-tested; the async rmcp/stdio plumbing is v
 clippy + fmt** and a smoke test, mirroring how the other IO edges (Runner/Sink/Mesh) are trait-mocked.
 
 ## Goal
-Make Wasl a real MCP server: expose the four agent-to-agent tools so any MCP-client CLI (Claude/Codex/Gemini)
+Make Wasl a real MCP server: expose the four agent-to-agent tools so any MCP-client CLI (Claude/Codex)
 can consult/command/message peers and transfer files, with a **permission-before-send** gate surfaced to the
 human via MCP `elicitation/create`, and a durable audit of every decision.
 

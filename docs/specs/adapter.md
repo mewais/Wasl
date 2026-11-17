@@ -7,7 +7,7 @@
 
 **Testability (honesty):** the `AgentAdapter` trait, the `AdapterExecutor` mapping, and metadata/part
 extraction are unit-tested to **100%** with a FAKE adapter. The CONCRETE adapters that drive a real
-claude/codex/gemini CLI are a SEPARATE block (`docs/specs/real-adapters.md`, block E3) and are
+claude/codex CLI are a SEPARATE block (`docs/specs/real-adapters.md`, block E3) and are
 **UNTESTED HERE** — this crate contains only the trait + fake + executor + extraction logic.
 
 ## Types

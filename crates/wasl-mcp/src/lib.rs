@@ -276,9 +276,9 @@ pub fn run() {
         //
         // This composes only already-tested pieces (`wasl_node::receiver` →
         // `A2aServer` over a real `AdapterExecutor` wrapping the config-selected
-        // `NodeAdapter` — `ClaudeAdapter`, `CodexAdapter` (W7), since
-        // W8'b `AntigravityAdapter`, or, since W9, `OpencodeAdapter`), but the
-        // LIVE serve loop and driving a REAL `claude`/`codex`/`agy`/`opencode`
+        // `NodeAdapter` — `ClaudeAdapter`, `CodexAdapter` (W7), or, since
+        // W9, `OpencodeAdapter`), but the
+        // LIVE serve loop and driving a REAL `claude`/`codex`/`opencode`
         // CLI are NOT exercised by any test in this crate (none of the four
         // binaries is in the build env and the socket serve loop is never
         // entered under test).

@@ -2,10 +2,10 @@
 
 **Tier:** L2 (IO shell over a tested pure core). **Deps:** `wasl-adapter` (the `AgentAdapter` trait +
 `Delivery`/`DeliveryKind`/`AdapterError`), `serde`, `serde_json`, `async-trait`, `tokio` (process). Dev:
-`tokio` (macros, rt), `serde_json`. No `unsafe`. No `uuid` dep — like codex/agy and unlike claude,
+`tokio` (macros, rt), `serde_json`. No `unsafe`. No `uuid` dep — like codex and unlike claude,
 **opencode mints its own session ids**; the adapter never fabricates one. This is ONE concrete adapter: it
 injects an incoming `Delivery` into the local **opencode** CLI (`opencode run`) and returns its reply. It
-mirrors the E3/W7/W8′ pattern (`wasl-adapter-claude`/`-codex`/`-antigravity`): pure core + `CliInvoker`
+mirrors the E3/W7 pattern (`wasl-adapter-claude`/`-codex`): pure core + `CliInvoker`
 seam + `ProcessCliInvoker` + per-context session ledger.
 
 ## ⚠️ CONTRACT STATUS — VERIFIED AGAINST THE REAL CLI (opencode 1.18.4, 2026-07-20)
@@ -32,11 +32,11 @@ on, and their status:
 | A pathological error (e.g. context overflow with autocompact) makes `run` LOOP and NOT self-terminate | ✅ observed live (17-min `step_start→text→error→step_finish` loop until killed) |
 
 Two contract properties shape the design below:
-1. **Prompt delivery differs from codex/agy-stdin**: opencode takes the prompt as a positional argv
+1. **Prompt delivery differs from codex-stdin**: opencode takes the prompt as a positional argv
    element, so the `CliInvoker::invoke(argv, stdin)` seam is called with `stdin == ""` (the prompt rides in
-   argv). This is the agy pattern, not the claude/codex stdin pattern.
+   argv). This is not the claude/codex stdin pattern.
 2. **The resume-error string IS verified and stable** (`Session not found` on stderr, exit 1), so — unlike
-   codex/agy's blind retry — opencode can use a **matched retry** (claude-style): a `Continuation` invoker
+   codex's blind retry — opencode can use a **matched retry** (claude-style): a `Continuation` invoker
    error whose message contains `Session not found` triggers exactly one fresh-`First` retry; any other
    `Continuation` error propagates (it is environmental — bad binary, network — not a stale-session case).
 
@@ -76,7 +76,7 @@ context starts a **fresh opencode session** — prior conversation context is lo
 opencode keeps sessions indefinitely).
 
 **Why not re-derive by scanning opencode's session store:** rejected for correctness, not laziness (same
-reasoning as codex/agy). opencode's persisted sessions carry no field for our `context_id`; the only
+reasoning as codex). opencode's persisted sessions carry no field for our `context_id`; the only
 recoverable signal would be matching our `compose_prompt` header inside a stored user message, and that
 header is followed by `d.text` VERBATIM, so any peer could embed a counterfeit header in a message body and
 steer a scanner to bind another context's conversation to the attacker's session. A heuristic steerable by
@@ -93,7 +93,7 @@ create two opencode sessions; last-write-wins in the ledger (the same benign rac
 ## Pure core (genuine 100% — unit-tested)
 ```rust
 /// Compose the prompt injected into opencode from a Delivery (verb header + provenance + body + any data).
-/// IDENTICAL composition to wasl-adapter-claude/-codex/-antigravity so a message reads the same regardless
+/// IDENTICAL composition to wasl-adapter-claude/-codex so a message reads the same regardless
 /// of receiver CLI:
 ///   Consult -> "[Consult from {from}]\n\n{text}"; Command/Message analogous. Non-empty `d.data` appends
 ///   "\n\nAttached data:" then one line per JSON value (`Value::to_string`).
@@ -154,7 +154,7 @@ importing them would couple opencode builds to a sibling crate for two tiny type
 `wasl-adapter` is a C1 spec change outside W9's blast radius (a legitimate later refactor, not now).
 
 ### M2 — the EPIPE fix (applies to ALL FOUR adapters)
-The pre-W9 `ProcessCliInvoker` in claude/codex/antigravity did
+The pre-W9 `ProcessCliInvoker` in claude/codex did
 `si.write_all(stdin.as_bytes()).await.map_err(ad)?` — surfacing a child's `BrokenPipe` as a hard error and
 discarding valid stdout when the child exits/ignores stdin before draining it (proven by
 `wasl-mcp/tests/config_wiring.rs`'s `printf` stub failing 3/3). W9 corrects this everywhere: the stdin
@@ -255,7 +255,7 @@ The delta W9 prescribes (identical shape to W7/W8′):
 - `NodeAdapter` gains a fourth exhaustive-match variant (kept in `wasl-mcp`, where `build_adapter` lives):
   ```rust
   pub enum NodeAdapter {
-      Claude(..), Codex(..), Antigravity(..),
+      Claude(..), Codex(..),
       Opencode(wasl_adapter_opencode::OpencodeAdapter<wasl_adapter_opencode::ProcessCliInvoker>),
   }
   impl AgentAdapter for NodeAdapter { /* match self { ... } => inner.deliver(d).await */ }

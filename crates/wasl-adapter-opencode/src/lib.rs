@@ -2,7 +2,7 @@
 //! last inch that injects an incoming `Delivery` into the local **opencode** CLI
 //! (`opencode run`) and returns its reply.
 //!
-//! Like codex/agy and unlike claude, opencode MINTS its own session id (a
+//! Like codex and unlike claude, opencode MINTS its own session id (a
 //! `ses_`-prefixed id reported as the top-level `sessionID` on every JSONL
 //! event) — there is no way to supply our own for a NEW session (`-s` is
 //! resume-only), so this adapter keeps an in-memory `context_id -> session_id`
@@ -35,7 +35,7 @@ fn ad<M: Display>(msg: M) -> AdapterError {
 
 /// Compose the prompt injected into opencode from a [`Delivery`] (verb header +
 /// provenance + body + any attached data). IDENTICAL composition to
-/// `wasl-adapter-claude`/`-codex`/`-antigravity` so a message reads the same
+/// `wasl-adapter-claude`/`-codex` so a message reads the same
 /// regardless of receiver CLI.
 pub fn compose_prompt(d: &Delivery) -> String {
     let header = match d.kind {
@@ -373,7 +373,7 @@ impl<I: CliInvoker> AgentAdapter for OpencodeAdapter<I> {
         };
 
         // opencode's prompt is the trailing positional argv element, so stdin
-        // is EMPTY (the agy pattern, not the claude/codex stdin pattern).
+        // is EMPTY (not the claude/codex stdin pattern).
         let result = self.invoker.invoke(&argv, "").await;
 
         let stdout = match result {

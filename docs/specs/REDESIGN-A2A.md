@@ -16,7 +16,7 @@ Send path:  local agent A --MCP tool--> node A [gate + audit] --A2A client--> no
 Recv path:  node B [A2A server] --TaskExecutor--> AgentAdapter --inject--> agent B's live session
             --reply--> A2A artifact --> streamed back to node A --> A's MCP tool result.
 
-Because claude/codex/gemini are MCP clients, NOT A2A servers, the node's **AgentAdapter** is the "last inch"
+Because claude/codex are MCP clients, NOT A2A servers, the node's **AgentAdapter** is the "last inch"
 that bridges an A2A Task to the real CLI (inject a turn, capture the reply). A stable A2A `contextId` maps to
 a stable long-lived session, so context persists across messages.
 
@@ -65,7 +65,7 @@ Phase E — real edges (build; mark verification honestly)
 - **E1 `FileSink`** (durable append-JSONL audit `Sink`). TESTABLE HERE: yes (temp files).
 - **E2 `ProcessRunner`** (real `Runner`: spawn scp/rsync). TESTABLE HERE: the process-drive plumbing via a
   stand-in command (e.g. a script); the REAL scp between two hosts is **UNTESTED HERE** (no 2nd host/scp).
-- **E3 real `AgentAdapter`s** (claude via stream-json/tmux; later codex/gemini). Build to
+- **E3 real `AgentAdapter`s** (claude via stream-json/tmux; later codex). Build to
   compile + unit-test any pure parsing. Driving a REAL CLI is **UNTESTED HERE** (no CLIs). Clearly labeled.
 
 ## TESTABILITY HONESTY MATRIX (what "done" can mean in THIS environment)
@@ -79,7 +79,7 @@ Phase E — real edges (build; mark verification honestly)
 | Durable file audit | ✅ temp files |
 | Runner process plumbing | ✅ via stand-in command |
 | Real scp/rsync transfer between 2 hosts | ❌ UNTESTED HERE (no 2nd host / scp) |
-| Driving a REAL claude/codex/gemini CLI (the last inch) | ❌ UNTESTED HERE (no CLIs) |
+| Driving a REAL claude/codex CLI (the last inch) | ❌ UNTESTED HERE (no CLIs) |
 | True cross-HOST over SSH/WAN | ❌ UNTESTED HERE (loopback different-ports is the stand-in; same code path) |
 | Real human elicitation approval | ❌ (driven by a scripted client, not a human) |
 

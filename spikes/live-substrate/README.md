@@ -41,8 +41,6 @@ close (EOF) to get a result == one-turn-per-process == **FAIL for persistence**.
   contracted interface is `unsupported-by-documented-interface`, `persistent_conversation` is
   true. The probe notes that experimental `app-server`/`exec-server`/`mcp-server` subcommands
   exist (left `unknown` — a Phase-0 follow-up, out of 0′ scope).
-- **antigravity (`agy`, brief):** if absent → recorded `not-installed` and SKIPPED (does not
-  fail the spike); if present → brief per-turn confirmation like codex.
 
 ## Prerequisites
 
@@ -50,8 +48,7 @@ close (EOF) to get a result == one-turn-per-process == **FAIL for persistence**.
    The script hard-fails prereqs if it is unset.
 2. **`python3`** (stdlib only — no `pip`, no venv).
 3. At least one of the CLIs on `PATH` (or at `~/.opencode/bin/opencode`). Absent CLIs are
-   SKIPPED, not failed. On this machine: `claude` ✓, `codex` ✓, `opencode` ✓ (v1.18.4),
-   `agy` ✗ (will SKIP).
+   SKIPPED, not failed. On this machine: `claude` ✓, `codex` ✓, `opencode` ✓ (v1.18.4).
 4. **Memory for opencode:** opencode OOMs under ~2 GB and its MCP catalog bloats context. The
    spike already launches it with an isolated config (own `XDG_CONFIG_HOME`/`XDG_DATA_HOME`,
    `OPENCODE_DISABLE_PROJECT_CONFIG=1`, `OPENCODE_DISABLE_AUTOCOMPACT=1`, minimal
@@ -79,7 +76,6 @@ WASL_SPIKE_TURN_TIMEOUT=120    # per-turn cap handed to the drivers (default 90s
 WASL_SPIKE_OPENCODE_BIN=/path/to/opencode
 WASL_SPIKE_CLAUDE_BIN=claude
 WASL_SPIKE_CODEX_BIN=codex
-WASL_SPIKE_AGY_BIN=agy
 ```
 
 ## Expected runtime
@@ -109,7 +105,7 @@ runs up to 2 turns × 2 variants. Each probe is capped at `WASL_SPIKE_PROBE_TIME
    - `out/opencode/serve/` and `out/opencode/acp/`: per-variant `verdict-*.json`, discovered
      endpoints, per-turn request/response captures, `messages.jsonl` (ACP JSON-RPC),
      `server.log`, the isolated `opencode.json`.
-   - `out/codex/`, `out/antigravity/`: `--help` capture + a short `summary.txt`.
+   - `out/codex/`: `--help` capture + a short `summary.txt`.
 
 > **Credentials are redacted from all captured output.** The probes run every HTTP/config
 > response body and captured log through a `redact()` helper before writing to disk (any

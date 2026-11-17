@@ -20,7 +20,7 @@ fn delivery(kind: DeliveryKind, from: &str, text: &str, data: Vec<serde_json::Va
 }
 
 // ---------------------------------------------------------------------------
-// compose_prompt (IDENTICAL composition to wasl-adapter-claude/-codex/-antigravity)
+// compose_prompt (IDENTICAL composition to wasl-adapter-claude/-codex)
 // ---------------------------------------------------------------------------
 
 #[test]

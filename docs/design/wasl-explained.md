@@ -13,7 +13,7 @@ reading — the real, not-yet-fixed bugs in that newest feature.
 
 ## 1. What is Wasl, in one paragraph
 
-AI coding assistants that run in a terminal (things like Claude Code, Codex, Gemini CLI,
+AI coding assistants that run in a terminal (things like Claude Code, Codex,
 opencode) are normally solo: one human, one assistant, one machine. **Wasl is a small server
 that lets these assistants talk to *each other* — and lets a human approve every message before
 it's sent.** One assistant can ask another a question, hand it a task, drop it a note, or send
@@ -74,7 +74,7 @@ three "tiers", meaning three different ways to ask, tried in priority order:
    there. (The technical name is "MCP elicitation" — MCP is the protocol these CLIs speak; more
    on that in §3.)
 
-2. **Wasl's own two-step handshake (prepare → commit).** Some CLIs (e.g. Gemini) *can't* be
+2. **Wasl's own two-step handshake (prepare → commit).** Some CLIs (e.g. ones without elicitation support) *can't* be
    prompted in-band. For those — and for any case where you need a *guaranteed* real human
    sign-off — Wasl runs its own handshake: it first records the pending request ("prepare"),
    hands out a one-time token, and only actually sends once someone comes back and approves that
@@ -165,7 +165,7 @@ a real request flows through them.
   the node needs a piece that takes an incoming request and actually feeds it into the local CLI,
   then returns the CLI's reply. That piece is the **adapter** — the "last inch" between the
   network and the real assistant. There's a concrete adapter per CLI (one for Claude, one for
-  Codex, one for antigravity, one for opencode). Today, each adapter works by **spawning a
+  Codex, one for opencode). Today, each adapter works by **spawning a
   brand-new headless CLI process for each incoming request** — remember this, it's the key to
   understanding the newest feature in §5.
 

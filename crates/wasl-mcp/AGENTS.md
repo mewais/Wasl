@@ -111,56 +111,16 @@ in one pinned arm by W4 §7), `../../docs/specs/node-config.md` (W2 — node con
     the SEND side driven through `Config::from_toml_str` → `registry_from_peers` → `resolve_and_dispatch`,
     proving the whole config → registry → receive chain composes for the codex arm exactly as it already did
     for claude.
-- **W8′b (`src/config.rs`, `src/lib.rs` doc comment, `Cargo.toml`, `docs/specs/adapter-antigravity.md`'s
-  "Node-config integration" delta on top of `docs/specs/node-config.md`):** the antigravity (`agy`) adapter is
-  now selectable in `wasl-mcpd`'s node config, mirroring W7b's codex addition exactly.
-  - `AdapterKind` gains `Antigravity` (`adapter.kind = "antigravity"`, exact case-sensitive match, same
-    second-pass validation as `"claude"`/`"codex"`; anything else, incl. `"Antigravity"` and `"agy"` itself
-    (the binary name, NOT a valid kind value — a near-miss the spec explicitly calls out), is still
-    `UnknownAdapterKind`).
-  - `NodeAdapter` gains its third arm, `Antigravity(wasl_adapter_antigravity::AntigravityAdapter<
-    wasl_adapter_antigravity::ProcessCliInvoker>)`, delegating `AgentAdapter::deliver` like the other two.
-    `build_adapter`'s match gains the corresponding `AdapterKind::Antigravity` arm: `adapter.bin` absent →
-    `AntigravityAdapter::new` (default bin `"agy"`), present → `AntigravityAdapter::with_bin`. Still an
-    exhaustive match on an enum, not `Box<dyn AgentAdapter>` — the third arm exercises the same "adding a kind
-    forces a decision" compile-time forcing function W2/W7b established.
-  - `Cargo.toml` gains `wasl-adapter-antigravity` (already workspace-hoisted, per the parallel-landing W8′
-    crate). No new direct dependency was needed beyond that — `async-trait` was already promoted to
-    `[dependencies]` by W7b.
-  - `src/lib.rs`'s `run()` A2A-receive doc comment is updated to also name `AntigravityAdapter`/`agy` alongside
-    `ClaudeAdapter`/`CodexAdapter`; `run()`'s actual wiring is UNCHANGED (already generic over
-    `impl AgentAdapter`).
-  - **Frozen-suite deviation (the two edits this block makes to a previously-existing test file):**
-    `tests/config_codex.rs`'s two `build_adapter_*` tests (`_selects_the_codex_variant_for_adapter_kind_codex`
-    and `_still_selects_the_claude_variant_for_adapter_kind_claude`) each `match`ed `NodeAdapter` with only the
-    `Claude`/`Codex` arms — exhaustive when that file was written (W7b, when `NodeAdapter` had exactly two
-    variants), now non-exhaustive once `Antigravity` exists. Each match gained one additional
-    `NodeAdapter::Antigravity(_) => panic!(...)` arm (same "must be the other variant" panic message the
-    existing sibling arm already used) to restore exhaustiveness — a compile-level, not behavioral, necessity,
-    same precedent `docs/specs/mcp-gating.md` §9 established and W7b itself already applied to
-    `tests/config_pure.rs`'s `GateConfig` field addition. No other previously-existing test file was touched;
-    grep confirmed `"antigravity"`/`"agy"`/`"Antigravity"` were not used as an unknown-kind probe anywhere, so
-    (unlike W7b's `tests/config_pure.rs` edit) no frozen assertion needed to be re-pointed at a still-unknown
-    kind. New coverage of `"antigravity"` itself (now valid, incl. a `bin` override), fresh still-unknown-kind
-    probes (`"gpt"`, `"Antigravity"`, `"agy"`), and the `NodeAdapter::Antigravity`/`build_adapter` behavior
-    lives in the new `tests/config_antigravity.rs`, including a real loopback A2A proof: a
-    `NodeAdapter::Antigravity` (built via `build_adapter` from a config pointing at a stub `agy` binary that
-    emits the spec's VERIFIED SUCCESS JSON line) wired as the RECEIVE side of a real `A2aServer`, with the SEND
-    side driven through `Config::from_toml_str` → `registry_from_peers` → `resolve_and_dispatch`. The stub
-    binary deliberately inspects argv (asserting the second-to-last element is `-p` and the last is a
-    non-empty prompt) rather than stdin — per the spec, agy takes its prompt as `-p`'s flag value, the
-    strictly-last two argv elements, never on stdin.
 - **code-agent:** ONLY `src/**` + `Cargo.toml`. **test-agent:** ONLY `tests/**`.
 - Done: `cargo build -p wasl-mcp` + the `wasl-mcpd` bin compile; the async `handle`/`resolve_and_dispatch`
   heart is integration-tested green over **loopback A2A** (real a2a-server + real AdapterExecutor + fake
   adapter — NOT fakes-only); the config module (`from_toml_str`/`apply_env`/`resolve_path`/`load_with`/`load`/
-  `registry_from_peers`/`build_adapter`, now incl. `[gate]` and, since W7b/W8′b, `AdapterKind::Codex`/
-  `AdapterKind::Antigravity`/`NodeAdapter`) is black-box tested
-  (`tests/config_{pure,resolve,wiring,bin,codex,antigravity}.rs`); the real three-tier gate (`gating.rs`'s pure
+  `registry_from_peers`/`build_adapter`, now incl. `[gate]` and, since W7b, `AdapterKind::Codex`/
+  `NodeAdapter`) is black-box tested
+  (`tests/config_{pure,resolve,wiring,bin,codex}.rs`); the real three-tier gate (`gating.rs`'s pure
   seams + operator-decided/mirrored-elicitation/prepare-commit end to end over real loopback HTTP+SSE + rmcp
-  duplex) is tested in `tests/gating_{unit,loopback}.rs`; `cargo test -p wasl-mcp` is 102 tests green (52
-  pre-W4 + 34 W4: 20 `gating_unit` + 14 `gating_loopback`, + 7 W7b `config_codex`, + 9 W8′b
-  `config_antigravity`); `clippy -p wasl-mcp --all-targets -D warnings` + fmt clean; `cargo test --workspace`
+  duplex) is tested in `tests/gating_{unit,loopback}.rs`; `cargo test -p wasl-mcp` is 93 tests green (52
+  pre-W4 + 34 W4: 20 `gating_unit` + 14 `gating_loopback`, + 7 W7b `config_codex`); `clippy -p wasl-mcp --all-targets -D warnings` + fmt clean; `cargo test --workspace`
   green; no unsafe; no leftover `unimplemented!`/`todo!`; the gate is never bypassed (non-Approved never
   dispatches, and Tier-2 audits nothing until `commit`).
 - **Testability honesty:** ✅ the async send heart end-to-end over loopback A2A (gate→audit→A2A→receive→reply)
@@ -231,18 +191,6 @@ in one pinned arm by W4 §7), `../../docs/specs/node-config.md` (W2 — node con
   process). No new dead code, no `#[allow]`-for-coverage. Whole-package total (`--summary-only`) ticks up
   correspondingly to **86.57% lines** / 82.98% regions (from 86.37%/82.86%) — `lib.rs`'s residual 20.33%
   region / 19.64% line untested-IO-shell status is unchanged (the doc-comment edit there carries no new
-  executable code), and no other file's numbers moved.
-- **Coverage honesty (verified, W8′b):** `src/config.rs`'s `AdapterKind::Antigravity` arm, `NodeAdapter`'s new
-  `Antigravity` match arm (both the `AgentAdapter::deliver` delegation and `build_adapter`'s constructor arm),
-  are genuinely **100%** LINE/FUNCTION/REGION, together with the unchanged `gating.rs`:
-  `cargo llvm-cov -p wasl-mcp --ignore-filename-regex 'lib\.rs|server\.rs|handle\.rs|main\.rs' --fail-under-lines 100 --fail-under-regions 100`
-  still exits 0, now 320/320 regions, 26/26 functions, 274/274 lines across the two files (up from 312/26/264
-  pre-W8′b — the delta is exactly the new `NodeAdapter::Antigravity` arms, exercised by
-  `tests/config_antigravity.rs`'s `build_adapter_selects_the_antigravity_variant_for_adapter_kind_antigravity`
-  and the real loopback receive test, which drives `NodeAdapter::Antigravity`'s `deliver` delegation through a
-  real child process). No new dead code, no `#[allow]`-for-coverage. Whole-package total (`--summary-only`)
-  ticks up correspondingly to **86.73% lines** / 83.10% regions (from 86.57%/82.98%) — `lib.rs`'s residual
-  20.33% region / 19.64% line untested-IO-shell status is unchanged (the doc-comment edit there carries no new
   executable code), and no other file's numbers moved.
 - **M1 (`src/server.rs`, `Cargo.toml`, security hardening):** `RandomTokenIds` — the Tier-2 approval-token
   generator — now draws its 128 bits from the **OS CSPRNG via `getrandom`** (`getrandom::getrandom(&mut [u8;8])`

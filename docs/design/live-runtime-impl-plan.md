@@ -95,7 +95,7 @@ context retention without Wasl EOF-ing stdin. **Gate:** ≥1 CLI passes → proc
 feeding the capability matrix. Not verifiable in this sandbox — needs the user's box.
 
 ### Phase 0 — Full feasibility spikes + capability matrix — M — riskiest: everything
-Per CLI (claude/codex/agy/opencode): P=same PID? R=ready signal? B=turn boundary? N=native id?
+Per CLI (claude/codex/opencode): P=same PID? R=ready signal? B=turn boundary? N=native id?
 I=interruptible? A=attachable? **Also spike the control-plane substrate** (opencode `serve` HTTP vs `acp`
 stdio vs `serve`+`--attach` are DISTINCT substrates — evaluate separately, pick one primary; council). Also
 spike **native-gate behavior** (does a gate appear in headless/served mode; can it be resolved out-of-band?).
@@ -201,7 +201,7 @@ CLI-ism (council #3).
 (Per CLI P/R/B/N/I/A as v1.) Additions from council: evaluate opencode `serve` (HTTP) vs `acp` (stdio) vs
 `serve`+`--attach` as **distinct** substrates and pick ONE primary; spike native-gate appearance/resolution;
 spike control-plane feasibility (can a separate process observe+inject). Env reality: needs the user's box;
-opencode OOMs <2GB + MCP-catalog bloats context (isolated config); agy may be absent.
+opencode OOMs <2GB + MCP-catalog bloats context (isolated config).
 
 ## 4. Decisions to LOCK in Phase 1 (updated with council fixes)
 1. **Event journal:** bounded ring + `snapshot()` returning `(state, last_seq)` + **atomic replay-to-live
@@ -268,7 +268,7 @@ per-target scale envelope (many targets + slow observers stress test); whether `
   no resolution; full TurnEvent model + state matrix + all-8-caps tests missing; causation/certainty/audit
   must cross A2A; process supervision absent; in-memory-only contradicts the recovery contract; bound all
   state. Strengths real; do not start Phase 2 yet.
-- **gemini (systems):** SHAPE IS RIGHT, sequencing inverted + a premise contradiction. Must resolve: own-vs-
+- **systems reviewer:** SHAPE IS RIGHT, sequencing inverted + a premise contradiction. Must resolve: own-vs-
   attach (§0.1, human), spike-before-build (§0.2), genericity probe is on the easy axis (add bidirectional
   fake), observability reinvented (wire into Sink). First subsystem outside "audit = durable truth" — say so.
 

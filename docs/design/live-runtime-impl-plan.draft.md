@@ -35,7 +35,7 @@ correct generic scheduler with an honest empty set of live targets" — still sh
   transcript). Plus a written go/downgrade/kill decision for Phase 4 (claude) & 5 (opencode).
 - Not test-first (exploratory); dev-manager audits matrix honesty.
 - NOT verifiable in this sandbox — needs the user's box (CLIs installed, isolated/big-context configs;
-  opencode OOMs <2GB & MCP-catalog bloats context; agy may be absent → "not installed" is a valid cell).
+  opencode OOMs <2GB & MCP-catalog bloats context).
 
 ### Phase 1 — Contracts + spec — M — riskiest: over/under-specifying the event journal
 - Deliverables: `docs/specs/runtime.md`, `runtime-protocol.md`, `session.md` (adapter-spec template);
@@ -68,7 +68,7 @@ correct generic scheduler with an honest empty set of live targets" — still sh
   and is NOT asserted for persistent_process; differential equivalence vs calling deliver directly;
   ephemeral submit_turn only ever Started. The conformance suite is authored HERE and reused in 4/5.
 - DoD: conformance green; differential-equivalence green; runtime="ephemeral" default reproduces today
-  exactly (config_codex/antigravity loopback-receive proof); 100% on new R1 code.
+  exactly (config_codex loopback-receive proof); 100% on new R1 code.
 
 ### Phase 4 — First managed protocol: ClaudeStreamProtocol — L — riskiest: Phase-0 substrate reality
 - Deliverables (R2 src): ClaudeStreamProtocol + transport mapping stream-json → ProtocolEvent; spawn/resume;
@@ -103,8 +103,6 @@ correct generic scheduler with an honest empty set of live targets" — still sh
   stdio: session/new, session/prompt, notifications for boundaries + permission→NativeGateRequested); C
   `serve` + `--attach <url>` (second observer = attachable). `run` is NOT the substrate (self-terminates).
 - codex: any long-lived mode beyond exec/exec resume? Expected honest: persistent_conversation-only.
-- agy: `which agy` first (may be absent → "not installed"); else any conversation-server mode. Expected:
-  persistent_conversation-only.
 - Artifact: capability-matrix.md, no `candidate` remaining, each true → linked transcript; R/B/N/I/A signals
   become the ProtocolEvent mapping-spec input for 4/5.
 
@@ -167,7 +165,7 @@ correct generic scheduler with an honest empty set of live targets" — still sh
    shippable ephemeral-through-new-seam milestone if 4–5 slip. (Strict 2→3 is defensible but delays real-code
    validation.)
 3. Phase 5 ACP is the right generality probe; no cheaper one is meaningful (two self-designed fakes prove
-   nothing). But gate it on Phase-0 opencode verdict; fallback probe = codex/agy as resume-based managed
+   nothing). But gate it on Phase-0 opencode verdict; fallback probe = codex as resume-based managed
    (persistent_process:false) — a second structurally-different PROVIDER even if not a second live protocol.
 Smaller: §4 in-memory-only must be stated plainly; RuntimeError + BusyPolicy defaults underspecified;
 transcript projection must stay a bounded summary (guard against over-engineering).

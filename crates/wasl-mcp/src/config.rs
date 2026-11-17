@@ -110,13 +110,12 @@ pub enum RuntimeKind {
 }
 
 /// The adapter selector. W7 (`docs/specs/adapter-codex.md`) adds `Codex`
-/// alongside the original `Claude`; W8′b (`docs/specs/adapter-antigravity.md`)
-/// adds `Antigravity`; W9 (`docs/specs/adapter-opencode.md`) adds `Opencode`.
+/// alongside the original `Claude`; W9 (`docs/specs/adapter-opencode.md`) adds
+/// `Opencode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdapterKind {
     Claude,
     Codex,
-    Antigravity,
     Opencode,
 }
 
@@ -431,7 +430,6 @@ impl Config {
         let kind = match raw.adapter.kind.as_str() {
             "claude" => AdapterKind::Claude,
             "codex" => AdapterKind::Codex,
-            "antigravity" => AdapterKind::Antigravity,
             "opencode" => AdapterKind::Opencode,
             other => return Err(ConfigError::UnknownAdapterKind(other.to_string())),
         };
@@ -676,16 +674,12 @@ pub fn peer_names(peers: &[PeerEntry]) -> std::collections::BTreeMap<String, Pee
 
 /// The receive-side adapter selected by config: an exhaustive-match
 /// delegating enum, NOT `Box<dyn AgentAdapter>` — a trait object would erase
-/// the compile-time forcing function that made adding `Codex`/`Antigravity`/`Opencode`
-/// here require touching this match. See `docs/specs/adapter-codex.md`'s,
-/// `docs/specs/adapter-antigravity.md`'s, and `docs/specs/adapter-opencode.md`'s
+/// the compile-time forcing function that made adding `Codex`/`Opencode`
+/// here require touching this match. See `docs/specs/adapter-codex.md`'s and `docs/specs/adapter-opencode.md`'s
 /// "Node-config integration" sections (the authoritative shape for this type).
 pub enum NodeAdapter {
     Claude(wasl_adapter_claude::ClaudeAdapter<wasl_adapter_claude::ProcessCliInvoker>),
     Codex(wasl_adapter_codex::CodexAdapter<wasl_adapter_codex::ProcessCliInvoker>),
-    Antigravity(
-        wasl_adapter_antigravity::AntigravityAdapter<wasl_adapter_antigravity::ProcessCliInvoker>,
-    ),
     Opencode(wasl_adapter_opencode::OpencodeAdapter<wasl_adapter_opencode::ProcessCliInvoker>),
 }
 
@@ -698,15 +692,14 @@ impl wasl_adapter::AgentAdapter for NodeAdapter {
         match self {
             NodeAdapter::Claude(inner) => wasl_adapter::AgentAdapter::deliver(inner, d).await,
             NodeAdapter::Codex(inner) => wasl_adapter::AgentAdapter::deliver(inner, d).await,
-            NodeAdapter::Antigravity(inner) => wasl_adapter::AgentAdapter::deliver(inner, d).await,
             NodeAdapter::Opencode(inner) => wasl_adapter::AgentAdapter::deliver(inner, d).await,
         }
     }
 }
 
 /// Construct the receive-side adapter selected by the config. Written as an
-/// exhaustive match on `AdapterKind` so adding a kind (W7 codex, W8′b
-/// antigravity, W9 opencode) forces a decision here.
+/// exhaustive match on `AdapterKind` so adding a kind (W7 codex, W9
+/// opencode) forces a decision here.
 pub fn build_adapter(cfg: &AdapterConfig) -> NodeAdapter {
     let adapter_bin = cfg.bin.clone();
     match cfg.kind {
@@ -727,17 +720,6 @@ pub fn build_adapter(cfg: &AdapterConfig) -> NodeAdapter {
                 wasl_adapter_codex::ProcessCliInvoker,
                 bin.clone(),
             )),
-        },
-        AdapterKind::Antigravity => match &adapter_bin {
-            None => NodeAdapter::Antigravity(wasl_adapter_antigravity::AntigravityAdapter::new(
-                wasl_adapter_antigravity::ProcessCliInvoker,
-            )),
-            Some(bin) => {
-                NodeAdapter::Antigravity(wasl_adapter_antigravity::AntigravityAdapter::with_bin(
-                    wasl_adapter_antigravity::ProcessCliInvoker,
-                    bin.clone(),
-                ))
-            }
         },
         AdapterKind::Opencode => match &adapter_bin {
             None => NodeAdapter::Opencode(wasl_adapter_opencode::OpencodeAdapter::new(
