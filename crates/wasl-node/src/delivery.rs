@@ -151,7 +151,8 @@ impl Node {
                 .then(|| finished_audit(&r.p.task, &req.state))
         };
         if let Some(a) = audit {
-            self.record_audit(a).await;
+            // Logged by `record_audit`; the receiver's report is applied regardless.
+            let _ = self.record_audit(a).await;
         }
         let ack = {
             let mut st = self.lock();

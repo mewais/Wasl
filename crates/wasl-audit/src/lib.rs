@@ -2,8 +2,10 @@
 //! policy change and outcome, appended as one JSON line to a file.
 //!
 //! [`AuditLog::open`] starts a writer task fed through a bounded queue; [`AuditLog::record`]
-//! resolves once its entry is written (callers never hold a lock across it).
-//! [`AuditLog::flush`] resolves once everything recorded before it is on disk (tests, shutdown).
+//! resolves once its entry is durable — written, flushed and synced — so a caller that records
+//! a decision before applying it never acts on a decision the trail could lose (callers never
+//! hold a lock across it). Entries queued together share one sync.
+//! [`AuditLog::flush`] resolves once everything recorded before it is on disk.
 //! [`read_entries`] reads a trail back.
 
 #![forbid(unsafe_code)]
@@ -75,7 +77,7 @@ impl std::fmt::Display for AuditError {
 impl std::error::Error for AuditError {}
 
 enum Msg {
-    Entry(Box<AuditEntry>, oneshot::Sender<()>),
+    Entry(Box<AuditEntry>, oneshot::Sender<Result<(), AuditError>>),
     Flush(oneshot::Sender<Result<(), AuditError>>),
 }
 
@@ -110,16 +112,14 @@ impl AuditLog {
         &self.path
     }
 
-    /// Append one entry; resolves once it is written (not yet synced; see
-    /// [`AuditLog::flush`]).
-    pub async fn record(&self, entry: AuditEntry) {
+    /// Append one entry; resolves once it is durable (written, flushed and synced), or with
+    /// the error that kept it from being so.
+    pub async fn record(&self, entry: AuditEntry) -> Result<(), AuditError> {
         let (tx, rx) = oneshot::channel();
         if self.tx.send(Msg::Entry(Box::new(entry), tx)).await.is_err() {
-            tracing::error!(path = %self.path.display(), "audit writer is gone; entry lost");
-            return;
+            return Err(AuditError("writer is gone".into()));
         }
-        // The writer always answers unless it is gone (already logged there).
-        let _ = rx.await;
+        rx.await.map_err(|_| AuditError("writer is gone".into()))?
     }
 
     /// Resolve once every entry recorded before this call is written (and synced).
@@ -134,36 +134,75 @@ impl AuditLog {
 }
 
 async fn writer(mut file: tokio::fs::File, path: PathBuf, mut rx: mpsc::Receiver<Msg>) {
-    let mut last_error: Option<AuditError> = None;
-    while let Some(msg) = rx.recv().await {
-        match msg {
-            Msg::Entry(e, done) => {
-                let mut line = match serde_json::to_vec(&e) {
-                    Ok(l) => l,
-                    Err(err) => {
-                        tracing::error!(error = %err, "cannot encode an audit entry");
-                        continue;
+    while let Some(first) = rx.recv().await {
+        // Everything queued right now is written and synced together.
+        let mut batch = vec![first];
+        while let Ok(m) = rx.try_recv() {
+            batch.push(m);
+        }
+        let mut waiters = Vec::with_capacity(batch.len());
+        let mut failed: Option<AuditError> = None;
+        for msg in batch {
+            match msg {
+                Msg::Entry(e, done) => {
+                    let r = match serde_json::to_vec(&e) {
+                        Ok(mut line) => {
+                            line.push(b'\n');
+                            match &failed {
+                                Some(f) => Err(f.clone()),
+                                None => file
+                                    .write_all(&line)
+                                    .await
+                                    .map_err(|err| AuditError(format!("append: {err}"))),
+                            }
+                        }
+                        Err(err) => Err(AuditError(format!("encode: {err}"))),
+                    };
+                    if let Err(err) = &r {
+                        failed.get_or_insert_with(|| err.clone());
                     }
-                };
-                line.push(b'\n');
-                if let Err(err) = file.write_all(&line).await {
-                    tracing::error!(path = %path.display(), error = %err, "cannot append to the audit trail");
-                    last_error = Some(AuditError(err.to_string()));
+                    waiters.push(Waiter::Entry(done, r));
                 }
-                let _ = done.send(()); // the recorder may have given up
+                Msg::Flush(reply) => waiters.push(Waiter::Flush(reply)),
             }
-            Msg::Flush(reply) => {
-                let r = match last_error.take() {
-                    Some(e) => Err(e),
-                    None => file
-                        .sync_data()
-                        .await
-                        .map_err(|e| AuditError(e.to_string())),
-                };
-                let _ = reply.send(r); // the requester may have given up
+        }
+        // tokio's `File` hands writes to a blocking thread: `flush` waits for them to reach the
+        // OS, `sync_data` for the OS to reach the disk.
+        let synced = match file.flush().await {
+            Ok(()) => file.sync_data().await,
+            Err(e) => Err(e),
+        }
+        .map_err(|e| AuditError(format!("sync: {e}")));
+        if let Err(e) = &synced {
+            tracing::error!(path = %path.display(), error = %e, "cannot sync the audit trail");
+        }
+        for w in waiters {
+            match w {
+                Waiter::Entry(done, r) => {
+                    if let Err(e) = &r {
+                        tracing::error!(path = %path.display(), error = %e, "audit entry lost");
+                    }
+                    let r = r.and(synced.clone());
+                    let _ = done.send(r); // the recorder may have given up
+                }
+                Waiter::Flush(reply) => {
+                    let r = match &failed {
+                        Some(f) => Err(f.clone()),
+                        None => synced.clone(),
+                    };
+                    let _ = reply.send(r); // the requester may have given up
+                }
             }
         }
     }
+}
+
+enum Waiter {
+    Entry(
+        oneshot::Sender<Result<(), AuditError>>,
+        Result<(), AuditError>,
+    ),
+    Flush(oneshot::Sender<Result<(), AuditError>>),
 }
 
 /// Read a trail back (blank lines skipped).
@@ -197,9 +236,19 @@ mod tests {
                 by: "gate".into(),
             },
         };
-        log.record(e.clone()).await;
+        // Durable when `record` returns: readable through another handle at once.
+        log.record(e.clone()).await.unwrap();
+        assert_eq!(read_entries(&path).await.unwrap(), vec![e.clone()]);
+        for i in 0..20 {
+            log.record(AuditEntry {
+                t_ms: i,
+                ..e.clone()
+            })
+            .await
+            .unwrap();
+        }
+        assert_eq!(read_entries(&path).await.unwrap().len(), 21);
         log.flush().await.unwrap();
-        assert_eq!(read_entries(&path).await.unwrap(), vec![e]);
         let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
     }
 

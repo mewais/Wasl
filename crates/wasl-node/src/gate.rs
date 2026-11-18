@@ -62,7 +62,7 @@ impl Node {
                         ..
                     } if *request_id == gate.request_id => return Answer::AsQuestion,
                     SessionEventKind::Agent {
-                        event: AgentEvent::GateResolved { request_id },
+                        event: AgentEvent::GateResolved { request_id, .. },
                     } if *request_id == gate.request_id => return Answer::Gone,
                     SessionEventKind::Exited { .. } | SessionEventKind::Lost { .. } => {
                         return Answer::SessionEnded(

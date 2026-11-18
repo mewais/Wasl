@@ -336,8 +336,13 @@ impl Node {
         AgentId::new(self.inner.cfg.host_id.clone(), session)
     }
 
-    pub(crate) async fn record_audit(&self, entry: AuditEntry) {
-        self.inner.audit.record(entry).await;
+    /// Append to the audit trail; resolves once the entry is durable. Callers record an entry
+    /// *before* the state change it describes becomes visible (durability first).
+    pub(crate) async fn record_audit(&self, entry: AuditEntry) -> Result<(), RpcError> {
+        self.inner.audit.record(entry).await.map_err(|e| {
+            tracing::error!(error = %e, "audit entry not recorded");
+            err(codes::IO, e.to_string())
+        })
     }
 
     // ── journal helpers (call under the lock) ───────────────────────────────
@@ -569,8 +574,9 @@ impl Node {
         let mut acks = Vec::new();
         let mut gates = Vec::new();
         let mut audits = Vec::new();
+        let mut created = Vec::new();
         {
-            let mut st = self.lock();
+            let st = self.lock();
             let edges = st.edges_from(&from);
             let (parent, mut chain) = match st.running_inbound(&req.from) {
                 Some(r) => (Some(r.p.task.id.clone()), r.p.task.chain.clone()),
@@ -753,38 +759,43 @@ impl Node {
                 ) {
                     gates.push(task.id.clone());
                 }
-                let id = task.id.clone();
-                st.out.insert(
-                    id.clone(),
-                    OutRec {
-                        watch: watch::channel(state.clone()).0,
-                        p: OutPersist {
-                            task,
-                            state,
-                            updated_ms: now,
-                            to_name,
-                            delivered: false,
-                            gate: None,
-                            cancel: None,
-                        },
-                        rev: 0,
+                let rec = OutRec {
+                    watch: watch::channel(state.clone()).0,
+                    p: OutPersist {
+                        task,
+                        state,
+                        updated_ms: now,
+                        to_name,
+                        delivered: false,
+                        gate: None,
+                        cancel: None,
                     },
-                );
+                    rev: 0,
+                };
+                results.push(DelegateOutcome {
+                    to: target.clone(),
+                    task: Some(rec.brief()),
+                    error: None,
+                });
+                created.push(rec);
+            }
+        }
+        // Durability first: the trail holds the requests (and the policy's decisions) before
+        // any task exists to be delivered.
+        for a in audits {
+            // Logged by `record_audit`.
+            let _ = self.record_audit(a).await;
+        }
+        {
+            let mut st = self.lock();
+            for rec in created {
+                let id = rec.p.task.id.clone();
+                st.out.insert(id.clone(), rec);
                 acks.push(self.persist_out(&mut st, &id));
-                if let Some(r) = st.out.get(&id) {
-                    results.push(DelegateOutcome {
-                        to: target.clone(),
-                        task: Some(r.brief()),
-                        error: None,
-                    });
-                }
             }
         }
         for a in acks.into_iter().flatten() {
             durable(a).await.map_err(journal_err)?;
-        }
-        for a in audits {
-            self.record_audit(a).await;
         }
         self.inner.deadlines.notify_one();
         self.inner.kick.notify_one();
@@ -893,31 +904,20 @@ impl Node {
     }
 
     /// Apply a handoff decision (from the gate, an elicitation, or a supervisor).
+    ///
+    /// Durability first: the decision is in the audit trail before it takes effect. If the
+    /// trail cannot be written the decision is refused. A task settled by someone else while
+    /// the entry was being written (cancelled, withdrawn, decided) keeps that outcome.
     pub async fn decide(
         &self,
         id: &TaskId,
         decision: HandoffDecision,
         by: &str,
     ) -> Result<TaskBrief, RpcError> {
-        let mut acks = Vec::new();
-        let (brief, gate_to_withdraw, audits) = {
-            let mut st = self.lock();
-            let Some(r) = st.out.get(id) else {
-                return Err(err(codes::UNKNOWN_TASK, format!("no task {id}")));
-            };
-            if !matches!(r.p.state, TaskState::PendingApproval { .. }) {
-                return Err(err(
-                    codes::INVALID_STATE,
-                    format!("task {id} is {}, not awaiting approval", r.p.state.name()),
-                ));
-            }
-            let task = r.p.task.clone();
-            let to_label = if r.p.to_name.is_empty() {
-                task.to.to_string()
-            } else {
-                r.p.to_name.clone()
-            };
-            let gate = r.p.gate.clone();
+        let audits = {
+            let st = self.lock();
+            let r = Self::awaiting_approval(&st, id)?;
+            let task = &r.p.task;
             let mut audits = vec![AuditEntry {
                 t_ms: now_ms(),
                 workstream: task.workstream.clone(),
@@ -929,17 +929,41 @@ impl Node {
                     by: by.into(),
                 },
             }];
-            let new_state = match &decision {
-                HandoffDecision::AllowOnce | HandoffDecision::AlwaysAllow => TaskState::Queued,
-                HandoffDecision::Deny { reason } => TaskState::Denied {
-                    reason: match reason {
-                        Some(r) if !r.is_empty() => {
-                            format!("the human denied the handoff to {to_label}: {r}")
-                        }
-                        _ => format!("the human denied the handoff to {to_label}"),
+            let edge_changes = decision == HandoffDecision::AlwaysAllow
+                && st.topo.get(&task.workstream).is_some_and(|t| {
+                    t.edges
+                        .iter()
+                        .any(|e| e.from == task.from && e.to == task.to)
+                });
+            if edge_changes {
+                audits.push(AuditEntry {
+                    t_ms: now_ms(),
+                    workstream: task.workstream.clone(),
+                    actor: task.from.clone(),
+                    target: task.to.clone(),
+                    task: Some(task.id.clone()),
+                    kind: AuditKind::PolicyChanged {
+                        policy: EdgePolicy::AlwaysAllow,
+                        cause: format!("always allow chosen ({by})"),
                     },
-                },
-            };
+                });
+            }
+            let new_state = decided_state(&decision, &r.p);
+            if new_state.is_terminal() {
+                audits.push(finished_audit(task, &new_state));
+            }
+            audits
+        };
+        for a in audits {
+            self.record_audit(a).await?;
+        }
+        let mut acks = Vec::new();
+        let (brief, gate_to_withdraw) = {
+            let mut st = self.lock();
+            let r = Self::awaiting_approval(&st, id)?;
+            let task = r.p.task.clone();
+            let gate = r.p.gate.clone();
+            let new_state = decided_state(&decision, &r.p);
             if decision == HandoffDecision::AlwaysAllow {
                 if let Some(t) = st.topo.get_mut(&task.workstream) {
                     let mut changed = false;
@@ -974,40 +998,23 @@ impl Node {
                             now_ms(),
                             Rec::Edge(Box::new(ev)),
                         )));
-                        audits.push(AuditEntry {
-                            t_ms: now_ms(),
-                            workstream: task.workstream.clone(),
-                            actor: task.from.clone(),
-                            target: task.to.clone(),
-                            task: Some(task.id.clone()),
-                            kind: AuditKind::PolicyChanged {
-                                policy: EdgePolicy::AlwaysAllow,
-                                cause: format!("always allow chosen ({by})"),
-                            },
-                        });
                     }
                 }
             }
             if let Some(r) = st.out.get_mut(id) {
-                r.p.state = new_state.clone();
+                r.p.state = new_state;
             }
             acks.push(self.persist_out(&mut st, id));
-            if new_state.is_terminal() {
-                audits.push(finished_audit(&task, &new_state));
-            }
             let brief = st.out.get(id).map(OutRec::brief);
             // A decision that did not come through the gate takes the gate down.
             let withdraw = match (by, gate) {
                 ("gate", _) | (_, None) => None,
                 (_, Some(g)) => SessionId::parse(&task.from.session).map(|s| (s, g.request_id)),
             };
-            (brief, withdraw, audits)
+            (brief, withdraw)
         };
         for a in acks {
             self.settle(a).await;
-        }
-        for a in audits {
-            self.record_audit(a).await;
         }
         if let Some((sid, rid)) = gate_to_withdraw {
             self.withdraw_gate(&sid, &rid).await;
@@ -1016,20 +1023,42 @@ impl Node {
         brief.ok_or_else(|| err(codes::UNKNOWN_TASK, format!("no task {id}")))
     }
 
+    fn awaiting_approval<'a>(st: &'a State, id: &TaskId) -> Result<&'a OutRec, RpcError> {
+        let Some(r) = st.out.get(id) else {
+            return Err(err(codes::UNKNOWN_TASK, format!("no task {id}")));
+        };
+        if !matches!(r.p.state, TaskState::PendingApproval { .. }) {
+            return Err(err(
+                codes::INVALID_STATE,
+                format!("task {id} is {}, not awaiting approval", r.p.state.name()),
+            ));
+        }
+        Ok(r)
+    }
+
     /// Move an outbound task to a terminal state (no-op if it already is terminal).
     pub(crate) async fn finish_out(&self, id: &TaskId, state: TaskState) {
-        let (ack, audit) = {
+        // Audited before it becomes visible (durability first).
+        let audit = {
+            let st = self.lock();
+            let Some(r) = st.out.get(id) else { return };
+            if r.p.state.is_terminal() {
+                return;
+            }
+            finished_audit(&r.p.task, &state)
+        };
+        // Logged by `record_audit`; the outcome is applied regardless (it already happened).
+        let _ = self.record_audit(audit).await;
+        let ack = {
             let mut st = self.lock();
             let Some(r) = st.out.get_mut(id) else { return };
             if r.p.state.is_terminal() {
                 return;
             }
-            r.p.state = state.clone();
-            let audit = finished_audit(&r.p.task, &state);
-            (self.persist_out(&mut st, id), audit)
+            r.p.state = state;
+            self.persist_out(&mut st, id)
         };
         self.settle(ack).await;
-        self.record_audit(audit).await;
     }
 
     // ── status, wait, cancel ────────────────────────────────────────────────
@@ -1106,7 +1135,27 @@ impl Node {
         reason: String,
         expired: bool,
     ) -> Result<(), RpcError> {
-        let (ack, gate, audit) = {
+        let new_state = if expired {
+            TaskState::Expired
+        } else {
+            TaskState::Cancelled {
+                reason: reason.clone(),
+            }
+        };
+        // Audited before it becomes visible (durability first).
+        let audit = {
+            let st = self.lock();
+            let Some(r) = st.out.get(id) else {
+                return Err(err(codes::UNKNOWN_TASK, format!("no task {id}")));
+            };
+            if r.p.state.is_terminal() {
+                return Ok(());
+            }
+            finished_audit(&r.p.task, &new_state)
+        };
+        // Logged by `record_audit`; a cancellation is applied regardless.
+        let _ = self.record_audit(audit).await;
+        let (ack, gate) = {
             let mut st = self.lock();
             let Some(r) = st.out.get_mut(id) else {
                 return Err(err(codes::UNKNOWN_TASK, format!("no task {id}")));
@@ -1123,20 +1172,14 @@ impl Node {
             if r.p.delivered {
                 r.p.cancel = Some(CancelRemoteRequest {
                     id: id.clone(),
-                    reason: reason.clone(),
+                    reason,
                     expired,
                 });
             }
-            r.p.state = if expired {
-                TaskState::Expired
-            } else {
-                TaskState::Cancelled { reason }
-            };
-            let audit = finished_audit(&r.p.task, &r.p.state);
-            (self.persist_out(&mut st, id), gate, audit)
+            r.p.state = new_state;
+            (self.persist_out(&mut st, id), gate)
         };
         self.settle(ack).await;
-        self.record_audit(audit).await;
         if let Some((sid, rid)) = gate {
             self.withdraw_gate(&sid, &rid).await;
         }
@@ -1159,6 +1202,26 @@ impl Node {
             ctl_codes::HOST_UNKNOWN,
             format!("task addressed to host {host}, not this one"),
         )
+    }
+}
+
+/// The state a handoff decision moves a pending task to.
+fn decided_state(decision: &HandoffDecision, p: &crate::state::OutPersist) -> TaskState {
+    let to_label = if p.to_name.is_empty() {
+        p.task.to.to_string()
+    } else {
+        p.to_name.clone()
+    };
+    match decision {
+        HandoffDecision::AllowOnce | HandoffDecision::AlwaysAllow => TaskState::Queued,
+        HandoffDecision::Deny { reason } => TaskState::Denied {
+            reason: match reason {
+                Some(r) if !r.is_empty() => {
+                    format!("the human denied the handoff to {to_label}: {r}")
+                }
+                _ => format!("the human denied the handoff to {to_label}"),
+            },
+        },
     }
 }
 
