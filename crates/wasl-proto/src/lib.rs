@@ -91,6 +91,8 @@ pub mod codes {
     pub const BUDGET: &str = "budget_exhausted";
     /// The edge policy is `deny`.
     pub const DENIED: &str = "denied";
+    /// The workstream is paused: no new delegations until it is resumed.
+    pub const PAUSED: &str = "paused";
     /// The request is not valid in the task's current state.
     pub const INVALID_STATE: &str = "invalid_state";
     /// A topology with an older version than the one in force.
@@ -103,6 +105,7 @@ pub mod codes {
 /// A peer is a *session* on a host: `AgentId` ↔ `(host_id, session_id)`. Serialized as the
 /// string `"<host>/<session>"` (split at the last `/`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(type = "string"))]
 pub struct AgentId {
     pub host: String,
     pub session: String,
@@ -166,6 +169,7 @@ impl<'de> Deserialize<'de> for AgentId {
 
 /// Live status of a peer, derived from its session's phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum PeerStatus {
     Starting,
@@ -183,6 +187,7 @@ pub enum PeerStatus {
 
 /// What a supervisor tells the nodes about one agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PeerCard {
     pub agent: AgentId,
     /// Display name (unique within the workstream; agents may address peers by it).
@@ -202,6 +207,7 @@ pub struct PeerCard {
 
 /// Policy of one directed edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum EdgePolicy {
     /// Every delegation raises a handoff gate on the sending session.
@@ -213,6 +219,7 @@ pub enum EdgePolicy {
 
 /// A directed edge `from → to`: `from` may delegate to `to`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Edge {
     pub from: AgentId,
     pub to: AgentId,
@@ -222,6 +229,7 @@ pub struct Edge {
 
 /// Per-workstream safety limits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Limits {
     /// Maximum delegation depth (a task delegated by an agent that is itself working on a task
     /// of hop `n` has hop `n + 1`; the first delegation has hop 1).
@@ -256,8 +264,10 @@ impl Default for Limits {
 
 /// The graph of one workstream, pushed by a supervisor (`wasl.topology.set`). Idempotent and
 /// versioned: a push with an older version than the one in force is refused, the same version
-/// is a no-op. Empty `peers` and `edges` remove the workstream.
+/// is a no-op. Empty `peers` and `edges` remove the workstream. While `paused`, new delegations
+/// in the workstream are rejected ([`codes::PAUSED`]); tasks already created carry on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Topology {
     pub workstream: String,
     pub version: u64,
@@ -267,10 +277,13 @@ pub struct Topology {
     pub edges: Vec<Edge>,
     #[serde(default)]
     pub limits: Limits,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub paused: bool,
 }
 
 /// Result of [`methods::TOPOLOGY_SET`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TopologyApplied {
     pub workstream: String,
     pub version: u64,
@@ -280,6 +293,7 @@ pub struct TopologyApplied {
 
 /// Result of [`methods::TOPOLOGY_GET`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TopologyList {
     pub workstreams: Vec<Topology>,
 }
@@ -288,6 +302,7 @@ pub struct TopologyList {
 
 /// A task id (`t` + 16 lowercase base32 characters).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(transparent)]
 pub struct TaskId(pub String);
 
@@ -311,6 +326,7 @@ impl fmt::Display for TaskId {
 
 /// What the sender expects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum TaskMode {
     /// A question; the receiver should answer and not change anything.
@@ -333,6 +349,7 @@ impl TaskMode {
 
 /// One delegation. Immutable once created.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Task {
     pub id: TaskId,
     pub workstream: String,
@@ -357,6 +374,7 @@ pub struct Task {
 
 /// How a pending task awaits approval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalVia {
     /// A handoff gate on the sending session (answered by the supervisor / human).
@@ -368,6 +386,7 @@ pub enum ApprovalVia {
 
 /// What the receiver is doing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Progress {
     pub tool_calls: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -379,6 +398,7 @@ pub struct Progress {
 
 /// How the receiver's turn ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum ResultStatus {
     Success,
@@ -388,6 +408,7 @@ pub enum ResultStatus {
 
 /// A reference the receiver produced.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Artifact {
     pub name: String,
     pub uri: String,
@@ -395,6 +416,7 @@ pub struct Artifact {
 
 /// Structured result of a completed task.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TaskResult {
     pub status: ResultStatus,
     /// The receiver's final assistant message.
@@ -408,6 +430,7 @@ pub struct TaskResult {
 
 /// Task lifecycle. Terminal states are final.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum TaskState {
     /// Waiting for a handoff decision.
@@ -463,6 +486,7 @@ impl TaskState {
 
 /// A task with its current state (the payload of [`topics::TASKS`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TaskView {
     pub task: Task,
     pub state: TaskState,
@@ -471,6 +495,7 @@ pub struct TaskView {
 
 /// Which side of a task this node is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
     /// This node's session delegated it.
@@ -481,6 +506,7 @@ pub enum Side {
 
 /// Payload of [`topics::TASKS`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TaskEvent {
     pub side: Side,
     #[serde(flatten)]
@@ -489,6 +515,7 @@ pub struct TaskEvent {
 
 /// A compact task state for agents.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TaskBrief {
     pub id: TaskId,
     pub to: AgentId,
@@ -504,6 +531,7 @@ pub struct TaskBrief {
 
 /// A decision on a handoff.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(tag = "decision", rename_all = "snake_case")]
 pub enum HandoffDecision {
     AllowOnce,
@@ -555,10 +583,12 @@ pub fn handoff_request_id(task: &TaskId) -> String {
 
 /// Empty success.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct Ack {}
 
 /// [`methods::PEERS_LIST`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PeersRequest {
     /// The calling session (on this host).
     pub from: String,
@@ -566,6 +596,7 @@ pub struct PeersRequest {
 
 /// One peer reachable from the caller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PeerView {
     #[serde(flatten)]
     pub card: PeerCard,
@@ -575,12 +606,14 @@ pub struct PeerView {
 
 /// Result of [`methods::PEERS_LIST`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PeerList {
     pub peers: Vec<PeerView>,
 }
 
 /// [`methods::DELEGATE`]. Returns at once with one entry per target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DelegateRequest {
     /// The calling session (on this host).
     pub from: String,
@@ -596,6 +629,7 @@ pub struct DelegateRequest {
 
 /// One target of a delegation: the task, or why none was created.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DelegateOutcome {
     /// The reference as given.
     pub to: String,
@@ -607,6 +641,7 @@ pub struct DelegateOutcome {
 
 /// Why a delegation to one target was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DelegateError {
     /// One of [`codes`].
     pub code: String,
@@ -615,12 +650,14 @@ pub struct DelegateError {
 
 /// Result of [`methods::DELEGATE`] and [`methods::MESSAGE`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DelegateReply {
     pub results: Vec<DelegateOutcome>,
 }
 
 /// [`methods::MESSAGE`]: fire-and-forget text to peers (a task of mode `message`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct MessageRequest {
     pub from: String,
     pub to: Vec<String>,
@@ -629,6 +666,7 @@ pub struct MessageRequest {
 
 /// [`methods::TASK_STATUS`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TaskIds {
     pub ids: Vec<TaskId>,
 }
@@ -636,6 +674,7 @@ pub struct TaskIds {
 /// [`methods::TASK_WAIT`]: long-poll until every task (or, with `any`, at least one) is
 /// terminal, or `timeout_ms` passes; then the current states.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct WaitRequest {
     pub ids: Vec<TaskId>,
     pub timeout_ms: u64,
@@ -645,6 +684,7 @@ pub struct WaitRequest {
 
 /// Result of [`methods::TASK_STATUS`] / [`methods::TASK_WAIT`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TaskStates {
     pub tasks: Vec<TaskBrief>,
     /// Ids this node does not know.
@@ -657,6 +697,7 @@ pub struct TaskStates {
 
 /// [`methods::TASK_CANCEL`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CancelRequest {
     pub id: TaskId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -665,6 +706,7 @@ pub struct CancelRequest {
 
 /// [`methods::TASK_DECIDE`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DecideRequest {
     pub id: TaskId,
     pub decision: HandoffDecision,
@@ -672,6 +714,7 @@ pub struct DecideRequest {
 
 /// Result of [`methods::TASKS_LIST`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct TaskList {
     pub outbound: Vec<TaskView>,
     pub inbound: Vec<TaskView>,
@@ -679,6 +722,7 @@ pub struct TaskList {
 
 /// [`methods::NODE_DELIVER`]: the receiving host takes custody of a task (idempotent).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct DeliverRequest {
     pub task: Task,
 }
@@ -686,6 +730,7 @@ pub struct DeliverRequest {
 /// [`methods::NODE_UPDATE`]: the receiving host reports a state change (idempotent; terminal
 /// states are final).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct UpdateRequest {
     pub id: TaskId,
     pub state: TaskState,
@@ -693,6 +738,7 @@ pub struct UpdateRequest {
 
 /// [`methods::NODE_CANCEL`]: the sending host withdrew a task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct CancelRemoteRequest {
     pub id: TaskId,
     pub reason: String,
@@ -703,18 +749,21 @@ pub struct CancelRemoteRequest {
 
 /// [`methods::NODE_PEER_STATUS`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PeerStatusRequest {
     pub sessions: Vec<String>,
 }
 
 /// Result of [`methods::NODE_PEER_STATUS`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PeerStatusReply {
     pub statuses: Vec<(String, PeerStatus)>,
 }
 
 /// What changed an edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeChangeCause {
     /// A supervisor pushed a topology.
@@ -725,6 +774,7 @@ pub enum EdgeChangeCause {
 
 /// Payload of [`topics::EDGES`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct EdgeEvent {
     pub workstream: String,
     /// Topology version the change applies to.
@@ -797,5 +847,19 @@ mod tests {
         assert_eq!(serde_json::from_value::<TaskBrief>(v).unwrap(), b);
         let l: Limits = serde_json::from_str("{}").unwrap();
         assert_eq!(l, Limits::default());
+    }
+
+    #[cfg(feature = "ts")]
+    #[test]
+    fn typescript_declarations() {
+        use ts_rs::TS;
+        let cfg = ts_rs::Config::new().with_large_int("number");
+        assert_eq!(AgentId::inline(&cfg), "string");
+        let brief = TaskBrief::decl(&cfg);
+        assert!(brief.contains("pending_approval"), "{brief}");
+        let topo = Topology::decl(&cfg);
+        assert!(topo.contains("paused"), "{topo}");
+        TaskEvent::decl(&cfg);
+        EdgeEvent::decl(&cfg);
     }
 }

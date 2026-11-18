@@ -467,6 +467,7 @@ pub fn topology(
             })
             .collect(),
         limits,
+        paused: false,
     }
 }
 

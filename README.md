@@ -10,7 +10,7 @@ here describes how this repo implements it.
 
 | Crate | Role |
 |---|---|
-| `wasl-proto` | Wire types and `wasl.*` method/topic names: agents, peers, topology, tasks, results, handoff decisions. |
+| `wasl-proto` | Wire types and `wasl.*` method/topic names: agents, peers, topology (incl. `paused`), tasks, results, handoff decisions. `ts` feature → TypeScript (ts-rs). |
 | `wasl-node` | The embeddable node (one per host daemon): live topology, durable task engine, handoff gates, delivery, relay routing, safety limits, events. Serves `wasl.*` as a `wasit_control::Service`. |
 | `wasl-mcp` | The stdio MCP server an agent CLI launches (`list_peers`, `delegate`, `task_status`, `task_wait`, `task_cancel`, `consult`, `message`); a thin client of the local daemon. `mcp_server_config()` produces the `AgentConfig` item that injects it. |
 | `wasl-audit` | Audit trail (JSON lines). |

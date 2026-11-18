@@ -599,10 +599,10 @@ impl Node {
                     ));
                     continue;
                 };
-                let limits = st
+                let (limits, paused) = st
                     .topo
                     .get(&ws)
-                    .map(|t| t.limits.clone())
+                    .map(|t| (t.limits.clone(), t.paused))
                     .unwrap_or_default();
                 let to_name = st.name_of(&to);
                 let audit_reject = |code: &str, message: &str| AuditEntry {
@@ -616,6 +616,14 @@ impl Node {
                         message: message.into(),
                     },
                 };
+                if paused {
+                    let msg = format!(
+                        "rejected: workstream {ws} is paused by the human; no new delegations until it is resumed. Continue on your own or wait."
+                    );
+                    audits.push(audit_reject(codes::PAUSED, &msg));
+                    results.push(reject(codes::PAUSED, msg));
+                    continue;
+                }
                 if to == from || chain.contains(&to) {
                     let path: Vec<String> = chain
                         .iter()

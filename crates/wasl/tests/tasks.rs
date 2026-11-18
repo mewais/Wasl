@@ -350,3 +350,32 @@ async fn standalone_same_host_waits_for_elicitation_decision() {
     assert_eq!(d.state, TaskState::Queued);
     assert_eq!(result_summary(&a.wait_done(&t1.id).await), "local");
 }
+
+/// A paused workstream rejects new delegations (`paused`) until a newer topology resumes it.
+#[tokio::test]
+async fn paused_workstream_rejects_new_delegations_until_resumed() {
+    let s = Scratch::new();
+    let a = Daemon::start(&s, "a").await;
+    let orch = a.session(&Scenario::builder().build()).await;
+    let w = a.session(&slow_worker("resumed", 1)).await;
+    let mut t = topology(
+        1,
+        &[(&orch, "o"), (&w, "w")],
+        &[(&orch, &w, EdgePolicy::AlwaysAllow)],
+        Limits::default(),
+    );
+    t.paused = true;
+    a.set_topology(&t).await;
+    let r = a
+        .delegate(&orch, &[&w], TaskMode::Command, "go", None)
+        .await;
+    let e = r.results[0].error.as_ref().expect("rejected while paused");
+    assert_eq!(e.code, codes::PAUSED);
+    assert!(r.results[0].task.is_none());
+
+    t.version = 2;
+    t.paused = false;
+    a.set_topology(&t).await;
+    let task = a.delegate1(&orch, &w, "go").await;
+    assert_eq!(result_summary(&a.wait_done(&task.id).await), "resumed");
+}

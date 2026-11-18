@@ -5,8 +5,13 @@ edition.workspace = true
 license.workspace = true
 description = "Wasl wire types: agents, peers, topology, tasks, handoff decisions, method and topic names"
 
+[features]
+# TypeScript definitions of the wire types (ts-rs), for GUI clients.
+ts = ["dep:ts-rs", "wasit-core/ts"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 wasit-core = { workspace = true }
 fastrand = { workspace = true }
+ts-rs = { version = "12", optional = true, features = ["serde-json-impl", "no-serde-warnings"] }
