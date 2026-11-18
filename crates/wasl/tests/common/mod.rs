@@ -47,14 +47,7 @@ pub fn fake() -> PathBuf {
         }
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
         let st = std::process::Command::new(cargo)
-            .args([
-                "build",
-                "-q",
-                "-p",
-                "wasit-fake-cli",
-                "--bin",
-                "wasit-fake-cli",
-            ])
+            .args(["build", "-q", "-p", "wasl-fake-cli"])
             .status()
             .expect("run cargo build for the fake CLI");
         assert!(st.success(), "building wasit-fake-cli failed");

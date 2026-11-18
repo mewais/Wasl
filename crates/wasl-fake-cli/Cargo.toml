@@ -1,0 +1,14 @@
+[package]
+name = "wasl-fake-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Test helper: builds Wasit's scriptable fake agent CLI as a binary of this workspace (cargo cannot build a git dependency's binary with -p)"
+publish = false
+
+[[bin]]
+name = "wasit-fake-cli"
+path = "src/main.rs"
+
+[dependencies]
+wasit-fake-cli = { workspace = true }

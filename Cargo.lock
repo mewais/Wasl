@@ -1069,6 +1069,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasl-fake-cli"
+version = "0.1.0"
+dependencies = [
+ "wasit-fake-cli",
+]
+
+[[package]]
 name = "wasl-mcp"
 version = "0.1.0"
 dependencies = [
