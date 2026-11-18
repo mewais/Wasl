@@ -317,18 +317,20 @@ pub fn spawn_gate(
 ) -> wasit_core::GateRequest {
     wasit_core::GateRequest::Spawn {
         request_id: spawn_request_id(request_id),
-        from: plan.from.clone(),
-        name: plan.name.clone(),
-        role: plan.role.clone(),
-        host: plan.host.clone(),
-        driver: plan.driver.clone(),
-        model: plan.model.clone(),
-        cwd: plan.cwd.clone(),
-        mode: plan.mode.clone(),
-        instruction,
-        workstream: plan.workstream.clone(),
-        new_workstream: plan.new_workstream,
-        details: plan.details.clone(),
+        spawn: Box::new(wasit_core::SpawnGate {
+            from: plan.from.clone(),
+            name: plan.name.clone(),
+            role: plan.role.clone(),
+            host: plan.host.clone(),
+            driver: plan.driver.clone(),
+            model: plan.model.clone(),
+            cwd: plan.cwd.clone(),
+            mode: plan.mode.clone(),
+            instruction,
+            workstream: plan.workstream.clone(),
+            new_workstream: plan.new_workstream,
+            details: plan.details.clone(),
+        }),
         choices: spawn_choices(),
     }
 }

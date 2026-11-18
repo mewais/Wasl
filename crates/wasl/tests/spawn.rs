@@ -385,20 +385,12 @@ async fn spawn_on_another_host_with_always_allow_then_delegate_and_dismiss() {
     });
     let gate = spawn_gate(&x.a, &x.orch, "r1").await;
     match &gate {
-        GateRequest::Spawn {
-            from,
-            name,
-            role,
-            host,
-            instruction,
-            choices,
-            ..
-        } => {
-            assert_eq!(from, "orchestrator");
-            assert_eq!(name, "calc");
-            assert_eq!(role, "answers arithmetic");
-            assert_eq!(host, "b");
-            assert_eq!(instruction.as_deref(), Some("what is 6*7?"));
+        GateRequest::Spawn { spawn, choices, .. } => {
+            assert_eq!(spawn.from, "orchestrator");
+            assert_eq!(spawn.name, "calc");
+            assert_eq!(spawn.role, "answers arithmetic");
+            assert_eq!(spawn.host, "b");
+            assert_eq!(spawn.instruction.as_deref(), Some("what is 6*7?"));
             assert_eq!(choices.len(), 4);
         }
         other => panic!("not a spawn gate: {other:?}"),
