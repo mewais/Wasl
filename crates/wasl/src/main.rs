@@ -316,22 +316,13 @@ async fn start_daemon(raw: Vec<String>, data: PathBuf) -> std::io::Result<()> {
         .append(true)
         .open(data.join("wasl.log"))?;
     let exe = std::env::current_exe()?;
-    let mut cmd = tokio::process::Command::new(exe);
+    let mut cmd = wasit_process::detached_command(exe);
     cmd.arg("serve")
         .args(&raw)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::from(log))
-        .kill_on_drop(false);
-    #[cfg(unix)]
-    cmd.process_group(0);
-    #[cfg(windows)]
-    {
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    let mut child = cmd.spawn()?;
+        .stderr(Stdio::from(log));
+    let mut child = wasit_process::spawn_detached(&mut cmd)?;
     let stdout = child
         .stdout
         .take()

@@ -970,6 +970,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "wasit-process",
 ]
 
 [[package]]
@@ -989,6 +990,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "wasit-process",
 ]
 
 [[package]]
@@ -997,6 +999,14 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "wasit-core",
+]
+
+[[package]]
+name = "wasit-process"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1017,6 +1027,7 @@ dependencies = [
  "wasit-control",
  "wasit-core",
  "wasit-opencode",
+ "wasit-process",
  "wasit-shim",
 ]
 
@@ -1030,6 +1041,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "wasit-process",
  "windows-sys 0.59.0",
 ]
 
@@ -1050,6 +1062,7 @@ dependencies = [
  "wasit-control",
  "wasit-core",
  "wasit-fake-cli",
+ "wasit-process",
  "wasit-runtime",
  "wasit-shim",
  "wasl-mcp",

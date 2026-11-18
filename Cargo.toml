@@ -20,6 +20,7 @@ wasit-control = { git = "https://github.com/mewais/Wasit", branch = "claude/awes
 wasit-runtime = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
 wasit-shim = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
 wasit-fake-cli = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
+wasit-process = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"

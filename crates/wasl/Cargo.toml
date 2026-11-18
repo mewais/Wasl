@@ -17,6 +17,7 @@ wasit-core = { workspace = true }
 wasit-control = { workspace = true }
 wasit-runtime = { workspace = true }
 wasit-shim = { workspace = true }
+wasit-process = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
