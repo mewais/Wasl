@@ -118,28 +118,9 @@ async fn run(
                         }
                         println!("gate on the orchestrator: {gate:?}");
                         let rid = gate.request_id().to_string();
-                        let decision = match &gate {
-                            GateRequest::Permission {
-                                elicitation_choices,
-                                ..
-                            } if !elicitation_choices.is_empty() => {
-                                let c = elicitation_choices
-                                    .iter()
-                                    .find(|c| {
-                                        c.value.contains("allow")
-                                            || c.label.to_lowercase().contains("allow")
-                                    })
-                                    .unwrap_or(&elicitation_choices[0]);
-                                GateDecision::Approve {
-                                    updated_input: None,
-                                    permission_updates: None,
-                                    elicitation_content: Some(
-                                        serde_json::json!({c.key.clone(): c.value.clone()}),
-                                    ),
-                                }
-                            }
-                            _ => GateDecision::approve(),
-                        };
+                        let decision =
+                            GateDecision::by_kind(&gate, &[wasit_core::GateChoiceKind::AllowOnce])
+                                .expect("an allow choice");
                         sup.command(
                             &oid,
                             Command::AnswerGate {

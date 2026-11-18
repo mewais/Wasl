@@ -346,15 +346,16 @@ impl Daemon {
                     .any(|g| matches!(g.gate, GateRequest::Permission { .. }))
             })
             .await;
-        let rid = s
+        let gate = s
             .pending_gates
             .iter()
             .find(|g| matches!(g.gate, GateRequest::Permission { .. }))
             .unwrap()
             .gate
-            .request_id()
-            .to_string();
-        self.answer(on, &rid, GateDecision::approve()).await;
+            .clone();
+        let decision = GateDecision::by_kind(&gate, &[wasit_core::GateChoiceKind::AllowOnce])
+            .expect("an allow choice");
+        self.answer(on, gate.request_id(), decision).await;
     }
 
     pub async fn set_topology(&self, t: &Topology) {

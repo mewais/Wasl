@@ -4,7 +4,6 @@ mod common;
 
 use common::*;
 use serde_json::json;
-use wasit_core::GateDecision;
 use wasit_fake_cli::scenario::{Scenario, Turn};
 use wasl_proto::*;
 
@@ -71,8 +70,12 @@ async fn ask_edge_gate_allow_once_then_result_returns() {
         a.status(&task.id).await,
         TaskState::PendingApproval { .. }
     ));
-    a.answer(&orch, gate.request_id(), GateDecision::approve())
-        .await;
+    a.answer(
+        &orch,
+        gate.request_id(),
+        HandoffDecision::AllowOnce.to_gate(),
+    )
+    .await;
     b.approve_native_gate(&worker).await;
     let done = a.wait_done(&task.id).await;
     assert_eq!(result_summary(&done), "The answer is 4.");
@@ -164,7 +167,10 @@ async fn deny_decision_deny_policy_and_no_connections() {
     a.answer(
         &orch,
         gate.request_id(),
-        GateDecision::deny(Some("not now")),
+        HandoffDecision::Deny {
+            reason: Some("not now".into()),
+        }
+        .to_gate(),
     )
     .await;
     match a.wait_done(&t1.id).await {
@@ -253,8 +259,12 @@ async fn pending_gate_survives_sender_restart() {
         a.status(&task.id).await,
         TaskState::PendingApproval { .. }
     ));
-    a.answer(&orch, gate.request_id(), GateDecision::approve())
-        .await;
+    a.answer(
+        &orch,
+        gate.request_id(),
+        HandoffDecision::AllowOnce.to_gate(),
+    )
+    .await;
     assert_eq!(result_summary(&a.wait_done(&task.id).await), "survived");
     hub.shutdown().await;
 }

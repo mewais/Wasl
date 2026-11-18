@@ -35,9 +35,9 @@
 //!
 //! A delegation over an `ask` edge raises a [`wasit_core::GateRequest::Handoff`] on the
 //! *sending* session (request id = [`handoff_request_id`]). It is answered like any gate, with
-//! `session.command` / `answer_gate`; [`HandoffDecision::from_gate`] defines the mapping: a
-//! denial denies, an approval with any `permission_updates` means "always allow on this edge",
-//! any other approval allows once.
+//! `session.command` / `answer_gate`, by one of the gate's choices ([`handoff_choices`]):
+//! [`HandoffDecision::from_gate`] defines the mapping (`allow_once`, `always_allow` = "always
+//! allow on this edge", `deny` with an optional reason for the sending agent).
 
 #![forbid(unsafe_code)]
 
@@ -45,7 +45,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use wasit_core::{GateDecision, Usage};
+use wasit_core::{ChoiceText, GateChoice, GateChoiceKind, GateDecision, Usage};
 
 /// Method names.
 pub mod methods {
@@ -543,33 +543,54 @@ pub enum HandoffDecision {
     },
 }
 
+/// Choice ids of a handoff gate.
+pub mod handoff_choice {
+    pub const ALLOW_ONCE: &str = "allow_once";
+    pub const ALWAYS_ALLOW: &str = "always_allow";
+    pub const DENY: &str = "deny";
+}
+
+/// The choices a handoff gate offers (this layer's own wording).
+pub fn handoff_choices() -> Vec<GateChoice> {
+    vec![
+        GateChoice::agent(
+            handoff_choice::ALLOW_ONCE,
+            "Allow once",
+            GateChoiceKind::AllowOnce,
+        ),
+        GateChoice::agent(
+            handoff_choice::ALWAYS_ALLOW,
+            "Always allow on this connection",
+            GateChoiceKind::AllowAlways,
+        )
+        .with_description("sets the connection's policy to always allow"),
+        GateChoice::agent(handoff_choice::DENY, "Deny", GateChoiceKind::RejectOnce)
+            .with_text(ChoiceText::Optional),
+    ]
+}
+
 impl HandoffDecision {
-    /// Read a gate answer (see the crate docs).
-    pub fn from_gate(d: &GateDecision) -> Self {
-        match d {
-            GateDecision::Deny { reason } => HandoffDecision::Deny {
-                reason: reason.clone(),
-            },
-            GateDecision::Approve {
-                permission_updates: Some(_),
-                ..
-            } => HandoffDecision::AlwaysAllow,
-            GateDecision::Approve { .. } => HandoffDecision::AllowOnce,
+    /// Read a gate answer (see the crate docs). `None` for a choice a handoff gate does not
+    /// offer.
+    pub fn from_gate(d: &GateDecision) -> Option<Self> {
+        match d.choice.as_str() {
+            handoff_choice::ALLOW_ONCE => Some(HandoffDecision::AllowOnce),
+            handoff_choice::ALWAYS_ALLOW => Some(HandoffDecision::AlwaysAllow),
+            handoff_choice::DENY => Some(HandoffDecision::Deny {
+                reason: d.text.clone(),
+            }),
+            _ => None,
         }
     }
 
     /// The gate answer that means this decision.
     pub fn to_gate(&self) -> GateDecision {
         match self {
-            HandoffDecision::AllowOnce => GateDecision::approve(),
-            HandoffDecision::AlwaysAllow => GateDecision::Approve {
-                updated_input: None,
-                permission_updates: Some(serde_json::json!({"edge": "always_allow"})),
-                elicitation_content: None,
-            },
-            HandoffDecision::Deny { reason } => GateDecision::Deny {
-                reason: reason.clone(),
-            },
+            HandoffDecision::AllowOnce => GateDecision::choose(handoff_choice::ALLOW_ONCE),
+            HandoffDecision::AlwaysAllow => GateDecision::choose(handoff_choice::ALWAYS_ALLOW),
+            HandoffDecision::Deny { reason } => {
+                GateDecision::choose_with(handoff_choice::DENY, reason.as_deref())
+            }
         }
     }
 }
@@ -814,7 +835,7 @@ mod tests {
                 reason: Some("no".into()),
             },
         ] {
-            assert_eq!(HandoffDecision::from_gate(&d.to_gate()), d);
+            assert_eq!(HandoffDecision::from_gate(&d.to_gate()), Some(d));
         }
     }
 

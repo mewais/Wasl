@@ -814,6 +814,7 @@ impl Node {
                     "from_agent": t.from,
                     "to_agent": t.to,
                 }),
+                choices: wasl_proto::handoff_choices(),
             };
             let Some(sid) = SessionId::parse(&t.from.session) else {
                 return;

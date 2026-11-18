@@ -64,7 +64,16 @@ impl Node {
                             },
                         ..
                     } if *request_id == gate.request_id => {
-                        break 'outer Outcome::Decided(HandoffDecision::from_gate(decision));
+                        // The runtime refuses answers that pick no offered choice, so this
+                        // only fails for a gate raised with other choices: treat it as a denial.
+                        break 'outer Outcome::Decided(
+                            HandoffDecision::from_gate(decision).unwrap_or(HandoffDecision::Deny {
+                                reason: Some(format!(
+                                    "unknown handoff choice {:?}",
+                                    decision.choice
+                                )),
+                            }),
+                        );
                     }
                     SessionEventKind::Input {
                         command: Command::AnswerQuestion { request_id, .. },
