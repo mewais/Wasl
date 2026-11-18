@@ -1,8 +1,8 @@
 //! wasl-audit — the audit trail of a Wasl node: one [`AuditEntry`] per delegation, decision,
 //! policy change and outcome, appended as one JSON line to a file.
 //!
-//! [`AuditLog::open`] starts a writer task fed through a bounded queue, so recording never
-//! blocks a caller on disk I/O; [`AuditLog::record`] waits only for room in the queue.
+//! [`AuditLog::open`] starts a writer task fed through a bounded queue; [`AuditLog::record`]
+//! resolves once its entry is written (callers never hold a lock across it).
 //! [`AuditLog::flush`] resolves once everything recorded before it is on disk (tests, shutdown).
 //! [`read_entries`] reads a trail back.
 
@@ -75,7 +75,7 @@ impl std::fmt::Display for AuditError {
 impl std::error::Error for AuditError {}
 
 enum Msg {
-    Entry(Box<AuditEntry>),
+    Entry(Box<AuditEntry>, oneshot::Sender<()>),
     Flush(oneshot::Sender<Result<(), AuditError>>),
 }
 
@@ -110,11 +110,16 @@ impl AuditLog {
         &self.path
     }
 
-    /// Queue one entry (waits only for room in the bounded queue).
+    /// Append one entry; resolves once it is written (not yet synced; see
+    /// [`AuditLog::flush`]).
     pub async fn record(&self, entry: AuditEntry) {
-        if self.tx.send(Msg::Entry(Box::new(entry))).await.is_err() {
+        let (tx, rx) = oneshot::channel();
+        if self.tx.send(Msg::Entry(Box::new(entry), tx)).await.is_err() {
             tracing::error!(path = %self.path.display(), "audit writer is gone; entry lost");
+            return;
         }
+        // The writer always answers unless it is gone (already logged there).
+        let _ = rx.await;
     }
 
     /// Resolve once every entry recorded before this call is written (and synced).
@@ -132,7 +137,7 @@ async fn writer(mut file: tokio::fs::File, path: PathBuf, mut rx: mpsc::Receiver
     let mut last_error: Option<AuditError> = None;
     while let Some(msg) = rx.recv().await {
         match msg {
-            Msg::Entry(e) => {
+            Msg::Entry(e, done) => {
                 let mut line = match serde_json::to_vec(&e) {
                     Ok(l) => l,
                     Err(err) => {
@@ -145,6 +150,7 @@ async fn writer(mut file: tokio::fs::File, path: PathBuf, mut rx: mpsc::Receiver
                     tracing::error!(path = %path.display(), error = %err, "cannot append to the audit trail");
                     last_error = Some(AuditError(err.to_string()));
                 }
+                let _ = done.send(()); // the recorder may have given up
             }
             Msg::Flush(reply) => {
                 let r = match last_error.take() {

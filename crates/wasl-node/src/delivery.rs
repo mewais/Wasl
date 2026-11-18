@@ -137,32 +137,41 @@ impl Node {
 
     /// `wasl.node.update`: the receiver reports a state (idempotent; terminal is final).
     pub async fn node_update(&self, req: UpdateRequest) -> Result<Ack, wasit_control::RpcError> {
-        let (ack, audit) = {
-            let mut st = self.lock();
-            let Some(r) = st.out.get_mut(&req.id) else {
+        // Audit a terminal state before it becomes visible to waiters.
+        let audit = {
+            let st = self.lock();
+            let Some(r) = st.out.get(&req.id) else {
                 return Err(err(codes::UNKNOWN_TASK, format!("no task {}", req.id)));
             };
             if r.p.state.is_terminal() || r.p.state == req.state {
                 return Ok(Ack {});
             }
-            r.p.state = req.state.clone();
-            r.p.delivered = true;
-            let task = r.p.task.clone();
-            if let TaskState::Completed { result } = &req.state {
-                if let Some(u) = &result.usage {
-                    *st.spent.entry(task.workstream.clone()).or_default() += u.cost_usd;
-                }
-            }
-            let audit = req
-                .state
+            req.state
                 .is_terminal()
-                .then(|| finished_audit(&task, &req.state));
-            (self.persist_out(&mut st, &req.id), audit)
+                .then(|| finished_audit(&r.p.task, &req.state))
         };
-        self.settle(ack).await;
         if let Some(a) = audit {
             self.record_audit(a).await;
         }
+        let ack = {
+            let mut st = self.lock();
+            let Some(r) = st.out.get_mut(&req.id) else {
+                return Ok(Ack {});
+            };
+            if r.p.state.is_terminal() {
+                return Ok(Ack {});
+            }
+            r.p.state = req.state.clone();
+            r.p.delivered = true;
+            let ws = r.p.task.workstream.clone();
+            if let TaskState::Completed { result } = &req.state {
+                if let Some(u) = &result.usage {
+                    *st.spent.entry(ws).or_default() += u.cost_usd;
+                }
+            }
+            self.persist_out(&mut st, &req.id)
+        };
+        self.settle(ack).await;
         Ok(Ack {})
     }
 
@@ -470,6 +479,7 @@ impl Node {
         let mut in_turn = false;
         let mut progress = Progress::default();
         let mut text = String::new();
+        let mut last_message: Option<String> = None;
         let mut last_report = Instant::now() - self.inner.cfg.progress_interval;
         let mut interrupted: Option<CancelRemoteRequest> = None;
         // Recovery with nothing journaled after the mark: the prompt never went out.
@@ -545,7 +555,15 @@ impl Node {
                     }
                     SessionEventKind::Agent { event } if seen_input => match event {
                         AgentEvent::TurnStarted { .. } => in_turn = true,
-                        AgentEvent::AssistantDelta { text: t, .. } if in_turn => {
+                        AgentEvent::AssistantDelta {
+                            text: t,
+                            message_id,
+                        } if in_turn => {
+                            // A new assistant message replaces the narration before it.
+                            if message_id.is_some() && *message_id != last_message {
+                                text.clear();
+                                last_message = message_id.clone();
+                            }
                             text.push_str(t);
                             progress.last_text = Some(truncate(text.trim(), 200));
                         }
@@ -582,10 +600,9 @@ impl Node {
                                     error: "the receiver's turn was interrupted".into(),
                                 });
                             }
-                            let summary = if text.trim().is_empty() {
-                                reply.clone().unwrap_or_default()
-                            } else {
-                                text.trim().to_string()
+                            let summary = match reply.as_deref().map(str::trim) {
+                                Some(r) if !r.is_empty() => r.to_string(),
+                                _ => text.trim().to_string(),
                             };
                             let usage = (*usage != Usage::default())
                                 .then(|| usage_delta(&mark.usage_before, usage));

@@ -148,6 +148,26 @@ impl Node {
                         Job::Deliver(r, _) => match st.out.get_mut(&r.task.id) {
                             Some(rec) if !rec.p.delivered => {
                                 rec.p.delivered = true;
+                                // Withdrawn while the delivery was in flight: forward it.
+                                if rec.p.cancel.is_none() {
+                                    match &rec.p.state {
+                                        TaskState::Cancelled { reason } => {
+                                            rec.p.cancel = Some(CancelRemoteRequest {
+                                                id: r.task.id.clone(),
+                                                reason: reason.clone(),
+                                                expired: false,
+                                            })
+                                        }
+                                        TaskState::Expired => {
+                                            rec.p.cancel = Some(CancelRemoteRequest {
+                                                id: r.task.id.clone(),
+                                                reason: "deadline passed".into(),
+                                                expired: true,
+                                            })
+                                        }
+                                        _ => {}
+                                    }
+                                }
                                 self.persist_out(&mut st, &r.task.id)
                             }
                             _ => None,
