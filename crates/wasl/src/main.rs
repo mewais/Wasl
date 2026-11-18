@@ -19,7 +19,8 @@
 //! * `shim` is the per-session process holder entry.
 //!
 //! Options: `--driver-bin <driver>=<path>`, `--driver-env <driver>=<KEY>=<VALUE>` (repeatable),
-//! `--handshake-timeout-ms N`, `--command-timeout-ms N`, `--stop-grace-ms N`.
+//! `--handshake-timeout-ms N`, `--command-timeout-ms N`, `--stop-grace-ms N`,
+//! `--spawn-wait-ms N` (how long a spawn request waits for an unreachable supervisor).
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -48,6 +49,7 @@ struct Args {
     handshake_ms: Option<u64>,
     stop_grace_ms: Option<u64>,
     command_ms: Option<u64>,
+    spawn_wait_ms: Option<u64>,
     no_start: bool,
     /// The options as given minus bridge-only flags (passed on when `bridge` starts `serve`).
     raw: Vec<String>,
@@ -63,6 +65,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         handshake_ms: None,
         stop_grace_ms: None,
         command_ms: None,
+        spawn_wait_ms: None,
         no_start: false,
         raw: args
             .iter()
@@ -100,6 +103,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--handshake-timeout-ms" => a.handshake_ms = Some(num(val()?)?),
             "--stop-grace-ms" => a.stop_grace_ms = Some(num(val()?)?),
             "--command-timeout-ms" => a.command_ms = Some(num(val()?)?),
+            "--spawn-wait-ms" => a.spawn_wait_ms = Some(num(val()?)?),
             other => return Err(format!("unknown option {other}")),
         }
     }
@@ -182,12 +186,11 @@ async fn serve(a: Args) -> ExitCode {
         Err(e) => tracing::error!(error = %e, "cannot scan sessions"),
     }
     let host_id = a.host_id.clone().unwrap_or_else(default_host_id);
-    let node = match Node::open(
-        NodeConfig::new(host_id.clone(), a.data.join("wasl")),
-        manager.clone(),
-    )
-    .await
-    {
+    let mut cfg = NodeConfig::new(host_id.clone(), a.data.join("wasl"));
+    if let Some(ms) = a.spawn_wait_ms {
+        cfg.spawn_connect_wait = std::time::Duration::from_millis(ms);
+    }
+    let node = match Node::open(cfg, manager.clone()).await {
         Ok(n) => n,
         Err(e) => {
             eprintln!("wasl: cannot open the Wasl node: {e}");

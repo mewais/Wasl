@@ -43,6 +43,8 @@ pub struct NodeConfig {
     pub retry_max: Duration,
     /// Minimum interval between progress reports of one running task.
     pub progress_interval: Duration,
+    /// How long a spawn request waits for an unreachable supervisor before it is refused.
+    pub spawn_connect_wait: Duration,
 }
 
 impl NodeConfig {
@@ -55,6 +57,7 @@ impl NodeConfig {
             retry_initial: Duration::from_millis(200),
             retry_max: Duration::from_secs(5),
             progress_interval: Duration::from_millis(500),
+            spawn_connect_wait: Duration::from_secs(15),
         }
     }
 }
@@ -69,6 +72,7 @@ pub(crate) struct Inner {
     pub state: Mutex<State>,
     pub transport: RwLock<Option<Arc<dyn PeerTransport>>>,
     pub supervisor: RwLock<Option<SupervisorProbe>>,
+    pub spawner: RwLock<Option<Arc<dyn crate::spawn::SpawnAuthority>>>,
     /// Wakes the outbox pump.
     pub kick: Notify,
     /// Wakes the deadline timer.
@@ -135,6 +139,16 @@ impl Node {
                     st.topo.remove(&workstream);
                 }
                 Rec::Edge(_) => {}
+                Rec::Spawn(sp) => {
+                    let sp = *sp;
+                    st.spawns.insert(
+                        sp.request_id.clone(),
+                        crate::state::SpawnRec {
+                            watch: watch::channel(sp.phase.clone()).0,
+                            p: sp,
+                        },
+                    );
+                }
                 Rec::Out(o) => {
                     let o = *o;
                     if let TaskState::Completed { result } = &o.state {
@@ -191,6 +205,7 @@ impl Node {
                 state: Mutex::new(st),
                 transport: RwLock::new(None),
                 supervisor: RwLock::new(None),
+                spawner: RwLock::new(None),
                 kick: Notify::new(),
                 deadlines: Notify::new(),
                 transport_gen: watch::channel(0).0,
@@ -234,6 +249,7 @@ impl Node {
         for s in sessions {
             self.ensure_worker(&s);
         }
+        self.recover_spawns();
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, State> {
@@ -282,8 +298,14 @@ impl Node {
 
     /// The usual wiring for a daemon serving `server`: relay over the connection the hub opened
     /// (role `hub`), and count any connection with a supervisor role as an attached supervisor.
+    /// Spawn requests go to the hub over the same connection
+    /// ([`crate::UplinkSpawnAuthority`]); a hub sets its own authority instead.
     pub fn attach_server(&self, server: &ControlServer) {
         self.attach_uplink(Uplink::via_server(server.clone(), "hub"));
+        self.set_spawn_authority(Arc::new(crate::spawn::UplinkSpawnAuthority::new(
+            Uplink::via_server(server.clone(), "hub"),
+            self.inner.cfg.call_timeout * 6,
+        )));
         let s = server.clone();
         let roles = self.inner.cfg.supervisor_roles.clone();
         self.set_supervisor_probe(Arc::new(move || {
@@ -410,7 +432,7 @@ impl Node {
 
     // ── peers ───────────────────────────────────────────────────────────────
 
-    fn local_session(&self, s: &str) -> Result<SessionId, RpcError> {
+    pub(crate) fn local_session(&self, s: &str) -> Result<SessionId, RpcError> {
         let id = SessionId::parse(s)
             .ok_or_else(|| err(codes::UNKNOWN_SESSION, format!("not a session id: {s:?}")))?;
         self.inner.sessions.snapshot(&id).map_err(|_| {
@@ -513,7 +535,8 @@ impl Node {
                 .copied()
                 .unwrap_or(PeerStatus::Unknown);
         }
-        Ok(PeerList { peers })
+        let spawnable = Some(self.spawnable_for(&me).await);
+        Ok(PeerList { peers, spawnable })
     }
 
     // ── delegation ──────────────────────────────────────────────────────────

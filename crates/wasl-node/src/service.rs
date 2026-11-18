@@ -11,8 +11,9 @@ use tokio::sync::broadcast;
 use wasit_control::{CallContext, CloseReason, Cursor, EventStream, RpcError, Service};
 use wasl_proto::{
     methods, topics, CancelRemoteRequest, CancelRequest, DecideRequest, DelegateRequest,
-    DeliverRequest, MessageRequest, PeerStatusReply, PeerStatusRequest, PeersRequest, Side,
-    TaskEvent, TaskIds, TaskView, Topology, UpdateRequest, WaitRequest,
+    DeliverRequest, DismissAsk, DismissRequest, MessageRequest, PeerStatusReply, PeerStatusRequest,
+    PeersRequest, Side, SpawnAsk, SpawnLaunch, SpawnRequest, SpawnableAsk, TaskEvent, TaskIds,
+    TaskView, Topology, UpdateRequest, WaitRequest,
 };
 
 use crate::journal::{Entry, Rec};
@@ -102,6 +103,23 @@ impl Service for NodeService {
                     statuses: n.peer_status_local(&r.sessions),
                 })
             }
+            methods::SPAWN => ok(n.spawn(params::<SpawnRequest>(p)?).await?),
+            methods::DISMISS => ok(n.dismiss(params::<DismissRequest>(p)?).await?),
+            methods::SUPERVISOR_SPAWN_PLAN => {
+                ok(n.serving_authority()?.plan(params::<SpawnAsk>(p)?).await?)
+            }
+            methods::SUPERVISOR_SPAWN_LAUNCH => ok(n
+                .serving_authority()?
+                .launch(params::<SpawnLaunch>(p)?)
+                .await?),
+            methods::SUPERVISOR_DISMISS => ok(n
+                .serving_authority()?
+                .dismiss(params::<DismissAsk>(p)?)
+                .await?),
+            methods::SUPERVISOR_SPAWNABLE => ok(n
+                .serving_authority()?
+                .spawnable(params::<SpawnableAsk>(p)?)
+                .await?),
             other => Err(RpcError::method_not_found(other)),
         }
     }

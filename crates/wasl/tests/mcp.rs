@@ -82,8 +82,10 @@ async fn mcp_tools_end_to_end_with_a_daemon_restart_mid_wait() {
         [
             "consult",
             "delegate",
+            "dismiss_agent",
             "list_peers",
             "message",
+            "spawn_agent",
             "task_cancel",
             "task_status",
             "task_wait"
@@ -165,4 +167,32 @@ async fn mcp_tools_end_to_end_with_a_daemon_restart_mid_wait() {
     assert!(err);
     assert!(v.to_string().contains("no connections configured"), "{v}");
     c.cancel().await.unwrap();
+}
+
+/// Without a supervisor, `list_peers` says spawning is unavailable and `spawn_agent` is refused
+/// with a clear error (standalone Wasl).
+#[tokio::test]
+async fn mcp_spawn_agent_without_a_supervisor_is_refused() {
+    let s = Scratch::new();
+    let a = Daemon::start_args(&s, "a", &["--spawn-wait-ms", "200"]).await;
+    let orch = a.session(&Scenario::builder().build()).await;
+    let c = mcp_client(&a, &orch).await;
+    let (err, v) = tool(&c, "list_peers", json!({})).await;
+    assert!(!err, "{v}");
+    assert_eq!(v["spawnable"]["available"], false, "{v}");
+    let (err, v) = tool(
+        &c,
+        "spawn_agent",
+        json!({"name": "w", "role": "helps", "instruction": "do it"}),
+    )
+    .await;
+    assert!(err, "{v}");
+    assert!(
+        v.as_str()
+            .unwrap_or_default()
+            .contains("spawning is not available"),
+        "{v}"
+    );
+    let (err, v) = tool(&c, "dismiss_agent", json!({"peer": "w"})).await;
+    assert!(err, "{v}");
 }

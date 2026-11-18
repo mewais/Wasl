@@ -11,8 +11,8 @@ here describes how this repo implements it.
 | Crate | Role |
 |---|---|
 | `wasl-proto` | Wire types and `wasl.*` method/topic names: agents, peers, topology (incl. `paused`), tasks, results, handoff decisions. `ts` feature → TypeScript (ts-rs). |
-| `wasl-node` | The embeddable node (one per host daemon): live topology, durable task engine, handoff gates, delivery, relay routing, safety limits, events. Serves `wasl.*` as a `wasit_control::Service`. |
-| `wasl-mcp` | The stdio MCP server an agent CLI launches (`list_peers`, `delegate`, `task_status`, `task_wait`, `task_cancel`, `consult`, `message`); a thin client of the local daemon. `mcp_server_config()` produces the `AgentConfig` item that injects it. |
+| `wasl-node` | The embeddable node (one per host daemon): live topology, durable task engine, handoff gates, spawn requests (through a supervisor's `SpawnAuthority`), delivery, relay routing, safety limits, events. Serves `wasl.*` as a `wasit_control::Service`. |
+| `wasl-mcp` | The stdio MCP server an agent CLI launches (`list_peers`, `delegate`, `task_status`, `task_wait`, `task_cancel`, `consult`, `message`, `spawn_agent`, `dismiss_agent`); a thin client of the local daemon. `mcp_server_config()` produces the `AgentConfig` item that injects it. |
 | `wasl-audit` | Audit trail (JSON lines). |
 | `wasl` | Standalone binary: `serve` (Wasit runtime + Wasl node daemon), `bridge`, `mcp`, `shim`. |
 
@@ -28,7 +28,8 @@ wasl serve --data ~/.wasl &                       # one daemon per host
 A hub (any process running `wasit_control::Hub` with links that run `wasl bridge --data <dir>`
 on each host, usually over ssh) connects daemons on several machines. Without a supervisor
 connected, handoffs over `ask` edges are approved through MCP elicitation, or denied when the
-client cannot ask.
+client cannot ask. Spawning workers (`spawn_agent`) needs a supervisor that implements the spawn
+authority (`wasl.supervisor.*`, e.g. Marsad); standalone it answers "spawning is not available".
 
 ## Development
 

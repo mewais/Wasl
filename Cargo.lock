@@ -1037,6 +1037,7 @@ dependencies = [
 name = "wasl"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "fastrand",
  "futures",
  "libc",

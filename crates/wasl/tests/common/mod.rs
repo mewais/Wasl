@@ -142,6 +142,7 @@ pub struct Daemon {
     child: Option<tokio::process::Child>,
     pub client: RuntimeClient,
     real: bool,
+    extra: Vec<String>,
 }
 
 impl Daemon {
@@ -176,18 +177,24 @@ impl Daemon {
     }
 
     pub async fn start(scratch: &Scratch, host: &str) -> Daemon {
-        Self::start_with(scratch, host, false).await
+        Self::start_with(scratch, host, false, &[]).await
+    }
+
+    /// A daemon with extra `serve` options.
+    pub async fn start_args(scratch: &Scratch, host: &str, extra: &[&str]) -> Daemon {
+        Self::start_with(scratch, host, false, extra).await
     }
 
     /// A daemon running the real CLIs (live tests).
     pub async fn start_real(scratch: &Scratch, host: &str) -> Daemon {
-        Self::start_with(scratch, host, true).await
+        Self::start_with(scratch, host, true, &[]).await
     }
 
-    async fn start_with(scratch: &Scratch, host: &str, real: bool) -> Daemon {
+    async fn start_with(scratch: &Scratch, host: &str, real: bool, extra: &[&str]) -> Daemon {
         let dir = scratch.0.join(host);
         std::fs::create_dir_all(&dir).unwrap();
-        let child = Self::spawn(host, &dir, real).await;
+        let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+        let child = Self::spawn(host, &dir, real, &extra).await;
         let client = RuntimeClient::connect_endpoint(
             local_endpoint(&dir.join("wasl.sock")),
             Hello::new("test", "test", "test"),
@@ -199,10 +206,11 @@ impl Daemon {
             child: Some(child),
             client,
             real,
+            extra,
         }
     }
 
-    async fn spawn(host: &str, dir: &Path, real: bool) -> tokio::process::Child {
+    async fn spawn(host: &str, dir: &Path, real: bool, extra: &[String]) -> tokio::process::Child {
         let log = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -211,6 +219,7 @@ impl Daemon {
         let mut child = tokio::process::Command::new(wasl_bin())
             .arg("serve")
             .args(Self::args(host, dir, real))
+            .args(extra)
             .env("WASL_LOG", "info,wasl_node=debug")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -242,7 +251,7 @@ impl Daemon {
 
     pub async fn restart(&mut self) {
         self.kill().await;
-        self.child = Some(Self::spawn(&self.host, &self.dir, self.real).await);
+        self.child = Some(Self::spawn(&self.host, &self.dir, self.real, &self.extra).await);
     }
 
     pub async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> T {
@@ -497,12 +506,16 @@ pub struct TestHub {
 
 impl TestHub {
     pub async fn start(daemons: &[&Daemon]) -> TestHub {
+        Self::start_with(daemons, Arc::new(NoService)).await
+    }
+
+    /// A hub whose own requests (`host: None`, e.g. `wasl.supervisor.*`) are served by `local`.
+    pub async fn start_with(daemons: &[&Daemon], local: Arc<dyn Service>) -> TestHub {
         let mut cfg = HubConfig::new(Hello::new("test-hub", "hub", "hub"));
         cfg.supervise.backoff.initial = Duration::from_millis(50);
         cfg.supervise.backoff.max = Duration::from_millis(400);
         cfg.forward_timeout = Duration::from_secs(60);
         let hub = Hub::new(cfg, Arc::new(CommandConnector), None);
-        let local: Arc<dyn Service> = Arc::new(NoService);
         hub.set_inbound_service(Arc::new(RoutingService::new(hub.clone(), local)));
         let h = TestHub { hub };
         for d in daemons {

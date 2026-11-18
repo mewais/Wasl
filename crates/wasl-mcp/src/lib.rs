@@ -6,7 +6,7 @@
 //! injection time ([`mcp_server_config`]).
 //!
 //! Tools: `list_peers`, `delegate`, `task_status`, `task_wait`, `task_cancel`, `consult`,
-//! `message`. Results are compact JSON.
+//! `message`, `spawn_agent`, `dismiss_agent`. Results are compact JSON.
 //!
 //! Handoff approval normally happens on the sending session as a gate the supervisor shows.
 //! Without a supervisor the node marks a task `pending_approval` via `elicitation`; this server
@@ -38,8 +38,9 @@ use wasit_control::{
 use wasit_core::{McpServerConfig, McpTransport};
 use wasl_proto::{
     methods, ApprovalVia, CancelRequest, DecideRequest, DelegateReply, DelegateRequest,
-    HandoffDecision, MessageRequest, PeerList, PeersRequest, TaskBrief, TaskId, TaskMode,
-    TaskState, TaskStates, WaitRequest,
+    DismissReply, DismissRequest, HandoffDecision, MessageRequest, PeerList, PeersRequest,
+    SpawnReply, SpawnRequest, SpawnSpec, Spawnable, TaskBrief, TaskId, TaskMode, TaskState,
+    TaskStates, WaitRequest,
 };
 
 /// Name of the MCP server as agents see it (tools appear as `mcp__wasl__…` in claude).
@@ -51,6 +52,8 @@ const WAIT_CONNECTED: Duration = Duration::from_secs(30);
 const DEADLINE: Duration = Duration::from_secs(30);
 const DEFAULT_WAIT_SECS: u64 = 120;
 const MAX_WAIT_SECS: u64 = 600;
+/// How long `spawn_agent` waits for the human's decision.
+const SPAWN_DEADLINE: Duration = Duration::from_secs(24 * 3600);
 
 /// Where the server connects and which session it speaks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +172,38 @@ pub struct MessageArgs {
     /// Peer names or ids from list_peers.
     pub to: Vec<String>,
     pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct SpawnArgs {
+    /// Name for the new agent (unique in your workstream); you address it by this name.
+    pub name: String,
+    /// What this worker is for, in one sentence (shown to the human who approves).
+    pub role: String,
+    /// Agent CLI; one of the drivers list_peers shows under spawnable (default: yours).
+    #[serde(default)]
+    pub driver: Option<String>,
+    /// Host name from spawnable (default: your host).
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Model (default: the CLI's).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Working directory (default: yours; required on another host).
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// The CLI's mode for the worker (as the CLI names it).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// First task; delegated at once, its task id returned (then use task_wait).
+    #[serde(default)]
+    pub instruction: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct DismissArgs {
+    /// Name or id of an agent you spawned.
+    pub peer: String,
 }
 
 // ── compact results ─────────────────────────────────────────────────────────
@@ -390,6 +425,45 @@ impl WaslMcp {
     }
 }
 
+/// `spawnable` as an agent sees it: hosts with their drivers and models, or why not.
+fn spawnable_json(s: Option<&Spawnable>) -> Option<Value> {
+    let s = s?;
+    if !s.available {
+        return Some(json!({"available": false, "note": s.note}));
+    }
+    let hosts: Vec<Value> = s
+        .hosts
+        .iter()
+        .map(|h| {
+            let drivers: Vec<Value> = h
+                .drivers
+                .iter()
+                .map(|d| {
+                    let mut v = json!({"driver": d.id, "name": d.name});
+                    if !d.models.is_empty() {
+                        v["models"] = json!(d.models);
+                    }
+                    v
+                })
+                .collect();
+            json!({"host": h.name, "drivers": drivers})
+        })
+        .collect();
+    let mut v = json!({"available": true, "hosts": hosts});
+    if !s.note.is_empty() {
+        v["note"] = json!(s.note);
+    }
+    if let Some(r) = s.remaining {
+        v["remaining"] = json!(r);
+    }
+    Some(v)
+}
+
+fn request_id() -> String {
+    // Same alphabet and length as a task id; only uniqueness matters.
+    TaskId::random().0
+}
+
 fn states_json(s: &TaskStates) -> Value {
     let tasks: Vec<TaskOut> = s.tasks.iter().map(task_out).collect();
     let mut v = json!({"tasks": tasks});
@@ -405,7 +479,7 @@ fn states_json(s: &TaskStates) -> Value {
 #[tool_router]
 impl WaslMcp {
     #[tool(
-        description = "List the agents you can delegate to: name, id, role, live status, approval policy. Empty when this session has no connections."
+        description = "List the agents you can delegate to: name, id, role, live status, approval policy. Empty when this session has no connections. spawnable: where you may start new workers (hosts, drivers, models)."
     )]
     async fn list_peers(
         &self,
@@ -418,10 +492,16 @@ impl WaslMcp {
             .call::<PeerList>(methods::PEERS_LIST, json!(req), DEADLINE, true)
             .await
         {
-            Ok(l) if l.peers.is_empty() => Ok(json_result(json!({
-                "peers": [],
-                "note": "no connections are configured for this session; there is nobody to delegate to"
-            }))),
+            Ok(l) if l.peers.is_empty() => {
+                let mut v = json!({
+                    "peers": [],
+                    "note": "no connections are configured for this session; there is nobody to delegate to"
+                });
+                if let Some(s) = spawnable_json(l.spawnable.as_ref()) {
+                    v["spawnable"] = s;
+                }
+                Ok(json_result(v))
+            }
             Ok(l) => {
                 let peers: Vec<Value> = l
                     .peers
@@ -445,7 +525,11 @@ impl WaslMcp {
                         v
                     })
                     .collect();
-                Ok(json_result(json!({ "peers": peers })))
+                let mut v = json!({ "peers": peers });
+                if let Some(s) = spawnable_json(l.spawnable.as_ref()) {
+                    v["spawnable"] = s;
+                }
+                Ok(json_result(v))
             }
             Err(e) => Ok(tool_error(e)),
         }
@@ -586,6 +670,70 @@ impl WaslMcp {
         }
     }
 
+    #[tool(
+        description = "Start a new worker agent and connect it to you (a human approves unless always allowed). Choose driver/host/model from list_peers.spawnable. Returns its name and id; with instruction, also the first task's id (then task_wait)."
+    )]
+    async fn spawn_agent(
+        &self,
+        Parameters(a): Parameters<SpawnArgs>,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let req = SpawnRequest {
+            from: self.session.clone(),
+            // Reused when the call is re-sent after a daemon restart: never two workers.
+            request_id: request_id(),
+            spec: SpawnSpec {
+                name: a.name,
+                role: a.role,
+                driver: a.driver.filter(|s| !s.trim().is_empty()),
+                host: a.host.filter(|s| !s.trim().is_empty()),
+                model: a.model.filter(|s| !s.trim().is_empty()),
+                cwd: a.cwd.filter(|s| !s.trim().is_empty()),
+                mode: a.mode.filter(|s| !s.trim().is_empty()),
+                instruction: a.instruction.filter(|s| !s.trim().is_empty()),
+            },
+        };
+        match self
+            .call::<SpawnReply>(methods::SPAWN, json!(req), SPAWN_DEADLINE, true)
+            .await
+        {
+            Ok(r) => {
+                let mut v = json!({"name": r.name, "id": r.agent});
+                if let Some(mut t) = r.task {
+                    let mut one = [t.clone()];
+                    self.approve_pending(&peer, &mut one).await;
+                    t = one[0].clone();
+                    v["task"] = json!(task_out(&t));
+                }
+                if let Some(e) = r.task_error {
+                    v["task_error"] = json!(e.message);
+                }
+                Ok(json_result(v))
+            }
+            Err(e) => Ok(tool_error(e)),
+        }
+    }
+
+    #[tool(
+        description = "Stop a worker agent you spawned (it is kept, stopped, in the workstream)."
+    )]
+    async fn dismiss_agent(
+        &self,
+        Parameters(a): Parameters<DismissArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let req = DismissRequest {
+            from: self.session.clone(),
+            peer: a.peer,
+        };
+        match self
+            .call::<DismissReply>(methods::DISMISS, json!(req), DEADLINE, true)
+            .await
+        {
+            Ok(r) => Ok(json_result(json!({"dismissed": r.name, "id": r.agent}))),
+            Err(e) => Ok(tool_error(e)),
+        }
+    }
+
     #[tool(description = "Send peers a note. Fire-and-forget: no reply is expected.")]
     async fn message(
         &self,
@@ -640,7 +788,7 @@ impl ServerHandler for WaslMcp {
                 ..Implementation::from_build_env()
             },
             instructions: Some(
-                "Delegate work to other agents. list_peers shows who you can reach; delegate returns task ids immediately (fan out to several peers, then task_wait once); consult asks and waits."
+                "Delegate work to other agents. list_peers shows who you can reach; delegate returns task ids immediately (fan out to several peers, then task_wait once); consult asks and waits; spawn_agent starts a new worker connected to you."
                     .into(),
             ),
         }

@@ -22,8 +22,14 @@
 //! * **Events** — topics `wasl.tasks` / `wasl.edges` (cursor = journal seq, replayable) and an
 //!   audit trail (`<dir>/audit.ndjson`).
 //!
-//! Extension points for later rounds (`spawn_agent`, `transfer`): new task modes and new
-//! node-to-node methods on the same journal/pump; nothing is exposed to agents yet.
+//! * **Spawning** — `wasl.spawn`: an agent asks for a new agent; the node asks its
+//!   [`SpawnAuthority`] (the supervisor) to plan it, raises a spawn gate on the calling session
+//!   unless the policy allows, then asks the authority to launch it and delegates the first
+//!   task. Journaled per request id (retries and restarts never spawn twice). Without an
+//!   authority: `spawn_unavailable`.
+//!
+//! Extension point for a later round (`transfer`): a new task mode and node-to-node methods on
+//! the same journal/pump.
 
 #![forbid(unsafe_code)]
 
@@ -33,9 +39,11 @@ mod journal;
 mod node;
 mod pump;
 mod service;
+mod spawn;
 mod state;
 mod transport;
 
 pub use node::{Node, NodeConfig, MAX_WAIT};
 pub use service::NodeService;
+pub use spawn::{SpawnAuthority, UplinkSpawnAuthority};
 pub use transport::{PeerTransport, TransportError, UplinkTransport};

@@ -30,6 +30,7 @@ rmcp = { version = "0.9", features = ["client", "transport-child-process"] }
 futures = { workspace = true }
 fastrand = { workspace = true }
 serde = { workspace = true }
+async-trait = { workspace = true }
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"

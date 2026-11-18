@@ -21,6 +21,12 @@
 //! | [`methods::NODE_UPDATE`] | [`UpdateRequest`] | [`Ack`] | node → node |
 //! | [`methods::NODE_CANCEL`] | [`CancelRemoteRequest`] | [`Ack`] | node → node |
 //! | [`methods::NODE_PEER_STATUS`] | [`PeerStatusRequest`] | [`PeerStatusReply`] | node → node |
+//! | [`methods::SPAWN`] | [`SpawnRequest`] | [`SpawnReply`] | MCP front-end |
+//! | [`methods::DISMISS`] | [`DismissRequest`] | [`DismissReply`] | MCP front-end |
+//! | [`methods::SUPERVISOR_SPAWN_PLAN`] | [`SpawnAsk`] | [`SpawnPlan`] | node → spawn authority |
+//! | [`methods::SUPERVISOR_SPAWN_LAUNCH`] | [`SpawnLaunch`] | [`SpawnLaunched`] | node → spawn authority |
+//! | [`methods::SUPERVISOR_DISMISS`] | [`DismissAsk`] | [`DismissReply`] | node → spawn authority |
+//! | [`methods::SUPERVISOR_SPAWNABLE`] | [`SpawnableAsk`] | [`Spawnable`] | node → spawn authority |
 //!
 //! Errors are `RpcError`s; Wasl-specific codes are in [`codes`].
 //!
@@ -47,6 +53,14 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use wasit_core::{ChoiceText, GateChoice, GateChoiceKind, GateDecision, Usage};
 
+pub mod spawn;
+pub use spawn::{
+    is_spawn_refusal, spawn_choice, spawn_choices, spawn_gate, spawn_request_id, DismissAsk,
+    DismissReply, DismissRequest, SpawnApproval, SpawnAsk, SpawnDecision, SpawnDriver, SpawnHost,
+    SpawnLaunch, SpawnLaunched, SpawnPlan, SpawnReply, SpawnRequest, SpawnSpec, Spawnable,
+    SpawnableAsk,
+};
+
 /// Method names.
 pub mod methods {
     pub const TOPOLOGY_SET: &str = "wasl.topology.set";
@@ -63,6 +77,16 @@ pub mod methods {
     pub const NODE_UPDATE: &str = "wasl.node.update";
     pub const NODE_CANCEL: &str = "wasl.node.cancel";
     pub const NODE_PEER_STATUS: &str = "wasl.node.peer_status";
+    /// An agent asks for a new agent ([`crate::SpawnRequest`] → [`crate::SpawnReply`]).
+    pub const SPAWN: &str = "wasl.spawn";
+    /// An agent stops an agent it spawned ([`crate::DismissRequest`] → [`crate::DismissReply`]).
+    pub const DISMISS: &str = "wasl.dismiss";
+    /// Served by the spawn authority (the supervisor; see [`crate::spawn`]). A node without an
+    /// authority of its own forwards these to the hub.
+    pub const SUPERVISOR_SPAWN_PLAN: &str = "wasl.supervisor.spawn_plan";
+    pub const SUPERVISOR_SPAWN_LAUNCH: &str = "wasl.supervisor.spawn_launch";
+    pub const SUPERVISOR_DISMISS: &str = "wasl.supervisor.dismiss";
+    pub const SUPERVISOR_SPAWNABLE: &str = "wasl.supervisor.spawnable";
 }
 
 /// Topic names.
@@ -98,6 +122,16 @@ pub mod codes {
     /// A topology with an older version than the one in force.
     pub const STALE_TOPOLOGY: &str = "stale_topology";
     pub const IO: &str = "io";
+    /// No spawn authority (supervisor) is attached: agents cannot spawn agents here.
+    pub const SPAWN_UNAVAILABLE: &str = "spawn_unavailable";
+    /// The workstream's spawn policy is "never", or the host / driver is not allowed.
+    pub const SPAWN_REFUSED: &str = "spawn_refused";
+    /// A spawn limit (count, depth, budget, deadline) is reached.
+    pub const SPAWN_LIMIT: &str = "spawn_limit";
+    /// The human denied the spawn.
+    pub const SPAWN_DENIED: &str = "spawn_denied";
+    /// The agent named was not spawned by the caller.
+    pub const NOT_SPAWNED_BY_CALLER: &str = "not_spawned_by_caller";
 }
 
 // ── Addresses ───────────────────────────────────────────────────────────────
@@ -630,6 +664,9 @@ pub struct PeerView {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 pub struct PeerList {
     pub peers: Vec<PeerView>,
+    /// What the caller may spawn (absent from nodes that predate spawning).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawnable: Option<Spawnable>,
 }
 
 /// [`methods::DELEGATE`]. Returns at once with one entry per target.

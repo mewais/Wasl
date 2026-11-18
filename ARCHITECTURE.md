@@ -43,11 +43,28 @@ host daemon A ◀──bridge──▶ hub (RoutingService) ◀──bridge─�
 - **Safety**: causation chain + hop on every task (re-entry ⇒ `cycle`, depth ⇒ `max_depth`),
   per-task deadline at both ends (⇒ `expired`), optional per-workstream budget.
 
+- **Spawning** (`wasl.spawn`, MCP `spawn_agent` / `dismiss_agent`): Wasl never launches a
+  process. The node asks its `SpawnAuthority` — the supervisor — in short calls:
+  `wasl.supervisor.spawn_plan` (policy, limits, defaults resolved; whether a human must approve),
+  then, after the human, `wasl.supervisor.spawn_launch` (launch, record in the workstream with a
+  connection from the caller, return the new topology), which must be idempotent by the
+  request id. In between the node raises `GateRequest::Spawn` on the calling session (choices:
+  allow once / always allow spawning in this workstream / always allow spawning and handoffs to
+  spawned agents / deny with an optional reason) and watches it like a handoff gate. Each
+  request is journaled per request id (`asking → launching → launched → done | failed`): the MCP
+  front-end reuses the id when it re-sends after a daemon restart, recovery resumes watching or
+  launching, so nothing is started twice. With an instruction, the first task is delegated over
+  the new connection (gated by its policy like any other). A daemon that is not the hub forwards
+  `wasl.supervisor.*` over the hub's connection (`UplinkSpawnAuthority`, host-less requests the
+  hub serves itself); the hub sets its own authority. No authority, or no supervisor reachable
+  within `spawn_connect_wait`: `spawn_unavailable`. `list_peers` carries `spawnable` (hosts,
+  drivers, models, remaining) from the authority.
+
 ## Wasit additions made for Wasl
 
 - `wasit-runtime`: external gates (`raise_gate` / `resolve_gate`), `CreateSession::id`.
 - `wasit-control`: `Uplink`, `ControlServer::connection_changes`.
-- `wasit-core`: `GateRequest::Handoff`, `McpServerConfig::trusted` (rendered per driver so the
+- `wasit-core`: `GateRequest::Handoff`, `GateRequest::Spawn`, `McpServerConfig::trusted` (rendered per driver so the
   CLI does not prompt for Wasl's tools).
 
 ## Deviations
@@ -55,4 +72,6 @@ host daemon A ◀──bridge──▶ hub (RoutingService) ◀──bridge─�
 - The budget is accounted per sending node (the cost of results it received), not globally.
 - `message` is a task of mode `message` (gated like any delegation; its result is ignored).
 - The multi-daemon tests run on Linux, macOS and Windows (local endpoints are Unix sockets or named pipes).
-- `spawn_agent` and `transfer` are not implemented (new task modes / node methods later).
+- `transfer` is not implemented (a new task mode / node methods later).
+- A spawn gate stays up if the asking turn is interrupted (as a handoff gate does); answering it
+  later still starts the worker.

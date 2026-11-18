@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use wasit_core::Usage;
 use wasl_proto::{
-    AgentId, CancelRemoteRequest, EdgePolicy, PeerCard, Task, TaskBrief, TaskId, TaskState,
-    TaskView, Topology,
+    AgentId, CancelRemoteRequest, EdgePolicy, PeerCard, SpawnDecision, SpawnLaunched, SpawnPlan,
+    SpawnReply, SpawnSpec, Task, TaskBrief, TaskId, TaskState, TaskView, Topology,
 };
 
 /// A handoff gate raised on the sending session.
@@ -106,6 +106,54 @@ impl InRec {
     }
 }
 
+/// Where a spawn request stands.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case")]
+pub enum SpawnPhase {
+    /// A spawn gate is (being) raised on the calling session.
+    Asking {
+        gate: GateInfo,
+    },
+    /// Approved; the supervisor is asked to launch it.
+    Launching {
+        decision: SpawnDecision,
+    },
+    /// Launched; the first task (if any) is still to be delegated.
+    Launched {
+        decision: SpawnDecision,
+        launched: SpawnLaunched,
+    },
+    Done {
+        reply: SpawnReply,
+    },
+    Failed {
+        code: String,
+        message: String,
+    },
+}
+
+impl SpawnPhase {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self, SpawnPhase::Done { .. } | SpawnPhase::Failed { .. })
+    }
+}
+
+/// A spawn request of one of this node's sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpawnPersist {
+    pub request_id: String,
+    pub from: AgentId,
+    pub spec: SpawnSpec,
+    pub plan: SpawnPlan,
+    pub phase: SpawnPhase,
+    pub updated_ms: u64,
+}
+
+pub struct SpawnRec {
+    pub p: SpawnPersist,
+    pub watch: watch::Sender<SpawnPhase>,
+}
+
 /// Per receiving session: FIFO of queued tasks and the one being worked on.
 #[derive(Default)]
 pub struct SessionQueue {
@@ -134,6 +182,8 @@ pub struct State {
     pub inflight: HashSet<Work>,
     /// Earliest next attempt and attempt count of work that failed retryably.
     pub retry: HashMap<Work, (tokio::time::Instant, u32)>,
+    /// Spawn requests by request id.
+    pub spawns: HashMap<String, SpawnRec>,
 }
 
 impl State {

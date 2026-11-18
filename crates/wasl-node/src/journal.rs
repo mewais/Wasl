@@ -23,7 +23,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use wasl_proto::{EdgeEvent, TaskId, Topology};
 
-use crate::state::{InPersist, OutPersist};
+use crate::state::{InPersist, OutPersist, SpawnPersist};
 
 /// Bound on records waiting for the writer.
 const QUEUE: usize = 8192;
@@ -41,6 +41,7 @@ pub enum Rec {
     Topology(Box<Topology>),
     TopologyRemoved { workstream: String },
     Edge(Box<EdgeEvent>),
+    Spawn(Box<SpawnPersist>),
 }
 
 /// What a record replaces.
@@ -51,6 +52,7 @@ pub enum Key {
     Topology(String),
     /// Edge events are history, not state: each is its own key.
     Edge(u64),
+    Spawn(String),
 }
 
 impl Rec {
@@ -61,6 +63,7 @@ impl Rec {
             Rec::Topology(t) => Key::Topology(t.workstream.clone()),
             Rec::TopologyRemoved { workstream } => Key::Topology(workstream.clone()),
             Rec::Edge(_) => Key::Edge(seq),
+            Rec::Spawn(s) => Key::Spawn(s.request_id.clone()),
         }
     }
 }
