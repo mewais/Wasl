@@ -1,2 +1,0 @@
-{ "api_version": 1, "agent_id": "wasl-a", "host_id": "host-1", "version": "0.1.0",
-  "target_id": "tgt-1", "last_seq": 12, "floor": 3, "resume": "snapshot" }

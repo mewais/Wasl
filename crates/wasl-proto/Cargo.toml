@@ -2,12 +2,11 @@
 name = "wasl-proto"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
 license.workspace = true
-repository.workspace = true
-description = "Wasl wire + domain types: MCP tool params/results, agent cards, envelopes, gate + elicitation shapes"
+description = "Wasl wire types: agents, peers, topology, tasks, handoff decisions, method and topic names"
 
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+wasit-core = { workspace = true }
+fastrand = { workspace = true }

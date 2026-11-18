@@ -1,7 +1,2 @@
 /target
-Cargo.lock
-__pycache__/
-*.pyc
-spikes/live-substrate/__pycache__/
-spikes/live-substrate/out/
-!spikes/live-substrate/out/.gitkeep
+/.cargo/

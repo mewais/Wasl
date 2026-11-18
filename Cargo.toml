@@ -1,72 +1,31 @@
 [workspace]
 resolver = "2"
-members = [
-    "crates/wasl-proto",
-    "crates/wasl-gate",
-    "crates/wasl-registry",
-    "crates/wasl-transfer",
-    "crates/wasl-audit",
-    "crates/wasl-server",
-    "crates/wasl-e2e",
-    "crates/wasl-mcp",
-    "crates/wasl-a2a-types",
-    "crates/wasl-a2a-server",
-    "crates/wasl-a2a-client",
-    "crates/wasl-adapter",
-    "crates/wasl-dispatch",
-    "crates/wasl-node",
-    "crates/wasl-filesink",
-    "crates/wasl-operator",
-    "crates/wasl-procrunner",
-    "crates/wasl-adapter-claude",
-    "crates/wasl-adapter-codex",
-    "crates/wasl-adapter-opencode",
-    "crates/wasl-runtime",
-    "crates/wasl-runtime-protocol",
-    "crates/wasl-session",
-    "crates/wasl-runtime-control",
-]
+members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.78"
-authors = ["Mohammad Ewais <mohammad.a.ewais@gmail.com>"]
 license = "MIT"
-repository = "https://github.com/mewais/Wasl"
 
 [workspace.dependencies]
 wasl-proto = { path = "crates/wasl-proto" }
-wasl-gate = { path = "crates/wasl-gate" }
 wasl-audit = { path = "crates/wasl-audit" }
-wasl-registry = { path = "crates/wasl-registry" }
-wasl-transfer = { path = "crates/wasl-transfer" }
-wasl-a2a-types = { path = "crates/wasl-a2a-types" }
-wasl-a2a-server = { path = "crates/wasl-a2a-server" }
-wasl-a2a-client = { path = "crates/wasl-a2a-client" }
-wasl-adapter = { path = "crates/wasl-adapter" }
-wasl-dispatch = { path = "crates/wasl-dispatch" }
 wasl-node = { path = "crates/wasl-node" }
-wasl-filesink = { path = "crates/wasl-filesink" }
-wasl-operator = { path = "crates/wasl-operator" }
-wasl-procrunner = { path = "crates/wasl-procrunner" }
-wasl-adapter-claude = { path = "crates/wasl-adapter-claude" }
-wasl-adapter-codex = { path = "crates/wasl-adapter-codex" }
-wasl-adapter-opencode = { path = "crates/wasl-adapter-opencode" }
-wasl-server = { path = "crates/wasl-server" }
-wasl-runtime = { path = "crates/wasl-runtime" }
-wasl-runtime-protocol = { path = "crates/wasl-runtime-protocol" }
-wasl-session = { path = "crates/wasl-session" }
-wasl-runtime-control = { path = "crates/wasl-runtime-control" }
+wasl-mcp = { path = "crates/wasl-mcp" }
+
+# Wasit: one pinned git source; local development overrides it with a `[patch]` in an
+# untracked `.cargo/config.toml` (see README.md).
+wasit-core = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
+wasit-control = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
+wasit-runtime = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
+wasit-shim = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
+wasit-fake-cli = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
+
+tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync", "net", "time"] }
-axum = "0.7"
-reqwest = { version = "0.12", features = ["json", "stream"] }
 async-trait = "0.1"
 futures = "0.3"
-wasit-core = { path = "../Wasit/crates/wasit-core" }
-wasit-claude = { path = "../Wasit/crates/wasit-claude" }
-wasit-codex = { path = "../Wasit/crates/wasit-codex" }
-wasit-opencode = { path = "../Wasit/crates/wasit-opencode" }
+tracing = "0.1"
+fastrand = "2"
+rmcp = { version = "0.9", features = ["server", "transport-io", "elicitation"] }

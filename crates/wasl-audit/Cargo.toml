@@ -2,15 +2,15 @@
 name = "wasl-audit"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
 license.workspace = true
-repository.workspace = true
-description = "Wasl audit log: durable, human-auditable interaction + decision record (Sink trait)"
+description = "Wasl audit trail: one entry per delegation and decision, appended to a JSON-lines file"
 
 [dependencies]
-serde = { workspace = true }
 wasl-proto = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
+tokio = { workspace = true }

@@ -1,425 +1,688 @@
-//! wasl-mcp — MCP server facade for Wasl (the IO shell over the tested cores).
+//! wasl-mcp — the stdio MCP server an agent CLI launches to talk to other agents.
 //!
-//! Exposes the four Wasl agent-to-agent tools (consult / command / message /
-//! transfer) plus the Tier-2 `commit` redemption tool as MCP tools. Each call
-//! runs the real three-tier permission-before-send gate (`crate::gating`
-//! picks Tier-1 elicitation / Tier-3 external / Tier-2 prepare-commit per the
-//! configured [`GateAuthority`] and the REAL client capabilities, reusing the
-//! tested `wasl_gate` logic) and, only on approval, dispatches over REAL
-//! async A2A (`wasl_dispatch` for the messaging verbs; `wasl_transfer` for
-//! transfer), recording every decision to `wasl_audit` (and, when an operator
-//! is bound, mirroring it to `/v1/events`). Transport/runtime is this crate's
-//! concern; all decision + routing logic is the tested cores.
-//! See `docs/specs/mcp-gating.md` (current) and `docs/specs/mcp-a2a.md`.
+//! It is a thin client of the local daemon's Wasl node: every tool is one `wasl.*` request over
+//! the daemon's control socket (a supervised connection: a daemon restart mid-call reconnects
+//! and read-only calls such as `task_wait` resume). The session it speaks for is fixed at
+//! injection time ([`mcp_server_config`]).
+//!
+//! Tools: `list_peers`, `delegate`, `task_status`, `task_wait`, `task_cancel`, `consult`,
+//! `message`. Results are compact JSON.
+//!
+//! Handoff approval normally happens on the sending session as a gate the supervisor shows.
+//! Without a supervisor the node marks a task `pending_approval` via `elicitation`; this server
+//! then asks its client (MCP elicitation) and reports the answer, or denies when the client
+//! cannot ask.
 
-pub mod config;
-pub mod gating;
-pub mod handle;
-pub mod server;
+#![forbid(unsafe_code)]
 
-// Needed for the managed-runtime / runtime-control wiring in `run()`.
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
-use wasl_runtime::{
-    ManagedConfig, MonotonicClock, ProtocolRoutingProvider, RuntimeProvider,
-    WaslManagedRuntimeProvider,
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use rmcp::handler::server::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{
+    CallToolResult, Content, CreateElicitationRequestParam, ElicitationAction, ElicitationSchema,
+    Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
 };
-use wasl_runtime_protocol::{ClaudeStreamProtocol, CodexAppServerProtocol, OpenCodeAcpProtocol};
-
-use wasl_audit::{AuditEntry, AuditError, AuditLog, Sink};
-use wasl_filesink::FileSink;
-use wasl_operator::{HubConfig, NodeInfo, OperatorHub, TeeSink};
-use wasl_procrunner::ProcessRunner;
-
-pub use config::{
-    build_adapter, registry_from_peers, A2aConfig, AdapterConfig, AdapterKind, AuditConfig, Config,
-    ConfigError, EnvOverrides, GateConfig, IdentityConfig, NodeAdapter, OperatorConfig, PeerEntry,
-    RuntimeConfig, RuntimeKind,
+use rmcp::schemars::{self, JsonSchema};
+use rmcp::{
+    tool, tool_handler, tool_router, ErrorData as McpError, Peer, RoleServer, ServerHandler,
 };
-pub use gating::{detect_caps, ledger_decision_of, proto_action, select_mode, GateAuthority};
-pub use handle::{resolve_and_dispatch, HandleError, ToolCall, ToolCtx, ToolReply};
-pub use server::{CounterTokenIds, RandomTokenIds, TokenIds, WaslMcp, WaslState};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use wasit_control::{
+    connector, local_endpoint, CallError, ClientOptions, ControlClient, Hello, RequestOpts,
+    Supervised, SupervisedOptions,
+};
+use wasit_core::{McpServerConfig, McpTransport};
+use wasl_proto::{
+    methods, ApprovalVia, CancelRequest, DecideRequest, DelegateReply, DelegateRequest,
+    HandoffDecision, MessageRequest, PeerList, PeersRequest, TaskBrief, TaskId, TaskMode,
+    TaskState, TaskStates, WaitRequest,
+};
 
-// ---------------------------------------------------------------------
-// 1. Default IO seams for `run()`
-// ---------------------------------------------------------------------
+/// Name of the MCP server as agents see it (tools appear as `mcp__wasl__…` in claude).
+pub const SERVER_NAME: &str = "wasl";
 
-/// An in-memory audit sink: keeps every recorded entry. Simple and infallible —
-/// used by the tests; `run()` uses the durable `wasl_filesink::FileSink`.
-#[derive(Debug, Default, Clone)]
-pub struct MemSink {
-    pub entries: Vec<AuditEntry>,
+const BUILD: &str = concat!("wasl-mcp/", env!("CARGO_PKG_VERSION"));
+/// How long a call waits for the daemon to come (back) up.
+const WAIT_CONNECTED: Duration = Duration::from_secs(30);
+const DEADLINE: Duration = Duration::from_secs(30);
+const DEFAULT_WAIT_SECS: u64 = 120;
+const MAX_WAIT_SECS: u64 = 600;
+
+/// Where the server connects and which session it speaks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpArgs {
+    /// The daemon's socket path (on Windows the path its named pipe is derived from).
+    pub socket: PathBuf,
+    pub session: String,
 }
 
-impl MemSink {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl Sink for MemSink {
-    fn append(&mut self, entry: &AuditEntry) -> Result<(), AuditError> {
-        self.entries.push(entry.clone());
-        Ok(())
-    }
-}
-
-/// The concrete audit sink `run()` uses: the durable `FileSink` normally, or an
-/// in-memory fallback if the audit file can't be opened. An enum (not a boxed
-/// trait object) so it satisfies `K: Sink` with one concrete type.
-pub enum DefaultSink {
-    File(FileSink),
-    Mem(MemSink),
-}
-
-impl Sink for DefaultSink {
-    fn append(&mut self, entry: &AuditEntry) -> Result<(), AuditError> {
-        match self {
-            DefaultSink::File(sink) => sink.append(entry),
-            DefaultSink::Mem(sink) => sink.append(entry),
+impl McpArgs {
+    /// `--socket <path> --session <id>`; falls back to `WASL_SOCKET` / `WASL_SESSION`.
+    pub fn parse(args: &[String]) -> Result<McpArgs, String> {
+        let mut socket = std::env::var_os("WASL_SOCKET").map(PathBuf::from);
+        let mut session = std::env::var("WASL_SESSION").ok();
+        let mut it = args.iter();
+        while let Some(a) = it.next() {
+            let mut val = || it.next().cloned().ok_or(format!("{a} needs a value"));
+            match a.as_str() {
+                "--socket" => socket = Some(PathBuf::from(val()?)),
+                "--session" => session = Some(val()?),
+                other => return Err(format!("unknown option {other}")),
+            }
         }
+        Ok(McpArgs {
+            socket: socket.ok_or("--socket <path> (or WASL_SOCKET) is required")?,
+            session: session.ok_or("--session <id> (or WASL_SESSION) is required")?,
+        })
     }
 }
 
-/// The concrete sink `run()`'s handler is built over: the plain [`DefaultSink`]
-/// when no operator is bound, or [`TeeSink`]-wrapped (durable append first,
-/// then a broadcast `Audit` frame fan-out to `/v1/events`) when one is. One
-/// concrete enum (not a boxed trait object) so `build_handler` stays a single
-/// `WaslMcp<RunSink, ProcessRunner>` type regardless of `[operator] bind`.
-pub enum RunSink {
-    Plain(DefaultSink),
-    Teed(TeeSink<DefaultSink>),
-}
-
-impl Sink for RunSink {
-    fn append(&mut self, entry: &AuditEntry) -> Result<(), AuditError> {
-        match self {
-            RunSink::Plain(sink) => sink.append(entry),
-            RunSink::Teed(tee) => tee.append(entry),
-        }
+/// The MCP server item that injects this server into a session's launch config
+/// (`AgentConfig::mcp_servers`). `program` + `prefix` is how to start it (e.g. the daemon
+/// binary and `["mcp"]`).
+pub fn mcp_server_config(
+    program: &Path,
+    prefix: &[String],
+    socket: &Path,
+    session: &str,
+) -> McpServerConfig {
+    let mut args: Vec<String> = prefix.to_vec();
+    args.extend([
+        "--socket".to_string(),
+        socket.to_string_lossy().into_owned(),
+        "--session".to_string(),
+        session.to_string(),
+    ]);
+    McpServerConfig {
+        name: SERVER_NAME.into(),
+        transport: McpTransport::Stdio {
+            command: program.to_string_lossy().into_owned(),
+            args,
+            env: Default::default(),
+        },
     }
 }
 
-// ---------------------------------------------------------------------
-// 1b. build_managed_provider — IO SHELL, UNTESTED HERE
-// ---------------------------------------------------------------------
+// ── tool arguments ──────────────────────────────────────────────────────────
 
-/// Construct a per-protocol [`WaslManagedRuntimeProvider`] for each of the
-/// configured protocols (`"claude"`, `"opencode-acp"`) and wrap them in a
-/// [`ProtocolRoutingProvider`] so one Wasl node can serve both protocols.
-///
-/// The clock is [`MonotonicClock`] (the same default the node uses throughout).
-/// The audit sink is a fresh [`MemSink`] — a non-durable in-memory sink, which
-/// is correct here: the managed provider's actor uses the sink only for
-/// runtime-layer audit entries; the durable per-session audit trail is
-/// separately written by the MCP handler via the `AuditLog`/`FileSink` already
-/// built in [`build_handler`]. A shared durable sink could be wired in a
-/// future phase; for now the default matches the crate's existing pattern.
-fn build_managed_provider(cfg: &Config) -> Arc<dyn RuntimeProvider> {
-    let clock: Arc<dyn wasl_runtime::RuntimeClock> = Arc::new(MonotonicClock);
-    // Each sub-provider gets its own sink handle (the actor's sole writer).
-    let claude_bin = cfg
-        .runtime
-        .claude_bin
-        .clone()
-        .unwrap_or_else(|| "claude".to_string());
-    let opencode_bin = cfg
-        .runtime
-        .opencode_bin
-        .clone()
-        .unwrap_or_else(|| "opencode".to_string());
-    let codex_bin = cfg
-        .runtime
-        .codex_bin
-        .clone()
-        .unwrap_or_else(|| "codex".to_string());
+#[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
+pub struct NoArgs {}
 
-    let claude_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> = Arc::new(Mutex::new(MemSink::new()));
-    let opencode_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> =
-        Arc::new(Mutex::new(MemSink::new()));
-    let codex_sink: Arc<Mutex<dyn wasl_audit::Sink + Send>> = Arc::new(Mutex::new(MemSink::new()));
-
-    let claude_provider: Arc<dyn RuntimeProvider> =
-        Arc::new(WaslManagedRuntimeProvider::with_seams(
-            ClaudeStreamProtocol::new(claude_bin),
-            ManagedConfig::default(),
-            clock.clone(),
-            claude_sink,
-        ));
-    let opencode_provider: Arc<dyn RuntimeProvider> =
-        Arc::new(WaslManagedRuntimeProvider::with_seams(
-            OpenCodeAcpProtocol::new(opencode_bin),
-            ManagedConfig::default(),
-            clock.clone(),
-            opencode_sink,
-        ));
-    let codex_provider: Arc<dyn RuntimeProvider> =
-        Arc::new(WaslManagedRuntimeProvider::with_seams(
-            CodexAppServerProtocol::new(codex_bin),
-            ManagedConfig::default(),
-            clock,
-            codex_sink,
-        ));
-
-    let mut providers = BTreeMap::new();
-    providers.insert("claude".to_string(), claude_provider);
-    providers.insert("opencode-acp".to_string(), opencode_provider);
-    providers.insert("codex".to_string(), codex_provider);
-
-    Arc::new(ProtocolRoutingProvider::new(
-        providers,
-        cfg.runtime.default_protocol.clone(),
-    ))
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct DelegateArgs {
+    /// Peer names or ids from list_peers (one or many).
+    pub to: Vec<String>,
+    /// What the peer should do; self-contained (the peer does not see your conversation).
+    pub instruction: String,
+    /// "command" (do the work; default) or "consult" (answer only, change nothing).
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Give up after this many seconds (default: the workstream's).
+    #[serde(default)]
+    pub deadline_secs: Option<u64>,
 }
 
-// ---------------------------------------------------------------------
-// 2. build_handler
-// ---------------------------------------------------------------------
-
-/// Open the durable audit sink at `path`, falling back to an in-memory sink
-/// (LOUDLY, on stderr) if the file cannot be opened — the server still
-/// starts, but the operator is told the trail is not durable rather than it
-/// being dropped silently.
-fn open_audit(path: &str) -> DefaultSink {
-    match FileSink::open(path) {
-        Ok(sink) => DefaultSink::File(sink),
-        Err(err) => {
-            eprintln!(
-                "wasl-mcpd: WARNING: could not open durable audit log at {path:?}: {err}. \
-                 Falling back to a NON-DURABLE in-memory audit sink for this run."
-            );
-            DefaultSink::Mem(MemSink::new())
-        }
-    }
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct IdsArgs {
+    /// Task ids returned by delegate.
+    pub ids: Vec<String>,
 }
 
-/// Build the default handler wired to the durable/real seams: identity +
-/// peers + audit path from `cfg`, a `ProcessRunner` for transfer, a shared
-/// `reqwest::Client` for A2A, the configured [`GateAuthority`], and — when
-/// `hub` is `Some` (i.e. `[operator] bind` was set and parsed) — the durable
-/// sink teed to the operator's `/v1/events` feed.
-fn build_handler(cfg: &Config, hub: Option<OperatorHub>) -> WaslMcp<RunSink, ProcessRunner> {
-    let self_id = wasl_proto::AgentId(cfg.identity.agent_id.clone());
-    let self_host = wasl_proto::HostId(cfg.identity.host_id.clone());
-    let registry = registry_from_peers(&cfg.peers);
-    let sink = open_audit(&cfg.audit.path);
-    let run_sink = match &hub {
-        Some(hub) => RunSink::Teed(TeeSink::new(sink, hub.clone())),
-        None => RunSink::Plain(sink),
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct WaitArgs {
+    /// Task ids returned by delegate.
+    pub ids: Vec<String>,
+    /// Max seconds to wait (default 120, max 600).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// Return as soon as any one task finishes.
+    #[serde(default)]
+    pub any: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct CancelArgs {
+    pub id: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct ConsultArgs {
+    /// Peer names or ids from list_peers.
+    pub to: Vec<String>,
+    /// The question; self-contained.
+    pub question: String,
+    /// Max seconds to wait for the answers (default 120, max 600).
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct MessageArgs {
+    /// Peer names or ids from list_peers.
+    pub to: Vec<String>,
+    pub text: String,
+}
+
+// ── compact results ─────────────────────────────────────────────────────────
+
+/// A task as an agent sees it.
+#[derive(Debug, Serialize)]
+struct TaskOut {
+    id: String,
+    to: String,
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    progress: Option<Value>,
+}
+
+fn task_out(b: &TaskBrief) -> TaskOut {
+    let to = if b.to_name.is_empty() {
+        b.to.to_string()
+    } else {
+        b.to_name.clone()
     };
-    let audit = AuditLog::new(run_sink);
-    let http = reqwest::Client::new();
-    let state = WaslState::new(audit, http, ProcessRunner::new());
-    // Feature A: attach the USER-facing name surface (self host_name + the peer
-    // name side-table) from config so `list_peers` reports the roster by name and
-    // the send tools accept a name alias. Config-defaulted to empty for an
-    // un-upgraded roster, so this is additive/forward-compatible.
-    WaslMcp::with_gating(self_id, self_host, registry, state, cfg.gate.authority, hub).with_names(
-        cfg.identity.host_name.clone(),
-        config::peer_names(&cfg.peers),
-    )
+    let (result, error, progress) = match &b.state {
+        TaskState::Completed { result } => (Some(result.summary.clone()), None, None),
+        TaskState::Failed { error } => (None, Some(error.clone()), None),
+        TaskState::Cancelled { reason } | TaskState::Denied { reason } => {
+            (None, Some(reason.clone()), None)
+        }
+        TaskState::Expired => (None, Some("deadline passed".into()), None),
+        TaskState::Running { progress }
+            if progress.tool_calls > 0 || progress.last_text.is_some() =>
+        {
+            (None, None, serde_json::to_value(progress).ok())
+        }
+        _ => (None, None, None),
+    };
+    TaskOut {
+        id: b.id.to_string(),
+        to,
+        state: b.state.name(),
+        result,
+        error,
+        progress,
+    }
 }
 
-// ---------------------------------------------------------------------
-// 3. run()
-// ---------------------------------------------------------------------
+fn json_result(v: Value) -> CallToolResult {
+    CallToolResult::success(vec![Content::text(v.to_string())])
+}
 
-/// Run the stdio MCP server (blocking until the transport closes).
-///
-/// Loads the config (`Config::load()`) FIRST and fails loud — before any IO
-/// starts, in particular before the stdio MCP transport would ever block on
-/// stdin — if it is invalid: prints `wasl-mcpd: config error: {e}` to stderr
-/// and exits with status 2.
-///
-/// On success: builds the handler (identity/registry/audit path from the
-/// config, durable `FileSink` audit + `ProcessRunner` transfer + shared A2A
-/// `reqwest::Client` + the configured gate authority), starts a tokio
-/// runtime, serves over stdio, and blocks until the client disconnects.
-///
-/// If `cfg.a2a.bind` is set (post-env-overlay), it ALSO spawns this node's
-/// A2A RECEIVE server concurrently (see the UNTESTED-HERE shell below). If
-/// `cfg.operator.bind` is set, it ALSO spawns the operator surface
-/// (`wasl_operator::serve`) and tees the audit sink to it — see the
-/// UNTESTED-HERE shell just below the A2A one.
-pub fn run() {
-    let cfg = match Config::load() {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            eprintln!("wasl-mcpd: config error: {err}");
-            std::process::exit(2);
+fn tool_error(msg: impl Into<String>) -> CallToolResult {
+    CallToolResult::error(vec![Content::text(msg.into())])
+}
+
+fn ids(v: &[String]) -> Vec<TaskId> {
+    v.iter().map(|s| TaskId(s.clone())).collect()
+}
+
+fn wait_secs(t: Option<u64>) -> u64 {
+    t.unwrap_or(DEFAULT_WAIT_SECS).clamp(1, MAX_WAIT_SECS)
+}
+
+// ── the server ──────────────────────────────────────────────────────────────
+
+/// The MCP handler.
+#[derive(Clone)]
+pub struct WaslMcp {
+    link: Supervised,
+    session: String,
+    tool_router: ToolRouter<Self>,
+}
+
+impl WaslMcp {
+    /// A handler talking to the daemon at `args.socket` (the connection is made lazily and
+    /// re-made after a daemon restart).
+    pub fn new(args: &McpArgs) -> Self {
+        let endpoint = local_endpoint(&args.socket);
+        let hello = Hello::new(BUILD, "wasl-mcp", "wasl-mcp");
+        let link = Supervised::spawn(
+            connector(move || {
+                let endpoint = endpoint.clone();
+                let opts = ClientOptions::new(hello.clone());
+                async move { ControlClient::connect_endpoint(&endpoint, opts).await }
+            }),
+            SupervisedOptions::default(),
+        );
+        WaslMcp {
+            link,
+            session: args.session.clone(),
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    /// One request. `retry`: the call is idempotent, so it is re-sent if the daemon restarts
+    /// while it is in flight.
+    async fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: Duration,
+        retry: bool,
+    ) -> Result<T, String> {
+        let mut attempts = 0;
+        loop {
+            attempts += 1;
+            let r: Result<T, CallError> = self
+                .link
+                .request(method, &params, RequestOpts::new(deadline), WAIT_CONNECTED)
+                .await;
+            match r {
+                Ok(v) => return Ok(v),
+                Err(CallError::ConnectionLost(_) | CallError::NotConnected)
+                    if retry && attempts < 5 =>
+                {
+                    continue
+                }
+                Err(CallError::Rpc(e)) => return Err(e.message),
+                Err(CallError::NotConnected) => {
+                    return Err("the local Wasl daemon is not reachable".into())
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    }
+
+    /// Standalone approval: ask the client for tasks that wait for an elicitation.
+    async fn approve_pending(&self, peer: &Peer<RoleServer>, tasks: &mut [TaskBrief]) {
+        let can_ask = peer
+            .peer_info()
+            .is_some_and(|c| c.capabilities.elicitation.is_some());
+        for t in tasks.iter_mut() {
+            if t.state
+                != (TaskState::PendingApproval {
+                    via: ApprovalVia::Elicitation,
+                })
+            {
+                continue;
+            }
+            let to = if t.to_name.is_empty() {
+                t.to.to_string()
+            } else {
+                t.to_name.clone()
+            };
+            let decision = if can_ask {
+                let param = CreateElicitationRequestParam {
+                    message: format!(
+                        "Allow this agent to hand a {} task to {to}? Accept to allow once.",
+                        t.mode.as_str()
+                    ),
+                    requested_schema: ElicitationSchema::builder()
+                        .build()
+                        .unwrap_or_else(|_| ElicitationSchema::builder().build_unchecked()),
+                };
+                match peer.create_elicitation(param).await {
+                    Ok(r) if r.action == ElicitationAction::Accept => HandoffDecision::AllowOnce,
+                    Ok(_) => HandoffDecision::Deny {
+                        reason: Some("declined by the user".into()),
+                    },
+                    Err(e) => HandoffDecision::Deny {
+                        reason: Some(format!("could not ask the user: {e}")),
+                    },
+                }
+            } else {
+                HandoffDecision::Deny {
+                    reason: Some(
+                        "no supervisor is attached and this client cannot ask the user".into(),
+                    ),
+                }
+            };
+            let req = DecideRequest {
+                id: t.id.clone(),
+                decision,
+            };
+            match self
+                .call::<TaskBrief>(methods::TASK_DECIDE, json!(req), DEADLINE, false)
+                .await
+            {
+                Ok(b) => *t = b,
+                Err(e) => tracing::warn!(error = %e, "reporting a handoff decision failed"),
+            }
+        }
+    }
+
+    async fn do_delegate(
+        &self,
+        peer: &Peer<RoleServer>,
+        req: DelegateRequest,
+        method: &str,
+    ) -> Result<(Vec<TaskBrief>, Vec<Value>), String> {
+        let reply: DelegateReply = self.call(method, json!(req), DEADLINE, false).await?;
+        let mut tasks = Vec::new();
+        let mut errors = Vec::new();
+        for r in reply.results {
+            match (r.task, r.error) {
+                (Some(t), _) => tasks.push(t),
+                (None, Some(e)) => errors.push(json!({"to": r.to, "error": e.message})),
+                (None, None) => {}
+            }
+        }
+        self.approve_pending(peer, &mut tasks).await;
+        Ok((tasks, errors))
+    }
+
+    async fn do_wait(&self, ids: Vec<TaskId>, secs: u64, any: bool) -> Result<TaskStates, String> {
+        let req = WaitRequest {
+            ids,
+            timeout_ms: secs * 1000,
+            any,
+        };
+        self.call(
+            methods::TASK_WAIT,
+            json!(req),
+            Duration::from_secs(secs + 30),
+            true,
+        )
+        .await
+    }
+}
+
+fn states_json(s: &TaskStates) -> Value {
+    let tasks: Vec<TaskOut> = s.tasks.iter().map(task_out).collect();
+    let mut v = json!({"tasks": tasks});
+    if s.timed_out {
+        v["timed_out"] = json!(true);
+    }
+    if !s.unknown.is_empty() {
+        v["unknown"] = json!(s.unknown);
+    }
+    v
+}
+
+#[tool_router]
+impl WaslMcp {
+    #[tool(
+        description = "List the agents you can delegate to: name, id, role, live status, approval policy. Empty when this session has no connections."
+    )]
+    async fn list_peers(
+        &self,
+        Parameters(_a): Parameters<NoArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let req = PeersRequest {
+            from: self.session.clone(),
+        };
+        match self
+            .call::<PeerList>(methods::PEERS_LIST, json!(req), DEADLINE, true)
+            .await
+        {
+            Ok(l) if l.peers.is_empty() => Ok(json_result(json!({
+                "peers": [],
+                "note": "no connections are configured for this session; there is nobody to delegate to"
+            }))),
+            Ok(l) => {
+                let peers: Vec<Value> = l
+                    .peers
+                    .iter()
+                    .map(|p| {
+                        let mut v = json!({
+                            "name": p.card.name,
+                            "id": p.card.agent,
+                            "status": p.card.status,
+                            "policy": p.policy,
+                        });
+                        for (k, s) in [
+                            ("role", &p.card.role),
+                            ("description", &p.card.description),
+                            ("driver", &p.card.driver),
+                        ] {
+                            if !s.is_empty() {
+                                v[k] = json!(s);
+                            }
+                        }
+                        v
+                    })
+                    .collect();
+                Ok(json_result(json!({ "peers": peers })))
+            }
+            Err(e) => Ok(tool_error(e)),
+        }
+    }
+
+    #[tool(
+        description = "Hand a task to one or more peers. Returns task ids at once; peers work in parallel. Collect results with task_wait (delegate to many, then wait once). mode: command (default, do work) or consult (answer only). A human may have to approve the handoff first."
+    )]
+    async fn delegate(
+        &self,
+        Parameters(a): Parameters<DelegateArgs>,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let mode = match a.mode.as_deref() {
+            None | Some("command") => TaskMode::Command,
+            Some("consult") => TaskMode::Consult,
+            Some(other) => {
+                return Ok(tool_error(format!(
+                    "unknown mode {other:?}; use \"command\" or \"consult\""
+                )))
+            }
+        };
+        let req = DelegateRequest {
+            from: self.session.clone(),
+            to: a.to,
+            mode,
+            instruction: a.instruction,
+            deadline_secs: a.deadline_secs,
+            attachments: Vec::new(),
+        };
+        match self.do_delegate(&peer, req, methods::DELEGATE).await {
+            Ok((tasks, errors)) => {
+                let out: Vec<TaskOut> = tasks.iter().map(task_out).collect();
+                let mut v = json!({ "tasks": out });
+                if !errors.is_empty() {
+                    v["errors"] = json!(errors);
+                }
+                if tasks.is_empty() {
+                    return Ok(CallToolResult::error(vec![Content::text(v.to_string())]));
+                }
+                Ok(json_result(v))
+            }
+            Err(e) => Ok(tool_error(e)),
+        }
+    }
+
+    #[tool(
+        description = "Current state of tasks (pending_approval, queued, running+progress, completed+result, failed, cancelled, denied, expired). Does not wait."
+    )]
+    async fn task_status(
+        &self,
+        Parameters(a): Parameters<IdsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let req = wasl_proto::TaskIds { ids: ids(&a.ids) };
+        match self
+            .call::<TaskStates>(methods::TASK_STATUS, json!(req), DEADLINE, true)
+            .await
+        {
+            Ok(s) => Ok(json_result(states_json(&s))),
+            Err(e) => Ok(tool_error(e)),
+        }
+    }
+
+    #[tool(
+        description = "Wait until the tasks finish (all, or any=true for the first) or timeout_secs passes (default 120, max 600); returns states and results. Call again if timed_out."
+    )]
+    async fn task_wait(
+        &self,
+        Parameters(a): Parameters<WaitArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .do_wait(
+                ids(&a.ids),
+                wait_secs(a.timeout_secs),
+                a.any.unwrap_or(false),
+            )
+            .await
+        {
+            Ok(s) => Ok(json_result(states_json(&s))),
+            Err(e) => Ok(tool_error(e)),
+        }
+    }
+
+    #[tool(description = "Cancel a task you delegated (stops it if running).")]
+    async fn task_cancel(
+        &self,
+        Parameters(a): Parameters<CancelArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let req = CancelRequest {
+            id: TaskId(a.id),
+            reason: a.reason,
+        };
+        match self
+            .call::<TaskBrief>(methods::TASK_CANCEL, json!(req), DEADLINE, true)
+            .await
+        {
+            Ok(b) => Ok(json_result(json!(task_out(&b)))),
+            Err(e) => Ok(tool_error(e)),
+        }
+    }
+
+    #[tool(
+        description = "Ask peers a question and wait for their answers (consult-mode delegate + task_wait). For long work use delegate + task_wait."
+    )]
+    async fn consult(
+        &self,
+        Parameters(a): Parameters<ConsultArgs>,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let req = DelegateRequest {
+            from: self.session.clone(),
+            to: a.to,
+            mode: TaskMode::Consult,
+            instruction: a.question,
+            deadline_secs: None,
+            attachments: Vec::new(),
+        };
+        let (tasks, errors) = match self.do_delegate(&peer, req, methods::DELEGATE).await {
+            Ok(r) => r,
+            Err(e) => return Ok(tool_error(e)),
+        };
+        if tasks.is_empty() {
+            return Ok(tool_error(json!({ "errors": errors }).to_string()));
+        }
+        let wait_ids: Vec<TaskId> = tasks.iter().map(|t| t.id.clone()).collect();
+        match self
+            .do_wait(wait_ids, wait_secs(a.timeout_secs), false)
+            .await
+        {
+            Ok(s) => {
+                let mut v = states_json(&s);
+                if !errors.is_empty() {
+                    v["errors"] = json!(errors);
+                }
+                Ok(json_result(v))
+            }
+            Err(e) => Ok(tool_error(e)),
+        }
+    }
+
+    #[tool(description = "Send peers a note. Fire-and-forget: no reply is expected.")]
+    async fn message(
+        &self,
+        Parameters(a): Parameters<MessageArgs>,
+        peer: Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let req = MessageRequest {
+            from: self.session.clone(),
+            to: a.to.clone(),
+            text: a.text.clone(),
+        };
+        let reply: Result<DelegateReply, String> = self
+            .call(methods::MESSAGE, json!(req), DEADLINE, false)
+            .await;
+        match reply {
+            Ok(r) => {
+                let mut tasks: Vec<TaskBrief> = Vec::new();
+                let mut errors = Vec::new();
+                for o in r.results {
+                    match (o.task, o.error) {
+                        (Some(t), _) => tasks.push(t),
+                        (None, Some(e)) => errors.push(json!({"to": o.to, "error": e.message})),
+                        _ => {}
+                    }
+                }
+                self.approve_pending(&peer, &mut tasks).await;
+                let sent: Vec<TaskOut> = tasks.iter().map(task_out).collect();
+                let mut v = json!({ "sent": sent });
+                if !errors.is_empty() {
+                    v["errors"] = json!(errors);
+                }
+                if tasks.is_empty() {
+                    return Ok(CallToolResult::error(vec![Content::text(v.to_string())]));
+                }
+                Ok(json_result(v))
+            }
+            Err(e) => Ok(tool_error(e)),
+        }
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for WaslMcp {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            server_info: Implementation {
+                name: SERVER_NAME.into(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                ..Implementation::from_build_env()
+            },
+            instructions: Some(
+                "Delegate work to other agents. list_peers shows who you can reach; delegate returns task ids immediately (fan out to several peers, then task_wait once); consult asks and waits."
+                    .into(),
+            ),
+        }
+    }
+}
+
+/// Serve MCP over this process's stdio until the client disconnects.
+pub async fn serve(args: McpArgs) -> Result<(), String> {
+    use rmcp::ServiceExt;
+    let handler = WaslMcp::new(&args);
+    let running = handler
+        .serve(rmcp::transport::io::stdio())
+        .await
+        .map_err(|e| format!("cannot start the MCP server: {e}"))?;
+    running
+        .waiting()
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("MCP server ended with an error: {e}"))
+}
+
+/// The `mcp` subcommand: parse `args` and serve (builds its own runtime).
+pub fn run(args: &[String]) -> std::process::ExitCode {
+    let parsed = match McpArgs::parse(args) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("wasl mcp: {e}");
+            return std::process::ExitCode::from(2);
         }
     };
-
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("failed to build tokio runtime");
-
-    runtime.block_on(async {
-        use rmcp::transport::io::stdio;
-        use rmcp::ServiceExt;
-
-        // D1 (live-runtime-plan §3): under `runtime.kind = managed`, build the
-        // managed provider ONCE and share it between the A2A receive server (so a
-        // peer's task lands in the node's live managed session) and the
-        // runtime-control hub below (so a session Marsad creates via
-        // runtime-control is the SAME target the A2A receiver delivers into).
-        let managed_provider: Option<std::sync::Arc<dyn wasl_runtime::RuntimeProvider>> =
-            if matches!(cfg.runtime.kind, RuntimeKind::Managed) {
-                Some(build_managed_provider(&cfg))
-            } else {
-                None
-            };
-
-        // ── A2A RECEIVE wiring — IO SHELL, UNTESTED HERE ──────────────────────
-        //
-        // This composes only already-tested pieces (`wasl_node::receiver` →
-        // `A2aServer` over a real `AdapterExecutor` wrapping the config-selected
-        // `NodeAdapter` — `ClaudeAdapter`, `CodexAdapter` (W7), or, since
-        // W9, `OpencodeAdapter`), but the
-        // LIVE serve loop and driving a REAL `claude`/`codex`/`opencode`
-        // CLI are NOT exercised by any test in this crate (none of the four
-        // binaries is in the build env and the socket serve loop is never
-        // entered under test).
-        // Compile-only shell.
-        if let Some(bind) = cfg.a2a.bind.clone() {
-            match bind.parse::<std::net::SocketAddr>() {
-                Ok(addr) => {
-                    let card = wasl_a2a_types::AgentCard {
-                        name: cfg.identity.agent_id.clone(),
-                        description: "Wasl node A2A receive endpoint".to_string(),
-                        url: format!("http://{addr}/"),
-                        version: env!("CARGO_PKG_VERSION").to_string(),
-                        capabilities: wasl_a2a_types::AgentCapabilities {
-                            streaming: false,
-                            push_notifications: false,
-                        },
-                        default_input_modes: vec!["text/plain".to_string()],
-                        default_output_modes: vec!["text/plain".to_string()],
-                        skills: vec![],
-                    };
-                    // Managed mode → drive inbound A2A into the persistent managed
-                    // session via the shared provider (D1); otherwise the one-shot
-                    // adapter path.
-                    let server = std::sync::Arc::new(match &managed_provider {
-                        Some(provider) => {
-                            wasl_node::receiver_runtime(card, std::sync::Arc::clone(provider))
-                        }
-                        None => wasl_node::receiver(card, build_adapter(&cfg.adapter)),
-                    });
-                    // Spawn the receive serve loop concurrently with the stdio MCP
-                    // server. UNTESTED HERE: this future's body never runs in tests.
-                    tokio::spawn(async move {
-                        if let Err(err) = server.serve(addr).await {
-                            eprintln!("wasl-mcpd: A2A receive server terminated: {err}");
-                        }
-                    });
-                }
-                Err(err) => {
-                    eprintln!(
-                        "wasl-mcpd: WARNING: WASL_A2A_BIND={bind:?} is not a valid socket \
-                         address ({err}); A2A receive server not started."
-                    );
-                }
-            }
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("wasl mcp: cannot start the runtime: {e}");
+            return std::process::ExitCode::from(1);
         }
-        // ── end A2A RECEIVE shell ─────────────────────────────────────────────
-
-        // ── OPERATOR wiring — IO SHELL, UNTESTED HERE ──────────────────────────
-        //
-        // `wasl_operator::router` (the axum app this binds) IS loopback-tested
-        // (`wasl-operator`'s own suite, plus `wasl-mcp`'s `gating_loopback.rs`
-        // driving it end to end over a REAL bind). What is NOT exercised by any
-        // test in this crate is THIS live `serve()` bind inside `run()` — same
-        // compile-only-shell status as the A2A receive loop above.
-        let hub = match cfg.operator.bind.clone() {
-            Some(bind) => match bind.parse::<std::net::SocketAddr>() {
-                Ok(addr) => {
-                    let info = NodeInfo {
-                        agent_id: wasl_proto::AgentId(cfg.identity.agent_id.clone()),
-                        host_id: wasl_proto::HostId(cfg.identity.host_id.clone()),
-                        version: env!("CARGO_PKG_VERSION").to_string(),
-                    };
-                    let hub = OperatorHub::new(info, HubConfig::default());
-                    let serve_hub = hub.clone();
-                    tokio::spawn(async move {
-                        if let Err(err) = wasl_operator::serve(serve_hub, addr).await {
-                            eprintln!("wasl-mcpd: operator server terminated: {err}");
-                        }
-                    });
-                    Some(hub)
-                }
-                Err(err) => {
-                    eprintln!(
-                        "wasl-mcpd: WARNING: operator.bind={bind:?} is not a valid socket \
-                         address ({err}); operator surface not started."
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
-        // ── end OPERATOR shell ──────────────────────────────────────────────────
-
-        // Build the MCP handler now (not at the end) so its shared peer registry
-        // (D3) can be handed to the runtime-control `/v1/peers` endpoint below —
-        // the send path and the control plane then mutate the SAME registry.
-        let handler = build_handler(&cfg, hub);
-        let peers = handler.registry_handle();
-
-        // ── RUNTIME-CONTROL wiring ────────────────────────────────────────────
-        //
-        // When `runtime.kind = managed` AND `runtime.control_bind` is set, spin
-        // up the runtime-control HTTP API (wasl_runtime_control::serve) backed
-        // by a ProtocolRoutingProvider that delegates to per-protocol managed
-        // WaslManagedRuntimeProvider instances. The serve body and
-        // `build_managed_provider` are fully implemented and serve live sessions.
-        if matches!(cfg.runtime.kind, RuntimeKind::Managed) {
-            if let Some(bind) = cfg.runtime.control_bind.clone() {
-                match bind.parse::<std::net::SocketAddr>() {
-                    Ok(addr) => {
-                        // Reuse the shared managed provider built above (D1) so the
-                        // runtime-control API and the A2A receiver serve the SAME
-                        // sessions. Guaranteed Some here (kind == Managed).
-                        let provider = managed_provider
-                            .clone()
-                            .expect("managed provider built when runtime.kind = managed");
-                        let hub = wasl_runtime_control::RuntimeControlHub::new(
-                            provider,
-                            cfg.identity.agent_id.clone(),
-                            cfg.identity.host_id.clone(),
-                            env!("CARGO_PKG_VERSION").to_string(),
-                            wasl_runtime_control::RuntimeKind::Managed,
-                        );
-                        // Share the send path's peer registry (D3) so Marsad can
-                        // add/remove peers over `/v1/peers` at runtime.
-                        let peers = peers.clone();
-                        tokio::spawn(async move {
-                            if let Err(err) = wasl_runtime_control::serve(hub, peers, addr).await {
-                                eprintln!("wasl-mcpd: runtime-control server terminated: {err}");
-                            }
-                        });
-                    }
-                    Err(err) => {
-                        eprintln!(
-                            "wasl-mcpd: WARNING: runtime.control_bind={bind:?} is not a valid \
-                             socket address ({err}); runtime-control API not started."
-                        );
-                    }
-                }
-            }
+    };
+    match rt.block_on(serve(parsed)) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("wasl mcp: {e}");
+            std::process::ExitCode::from(1)
         }
-        // ── end RUNTIME-CONTROL shell ─────────────────────────────────────────
-
-        match handler.serve(stdio()).await {
-            Ok(running) => {
-                if let Err(err) = running.waiting().await {
-                    eprintln!("wasl-mcpd: server terminated with error: {err}");
-                }
-            }
-            Err(err) => {
-                eprintln!("wasl-mcpd: failed to start MCP server: {err}");
-            }
-        }
-    });
+    }
 }

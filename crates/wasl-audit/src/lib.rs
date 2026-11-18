@@ -1,158 +1,210 @@
-//! wasl-audit — the audit log (WA): a durable, human-auditable interaction +
-//! decision record. Pure query over an append-only `Sink` trait; the only IO is
-//! behind that trait (unit-tested with a fake). Entries carry a caller-provided
-//! `seq` for deterministic ordering — no clock in this crate.
+//! wasl-audit — the audit trail of a Wasl node: one [`AuditEntry`] per delegation, decision,
+//! policy change and outcome, appended as one JSON line to a file.
 //!
-//! See `docs/specs/audit.md` for the authoritative contract.
+//! [`AuditLog::open`] starts a writer task fed through a bounded queue, so recording never
+//! blocks a caller on disk I/O; [`AuditLog::record`] waits only for room in the queue.
+//! [`AuditLog::flush`] resolves once everything recorded before it is on disk (tests, shutdown).
+//! [`read_entries`] reads a trail back.
 
-use std::fmt;
+#![forbid(unsafe_code)]
+
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use wasl_proto::{AgentId, GateDecision};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{mpsc, oneshot};
+use wasl_proto::{AgentId, EdgePolicy, HandoffDecision, TaskId, TaskMode};
 
-/// Re-export of the L0-owned delivery-certainty vocabulary so callers query it
-/// as `wasl_audit::DeliveryCertainty`. Owned in `wasl-proto` to avoid a cycle
-/// (`wasl-runtime` → `wasl-audit`), and stored first-class on `AuditEntry`.
-pub use wasl_proto::DeliveryCertainty;
+/// Bound on entries queued for the writer.
+const QUEUE: usize = 1024;
 
-// ---------------------------------------------------------------------
-// 1. Types
-// ---------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EntryKind {
-    Consult,
-    Command,
-    Message,
-    Transfer,
-    Decision,
-    /// Managed-session turn-lifecycle event (live-runtime; additive).
-    RuntimeTurn,
+/// What an entry records.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AuditKind {
+    /// A delegation was requested (whatever happened next).
+    Delegated {
+        mode: TaskMode,
+        policy: EdgePolicy,
+        /// Truncated instruction.
+        instruction: String,
+    },
+    /// A delegation was rejected before any approval (no edge, cycle, depth, budget, deny).
+    Rejected { code: String, message: String },
+    /// A handoff was decided (gate, elicitation, or an `always_allow` edge).
+    Decided {
+        decision: HandoffDecision,
+        /// Who decided: `gate`, `elicitation`, `policy`.
+        by: String,
+    },
+    /// An edge's policy changed.
+    PolicyChanged { policy: EdgePolicy, cause: String },
+    /// A task reached a terminal state.
+    Finished {
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
 }
 
-/// The lifecycle phase of a managed-session turn, carried structurally on a
-/// `RuntimeTurn` entry (never in `summary`). Follows `EntryKind`'s lowercase
-/// serde convention so each phase has a distinct machine-readable tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum RuntimeTurnPhase {
-    Started,
-    Injected,
-    Completed,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One audit record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditEntry {
-    /// Caller-provided monotonic sequence (deterministic ordering).
-    pub seq: u64,
-    pub kind: EntryKind,
-    /// Who initiated.
+    /// Ms since the Unix epoch.
+    pub t_ms: u64,
+    pub workstream: String,
+    /// Who acted (the sending agent).
     pub actor: AgentId,
-    /// Recipients (one, or many for multicast).
-    pub targets: Vec<AgentId>,
-    /// Human-readable, secret-free.
-    pub summary: String,
-    /// `Some(_)` when this entry records a gate decision.
-    #[serde(default)]
-    pub decision: Option<GateDecision>,
-    /// `Some(_)` when this entry records a command's delivery certainty — a
-    /// first-class, machine-queryable safety field (a crash must not erase the
-    /// evidence needed to prevent an unsafe retry). Absent from the wire when
-    /// unset, so legacy entries/JSON stay byte-compatible.
+    pub target: AgentId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub certainty: Option<DeliveryCertainty>,
-    /// `Some(_)` for a `RuntimeTurn` entry: the managed-turn lifecycle phase.
-    /// Structural (not in `summary`); absent from the wire when unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<RuntimeTurnPhase>,
+    pub task: Option<TaskId>,
+    #[serde(flatten)]
+    pub kind: AuditKind,
 }
 
-impl Default for AuditEntry {
-    fn default() -> Self {
-        Self {
-            seq: 0,
-            kind: EntryKind::Message,
-            actor: AgentId(String::new()),
-            targets: Vec::new(),
-            summary: String::new(),
-            decision: None,
-            certainty: None,
-            phase: None,
-        }
-    }
-}
-
+/// Why the trail could not be written or read.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuditError {
-    Sink(String),
-}
+pub struct AuditError(pub String);
 
-impl fmt::Display for AuditError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AuditError::Sink(detail) => write!(f, "audit sink failure: {detail}"),
-        }
+impl std::fmt::Display for AuditError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "audit trail: {}", self.0)
     }
 }
 
 impl std::error::Error for AuditError {}
 
-// ---------------------------------------------------------------------
-// 2. Sink trait (append-only durability)
-// ---------------------------------------------------------------------
-
-pub trait Sink {
-    fn append(&mut self, entry: &AuditEntry) -> Result<(), AuditError>;
+enum Msg {
+    Entry(Box<AuditEntry>),
+    Flush(oneshot::Sender<Result<(), AuditError>>),
 }
 
-// ---------------------------------------------------------------------
-// 3. AuditLog
-// ---------------------------------------------------------------------
-
-pub struct AuditLog<S: Sink> {
-    sink: S,
-    cache: Vec<AuditEntry>,
+/// Handle to an audit trail (cheap to clone).
+#[derive(Clone)]
+pub struct AuditLog {
+    tx: mpsc::Sender<Msg>,
+    path: PathBuf,
 }
 
-impl<S: Sink> AuditLog<S> {
-    pub fn new(sink: S) -> Self {
-        Self {
-            sink,
-            cache: Vec::new(),
+impl AuditLog {
+    /// Open (creating) `path` for append and start its writer task.
+    pub async fn open(path: impl Into<PathBuf>) -> Result<Self, AuditError> {
+        let path = path.into();
+        if let Some(dir) = path.parent() {
+            tokio::fs::create_dir_all(dir)
+                .await
+                .map_err(|e| AuditError(format!("create {}: {e}", dir.display())))?;
+        }
+        let file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await
+            .map_err(|e| AuditError(format!("open {}: {e}", path.display())))?;
+        let (tx, rx) = mpsc::channel(QUEUE);
+        tokio::spawn(writer(file, path.clone(), rx));
+        Ok(AuditLog { tx, path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Queue one entry (waits only for room in the bounded queue).
+    pub async fn record(&self, entry: AuditEntry) {
+        if self.tx.send(Msg::Entry(Box::new(entry))).await.is_err() {
+            tracing::error!(path = %self.path.display(), "audit writer is gone; entry lost");
         }
     }
 
-    /// Append to the sink FIRST; on `Ok`, push to the in-memory cache; on `Err`,
-    /// propagate and do NOT cache (the entry isn't durable).
-    pub fn record(&mut self, entry: AuditEntry) -> Result<(), AuditError> {
-        self.sink.append(&entry)?;
-        self.cache.push(entry);
-        Ok(())
+    /// Resolve once every entry recorded before this call is written (and synced).
+    pub async fn flush(&self) -> Result<(), AuditError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Msg::Flush(tx))
+            .await
+            .map_err(|_| AuditError("writer is gone".into()))?;
+        rx.await.map_err(|_| AuditError("writer is gone".into()))?
+    }
+}
+
+async fn writer(mut file: tokio::fs::File, path: PathBuf, mut rx: mpsc::Receiver<Msg>) {
+    let mut last_error: Option<AuditError> = None;
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            Msg::Entry(e) => {
+                let mut line = match serde_json::to_vec(&e) {
+                    Ok(l) => l,
+                    Err(err) => {
+                        tracing::error!(error = %err, "cannot encode an audit entry");
+                        continue;
+                    }
+                };
+                line.push(b'\n');
+                if let Err(err) = file.write_all(&line).await {
+                    tracing::error!(path = %path.display(), error = %err, "cannot append to the audit trail");
+                    last_error = Some(AuditError(err.to_string()));
+                }
+            }
+            Msg::Flush(reply) => {
+                let r = match last_error.take() {
+                    Some(e) => Err(e),
+                    None => file
+                        .sync_data()
+                        .await
+                        .map_err(|e| AuditError(e.to_string())),
+                };
+                let _ = reply.send(r); // the requester may have given up
+            }
+        }
+    }
+}
+
+/// Read a trail back (blank lines skipped).
+pub async fn read_entries(path: impl AsRef<Path>) -> Result<Vec<AuditEntry>, AuditError> {
+    let text = tokio::fs::read_to_string(path.as_ref())
+        .await
+        .map_err(|e| AuditError(format!("read {}: {e}", path.as_ref().display())))?;
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).map_err(|e| AuditError(format!("bad entry {l:?}: {e}"))))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn entries_round_trip_through_the_file() {
+        let dir = std::env::temp_dir().join(format!("wasl-audit-{}", fastrand_id()));
+        let path = dir.join("audit.ndjson");
+        let log = AuditLog::open(&path).await.unwrap();
+        let e = AuditEntry {
+            t_ms: 1,
+            workstream: "w".into(),
+            actor: AgentId::new("h", "a"),
+            target: AgentId::new("h", "b"),
+            task: Some(TaskId("t1".into())),
+            kind: AuditKind::Decided {
+                decision: HandoffDecision::AlwaysAllow,
+                by: "gate".into(),
+            },
+        };
+        log.record(e.clone()).await;
+        log.flush().await.unwrap();
+        assert_eq!(read_entries(&path).await.unwrap(), vec![e]);
+        let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
     }
 
-    pub fn entries(&self) -> &[AuditEntry] {
-        &self.cache
-    }
-
-    pub fn len(&self) -> usize {
-        self.cache.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
-    }
-
-    pub fn by_actor(&self, actor: &AgentId) -> Vec<&AuditEntry> {
-        self.cache.iter().filter(|e| &e.actor == actor).collect()
-    }
-
-    pub fn by_kind(&self, kind: EntryKind) -> Vec<&AuditEntry> {
-        self.cache.iter().filter(|e| e.kind == kind).collect()
-    }
-
-    pub fn decisions(&self) -> Vec<&AuditEntry> {
-        self.cache.iter().filter(|e| e.decision.is_some()).collect()
+    fn fastrand_id() -> String {
+        format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        )
     }
 }

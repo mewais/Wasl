@@ -1,0 +1,31 @@
+[package]
+name = "wasl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Standalone Wasl host daemon: Wasit session runtime + Wasl node, MCP server, shim and bridge in one binary"
+
+[[bin]]
+name = "wasl"
+path = "src/main.rs"
+
+[dependencies]
+wasl-proto = { workspace = true }
+wasl-node = { workspace = true }
+wasl-mcp = { workspace = true }
+wasit-core = { workspace = true }
+wasit-control = { workspace = true }
+wasit-runtime = { workspace = true }
+wasit-shim = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+
+[dev-dependencies]
+wasit-fake-cli = { workspace = true }
+wasit-runtime = { workspace = true }
+rmcp = { version = "0.9", features = ["client", "transport-child-process"] }
+futures = { workspace = true }
+fastrand = { workspace = true }
+serde = { workspace = true }

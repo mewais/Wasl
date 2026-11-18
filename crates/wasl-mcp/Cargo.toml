@@ -2,108 +2,15 @@
 name = "wasl-mcp"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
 license.workspace = true
-repository.workspace = true
-description = "Wasl MCP server: exposes consult/command/message/transfer as MCP tools, gating each via elicitation and dispatching over REAL async A2A (wasl-dispatch)"
-
-[[bin]]
-name = "wasl-mcpd"
-path = "src/main.rs"
-
-# The frozen `tests/handle.rs` module doc trips clippy's `doc_lazy_continuation`
-# (a prose paragraph clippy reads as a lazy list continuation). The test file is
-# frozen (acceptance fixture) and cannot be edited, so allow the lint crate-wide;
-# it is a documentation-formatting nit, not a correctness lint.
-#
-# The frozen `tests/gating_unit.rs` (W4, `docs/specs/mcp-gating.md`) builds a
-# real rmcp `ClientInfo` via `let mut info = ClientInfo::default(); info.capabilities
-# = …;` (mirroring rmcp's own `ClientCapabilities::builder()` idiom exactly) —
-# clippy's `field_reassign_with_default` flags that pattern. Same story: the
-# test file is frozen and cannot be edited, so allow the lint crate-wide; it is
-# a style nit (not a correctness lint) on a two-line, single-field test fixture.
-[lints.clippy]
-doc_lazy_continuation = "allow"
-field_reassign_with_default = "allow"
+description = "Wasl MCP tool server an agent CLI launches over stdio; a thin client of the local Wasl node"
 
 [dependencies]
+wasl-proto = { workspace = true }
+wasit-core = { workspace = true }
+wasit-control = { workspace = true }
+rmcp = { workspace = true }
+tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-wasl-proto = { workspace = true }
-wasl-gate = { workspace = true }
-wasl-audit = { workspace = true }
-wasl-registry = { workspace = true }
-wasl-transfer = { workspace = true }
-wasl-server = { workspace = true }
-# W4: the operator hub/surfacer/tee + its real HTTP+SSE router (Tier-3
-# `OperatorSurfacer`, `TeeSink`, `wasl_operator::serve` wired from `run()`).
-wasl-operator = { workspace = true }
-# Real async A2A send path (replaces the retired sync wasl-daemon Mesh).
-wasl-dispatch = { workspace = true }
-reqwest = { workspace = true }
-# Durable/real default seams for run().
-wasl-filesink = { workspace = true }
-wasl-procrunner = { workspace = true }
-# Receive-side wiring for run() (IO shell, UNTESTED HERE).
-wasl-a2a-server = { workspace = true }
-wasl-a2a-types = { workspace = true }
-wasl-adapter = { workspace = true }
-wasl-adapter-claude = { workspace = true }
-# W7b (`docs/specs/adapter-codex.md`): the receive-side codex-backed
-# NodeAdapter variant (`build_adapter` in src/config.rs).
-wasl-adapter-codex = { workspace = true }
-# W9 (`docs/specs/adapter-opencode.md`): the receive-side opencode-backed
-# NodeAdapter variant (`build_adapter` in src/config.rs).
-wasl-adapter-opencode = { workspace = true }
-wasl-node = { workspace = true }
-# Runtime-control wiring (Phase-A): managed provider + control API serve loop.
-wasl-runtime = { workspace = true }
-wasl-runtime-control = { workspace = true }
-wasl-runtime-protocol = { workspace = true }
-# NodeAdapter's `impl AgentAdapter` (src/config.rs) delegates via
-# `#[async_trait::async_trait]`, same macro the trait itself is defined with.
-async-trait = { workspace = true }
-rmcp = { version = "0.9", features = ["server", "transport-io", "elicitation"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync", "net"] }
-# Node config file parsing (W2, src/config.rs). NOT a workspace dependency: the
-# root Cargo.toml [workspace.dependencies] table is owned by a concurrently
-# landing crate, so this dep is direct here rather than workspace-hoisted.
-toml = "0.8"
-# M1: the OS CSPRNG source for `RandomTokenIds` (src/server.rs) — 128-bit,
-# cryptographically-strong Tier-2 approval tokens instead of the old
-# SystemTime-nanos-hashed-through-SipHash-`RandomState` (HashDoS-resistant, NOT
-# cryptographic). Pinned to "0.2" to reuse the getrandom 0.2.17 already resolved
-# in the build graph (via `ring`), so no duplicate/forked getrandom major is
-# introduced. Direct (not workspace-hoisted) for the same reason `toml` is above.
-getrandom = "0.2"
-
-[dev-dependencies]
-# Client + async-rw transport, dev-only, so the smoke test can drive the server
-# over an in-memory duplex pipe and list its tools. Same version as the main dep.
-# `transport-child-process` additionally powers `examples/live_client.rs` (W5
-# live verification): it spawns a REAL `wasl-mcpd` child process and drives it
-# as an MCP client over real stdio, rather than the in-memory duplex the other
-# suites use — the one place this crate exercises the actual binary end to end.
-rmcp = { version = "0.9", features = ["client", "server", "transport-async-rw", "transport-child-process"] }
-# Loopback A2A heart tests: a real A2aServer over a real AdapterExecutor wrapping a
-# fake AgentAdapter, served on 127.0.0.1:0 via axum, plus #[tokio::test] + TcpListener.
-async-trait = { workspace = true }
-axum = { workspace = true }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync", "net"] }
-wasl-a2a-server = { workspace = true }
-wasl-a2a-types = { workspace = true }
-wasl-adapter = { workspace = true }
-wasl-transfer = { workspace = true }
-# `config_resolve.rs` / `config_wiring.rs` / `config_bin.rs` (W2, tests/**
-# only): tempdirs/tempfiles for path-resolution + spawned-binary tests, and an
-# executable stub-CLI file for the adapter-factory custom-bin test. Never used
-# to mutate real process env (see docs/specs/node-config.md).
-tempfile = "3"
-# W4: also a normal dependency now (see [dependencies] above); restated here
-# (matching the `wasl-transfer` precedent below^ / above) because the gating
-# loopback tests additionally drive its real HTTP+SSE router directly, with
-# the already-present `reqwest`/`axum`/`tokio` dev-deps above (no SSE-client
-# crate needed — `reqwest::Response::chunk()` is enough for a hand-rolled
-# reader).
-wasl-operator = { workspace = true }
+tracing = { workspace = true }

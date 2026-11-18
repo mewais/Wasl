@@ -2,29 +2,18 @@
 name = "wasl-node"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
-authors.workspace = true
 license.workspace = true
-repository.workspace = true
-description = "Wasl node: composes the gate (server) + send-side dispatch + A2A receive server — the per-host send/receive unit"
+description = "Wasl node: live topology, durable asynchronous task engine, handoff gates and relay routing on top of a Wasit session host"
 
 [dependencies]
 wasl-proto = { workspace = true }
-wasl-gate = { workspace = true }
-wasl-server = { workspace = true }
 wasl-audit = { workspace = true }
-wasl-registry = { workspace = true }
-wasl-dispatch = { workspace = true }
-wasl-a2a-types = { workspace = true }
-wasl-a2a-server = { workspace = true }
-wasl-adapter = { workspace = true }
-# D1: drive inbound A2A into the persistent managed runtime session.
-wasl-runtime = { workspace = true }
+wasit-core = { workspace = true }
+wasit-control = { workspace = true }
+wasit-runtime = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
-reqwest = { workspace = true }
-tokio = { workspace = true }
-
-[dev-dependencies]
-axum = { workspace = true }
-serde_json = { workspace = true }
+tracing = { workspace = true }
