@@ -45,6 +45,10 @@ pub struct NodeConfig {
     pub progress_interval: Duration,
     /// How long a spawn request waits for an unreachable supervisor before it is refused.
     pub spawn_connect_wait: Duration,
+    /// How long a spawn request still asking the human waits for a caller to come back after
+    /// its last `wasl.spawn` caller went away (a dropped connection is re-sent with the same
+    /// request id) before it is withdrawn.
+    pub spawn_reattach_grace: Duration,
 }
 
 impl NodeConfig {
@@ -58,6 +62,7 @@ impl NodeConfig {
             retry_max: Duration::from_secs(5),
             progress_interval: Duration::from_millis(500),
             spawn_connect_wait: Duration::from_secs(15),
+            spawn_reattach_grace: Duration::from_secs(30),
         }
     }
 }
@@ -146,7 +151,7 @@ impl Node {
                         crate::state::SpawnRec {
                             watch: watch::channel(sp.phase.clone()).0,
                             p: sp,
-                            waiters: 0,
+                            waiters: watch::channel(0).0,
                         },
                     );
                 }

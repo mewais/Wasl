@@ -35,8 +35,8 @@ struct Waiting {
 
 impl Waiting {
     fn new(node: Node, id: String) -> Self {
-        if let Some(r) = node.lock().spawns.get_mut(&id) {
-            r.waiters += 1;
+        if let Some(r) = node.lock().spawns.get(&id) {
+            r.waiters.send_modify(|n| *n += 1);
         }
         Waiting { node, id }
     }
@@ -45,28 +45,33 @@ impl Waiting {
 impl Drop for Waiting {
     fn drop(&mut self) {
         let abandoned = {
-            let mut st = self.node.lock();
-            match st.spawns.get_mut(&self.id) {
+            let st = self.node.lock();
+            match st.spawns.get(&self.id) {
                 Some(r) => {
-                    r.waiters = r.waiters.saturating_sub(1);
-                    r.waiters == 0 && matches!(r.p.phase, SpawnPhase::Asking { .. })
+                    r.waiters.send_modify(|n| *n = n.saturating_sub(1));
+                    (*r.waiters.borrow() == 0 && matches!(r.p.phase, SpawnPhase::Asking { .. }))
+                        .then(|| r.waiters.subscribe())
                 }
-                None => false,
+                None => None,
             }
         };
-        if abandoned {
-            let node = self.node.clone();
-            let id = std::mem::take(&mut self.id);
-            tokio::spawn(async move {
-                node.withdraw_spawn(
-                    &id,
-                    "the spawn request was withdrawn: its caller stopped waiting (the tool \
-                     call was cancelled or its client disconnected)"
-                        .into(),
-                )
-                .await
-            });
-        }
+        let Some(mut waiters) = abandoned else { return };
+        let node = self.node.clone();
+        let id = std::mem::take(&mut self.id);
+        let grace = node.inner.cfg.spawn_reattach_grace;
+        tokio::spawn(async move {
+            // A caller that lost its connection re-sends the call with the same request id.
+            if let Ok(Ok(_)) = tokio::time::timeout(grace, waiters.wait_for(|n| *n > 0)).await {
+                return;
+            }
+            node.withdraw_spawn(
+                &id,
+                "the spawn request was withdrawn: its caller stopped waiting (the tool call was \
+                 cancelled or its client disconnected)"
+                    .into(),
+            )
+            .await
+        });
     }
 }
 
@@ -256,7 +261,7 @@ impl Node {
                     SpawnRec {
                         p,
                         watch: tx,
-                        waiters: 0,
+                        waiters: watch::channel(0).0,
                     },
                 );
                 (rx, Some(self.persist_spawn(&mut st, &req.request_id)))

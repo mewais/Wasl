@@ -20,7 +20,9 @@
 //!
 //! Options: `--driver-bin <driver>=<path>`, `--driver-env <driver>=<KEY>=<VALUE>` (repeatable),
 //! `--handshake-timeout-ms N`, `--command-timeout-ms N`, `--stop-grace-ms N`,
-//! `--spawn-wait-ms N` (how long a spawn request waits for an unreachable supervisor).
+//! `--spawn-wait-ms N` (how long a spawn request waits for an unreachable supervisor),
+//! `--spawn-reattach-ms N` (how long an asking spawn request waits for its caller to come back
+//! before it is withdrawn).
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -50,6 +52,7 @@ struct Args {
     stop_grace_ms: Option<u64>,
     command_ms: Option<u64>,
     spawn_wait_ms: Option<u64>,
+    spawn_reattach_ms: Option<u64>,
     no_start: bool,
     /// The options as given minus bridge-only flags (passed on when `bridge` starts `serve`).
     raw: Vec<String>,
@@ -66,6 +69,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
         stop_grace_ms: None,
         command_ms: None,
         spawn_wait_ms: None,
+        spawn_reattach_ms: None,
         no_start: false,
         raw: args
             .iter()
@@ -104,6 +108,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--stop-grace-ms" => a.stop_grace_ms = Some(num(val()?)?),
             "--command-timeout-ms" => a.command_ms = Some(num(val()?)?),
             "--spawn-wait-ms" => a.spawn_wait_ms = Some(num(val()?)?),
+            "--spawn-reattach-ms" => a.spawn_reattach_ms = Some(num(val()?)?),
             other => return Err(format!("unknown option {other}")),
         }
     }
@@ -189,6 +194,9 @@ async fn serve(a: Args) -> ExitCode {
     let mut cfg = NodeConfig::new(host_id.clone(), a.data.join("wasl"));
     if let Some(ms) = a.spawn_wait_ms {
         cfg.spawn_connect_wait = std::time::Duration::from_millis(ms);
+    }
+    if let Some(ms) = a.spawn_reattach_ms {
+        cfg.spawn_reattach_grace = std::time::Duration::from_millis(ms);
     }
     let node = match Node::open(cfg, manager.clone()).await {
         Ok(n) => n,

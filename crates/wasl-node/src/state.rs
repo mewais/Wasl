@@ -167,8 +167,9 @@ pub struct SpawnRec {
     pub watch: watch::Sender<SpawnPhase>,
     /// `wasl.spawn` calls waiting for this request right now (not journaled: after a restart
     /// the caller re-sends the call). When the last one goes away while the request still
-    /// asks the human, the request is withdrawn.
-    pub waiters: usize,
+    /// asks the human, the request is withdrawn unless one comes back within
+    /// `NodeConfig::spawn_reattach_grace`.
+    pub waiters: watch::Sender<usize>,
 }
 
 /// Per receiving session: FIFO of queued tasks and the one being worked on.

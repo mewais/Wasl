@@ -313,8 +313,12 @@ struct Setup {
 }
 
 async fn setup(max: usize) -> Setup {
+    setup_args(max, &[]).await
+}
+
+async fn setup_args(max: usize, a_args: &[&str]) -> Setup {
     let s = Scratch::new();
-    let a = Daemon::start(&s, "a").await;
+    let a = Daemon::start_args(&s, "a", a_args).await;
     let b = Daemon::start(&s, "b").await;
     let orch = a.session(&Scenario::builder().build()).await;
     let t = topology(1, &[(&orch, "orchestrator")], &[], Limits::default());
@@ -652,7 +656,7 @@ async fn spawn_gate_is_withdrawn_when_the_mcp_call_is_cancelled_or_its_client_di
     use rmcp::service::PeerRequestOptions;
     use rmcp::ServiceExt;
 
-    let x = setup(8).await;
+    let x = setup_args(8, &["--spawn-reattach-ms", "200"]).await;
     let mcp = || async {
         let mut cmd = tokio::process::Command::new(wasl_bin());
         cmd.args([
