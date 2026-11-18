@@ -1,6 +1,9 @@
 //! Task engine behaviour across daemons: parallel fan-out, FIFO per receiver, cancel,
 //! cycles, depth, deadlines, budget, standalone approval.
 
+// The harness uses Unix sockets under /tmp and `kill`; Windows runs the unit tests only.
+#![cfg(unix)]
+
 mod common;
 
 use std::collections::HashSet;
