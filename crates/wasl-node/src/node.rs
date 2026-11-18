@@ -793,11 +793,12 @@ impl Node {
             let t = &r.p.task;
             let from_name = st.name_of(&t.from);
             let to_name = r.p.to_name.clone();
+            // People see the agent's name; its id (host/session) is in `details`.
             let label = |a: &AgentId, n: &str| {
                 if n.is_empty() {
                     a.to_string()
                 } else {
-                    format!("{n} ({a})")
+                    n.to_string()
                 }
             };
             let gate = GateRequest::Handoff {
