@@ -631,7 +631,8 @@ impl WaslMcp {
 impl ServerHandler for WaslMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
+            // 2025-06-18 is the first revision with elicitation (the standalone approval path).
+            protocol_version: ProtocolVersion::V_2025_06_18,
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             server_info: Implementation {
                 name: SERVER_NAME.into(),
