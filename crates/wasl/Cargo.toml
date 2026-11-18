@@ -23,6 +23,7 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
 
 [dev-dependencies]
+wasl-mcp = { workspace = true }
 wasit-fake-cli = { workspace = true }
 wasit-runtime = { workspace = true }
 rmcp = { version = "0.9", features = ["client", "transport-child-process"] }

@@ -104,6 +104,8 @@ pub fn mcp_server_config(
             args,
             env: Default::default(),
         },
+        // Wasl gates handoffs itself; the CLI's own prompt for these tools is redundant.
+        trusted: true,
     }
 }
 

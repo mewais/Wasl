@@ -123,6 +123,7 @@ pub struct Daemon {
     pub dir: PathBuf,
     child: Option<tokio::process::Child>,
     pub client: RuntimeClient,
+    real: bool,
 }
 
 impl Daemon {
@@ -130,7 +131,15 @@ impl Daemon {
         self.dir.join("wasl.sock")
     }
 
-    fn args(host: &str, dir: &Path) -> Vec<String> {
+    fn args(host: &str, dir: &Path, real: bool) -> Vec<String> {
+        if real {
+            return vec![
+                "--data".into(),
+                dir.to_string_lossy().into_owned(),
+                "--host-id".into(),
+                host.into(),
+            ];
+        }
         let fake = fake().to_string_lossy().into_owned();
         vec![
             "--data".into(),
@@ -149,9 +158,18 @@ impl Daemon {
     }
 
     pub async fn start(scratch: &Scratch, host: &str) -> Daemon {
+        Self::start_with(scratch, host, false).await
+    }
+
+    /// A daemon running the real CLIs (live tests).
+    pub async fn start_real(scratch: &Scratch, host: &str) -> Daemon {
+        Self::start_with(scratch, host, true).await
+    }
+
+    async fn start_with(scratch: &Scratch, host: &str, real: bool) -> Daemon {
         let dir = scratch.0.join(host);
         std::fs::create_dir_all(&dir).unwrap();
-        let child = Self::spawn(host, &dir).await;
+        let child = Self::spawn(host, &dir, real).await;
         let client = RuntimeClient::connect_endpoint(
             local_endpoint(&dir.join("wasl.sock")),
             Hello::new("test", "test", "test"),
@@ -162,10 +180,11 @@ impl Daemon {
             dir,
             child: Some(child),
             client,
+            real,
         }
     }
 
-    async fn spawn(host: &str, dir: &Path) -> tokio::process::Child {
+    async fn spawn(host: &str, dir: &Path, real: bool) -> tokio::process::Child {
         let log = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -173,7 +192,7 @@ impl Daemon {
             .unwrap();
         let mut child = tokio::process::Command::new(wasl_bin())
             .arg("serve")
-            .args(Self::args(host, dir))
+            .args(Self::args(host, dir, real))
             .env("WASL_LOG", "info,wasl_node=debug")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -205,7 +224,7 @@ impl Daemon {
 
     pub async fn restart(&mut self) {
         self.kill().await;
-        self.child = Some(Self::spawn(&self.host, &self.dir).await);
+        self.child = Some(Self::spawn(&self.host, &self.dir, self.real).await);
     }
 
     pub async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> T {
