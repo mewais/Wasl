@@ -1,4 +1,4 @@
-//! Test harness: real `wasl serve` daemons over Unix sockets, sessions running the scriptable
+//! Test harness: real `wasl serve` daemons over local endpoints (Unix sockets / Windows named pipes), sessions running the scriptable
 //! fake CLI, and an in-test hub (wasit-control `Hub`) linking the daemons through each one's
 //! `wasl bridge`. Nothing waits on sleeps: tests await topic events, snapshots and long-polls,
 //! each under a bound that only turns a hang into a failure.
@@ -69,8 +69,12 @@ pub struct Scratch(pub PathBuf);
 impl Scratch {
     pub fn new() -> Self {
         static N: AtomicU64 = AtomicU64::new(0);
-        let p = PathBuf::from(format!(
-            "/tmp/wl-{}-{}",
+        #[cfg(unix)]
+        let root = PathBuf::from("/tmp");
+        #[cfg(not(unix))]
+        let root = std::env::temp_dir();
+        let p = root.join(format!(
+            "wl-{}-{}",
             std::process::id(),
             N.fetch_add(1, Ordering::Relaxed)
         ));
@@ -106,12 +110,33 @@ fn kill_session_processes(root: &Path) {
                 };
                 if v["kind"] == "spawned" {
                     if let Some(pid) = v["data"]["pid"].as_u64() {
-                        let _ = std::process::Command::new("kill")
-                            .args(["-9", &pid.to_string()])
-                            .stderr(Stdio::null())
-                            .status();
+                        kill_hard(pid as u32);
                     }
                 }
+            }
+        }
+    }
+}
+
+/// Kill a process outright (SIGKILL / TerminateProcess); a process that is gone is fine.
+pub fn kill_hard(pid: u32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: plain syscall.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+        // SAFETY: plain Win32 calls; the handle is closed.
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if !h.is_null() {
+                TerminateProcess(h, 1);
+                CloseHandle(h);
             }
         }
     }

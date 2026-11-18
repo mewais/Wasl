@@ -5,9 +5,6 @@
 //! whether the orchestrator CLI asked for its own permission before calling a Wasl tool (it
 //! should not: the server is injected as trusted).
 
-// The harness uses Unix sockets under /tmp and `kill`; Windows runs the unit tests only.
-#![cfg(unix)]
-
 mod common;
 
 use std::time::Duration;

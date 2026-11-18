@@ -52,6 +52,6 @@ resolve). Optionally add `[build] target-dir = "../Wasit/target"` to share build
 
 ```sh
 cargo build --workspace --all-targets
-cargo test --workspace            # real daemons + fake CLI (Unix); unit tests everywhere
+cargo test --workspace            # real daemons + fake CLI, on all platforms
 WASL_LIVE=1 cargo test -p wasl --test live -- --ignored --nocapture   # real CLIs
 ```

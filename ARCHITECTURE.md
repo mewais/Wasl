@@ -54,5 +54,5 @@ host daemon A ◀──bridge──▶ hub (RoutingService) ◀──bridge─�
 
 - The budget is accounted per sending node (the cost of results it received), not globally.
 - `message` is a task of mode `message` (gated like any delegation; its result is ignored).
-- The multi-daemon tests use Unix sockets and run on Linux/macOS; Windows CI runs unit tests.
+- The multi-daemon tests run on Linux, macOS and Windows (local endpoints are Unix sockets or named pipes).
 - `spawn_agent` and `transfer` are not implemented (new task modes / node methods later).

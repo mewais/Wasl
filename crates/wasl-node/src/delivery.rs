@@ -351,11 +351,14 @@ impl Node {
         let (mark, resubmit_check) = match mark {
             Some(m) => {
                 // Recovery: was the prompt sent before the restart?
-                let now_cursor = self
-                    .sessions()
-                    .snapshot(&sid)
-                    .map(|s| s.cursor)
-                    .unwrap_or(0);
+                // The head of the session's journal, read from the journal itself: right after
+                // a daemon restart the session's snapshot is still blank (cursor 0) or only
+                // partly replayed, and trusting it would resubmit a prompt that did go out.
+                let now_cursor = match self.sessions().history(&sid, None, 1).await {
+                    Ok(p) => p.events.last().map(|e| e.cursor),
+                    Err(_) => None,
+                }
+                .unwrap_or(0);
                 (m, Some(now_cursor))
             }
             None => {

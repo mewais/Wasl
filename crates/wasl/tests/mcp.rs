@@ -1,8 +1,5 @@
 //! `wasl mcp` as a real stdio child driven by an rmcp client, against a real daemon.
 
-// The harness uses Unix sockets under /tmp and `kill`; Windows runs the unit tests only.
-#![cfg(unix)]
-
 mod common;
 
 use common::*;

@@ -1,8 +1,5 @@
 //! Cross-host delegation with handoff gates (real daemons, hub, fake CLI).
 
-// The harness uses Unix sockets under /tmp and `kill`; Windows runs the unit tests only.
-#![cfg(unix)]
-
 mod common;
 
 use common::*;

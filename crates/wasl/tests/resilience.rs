@@ -1,9 +1,6 @@
 //! Store-and-forward and recovery: the uplink going away, and daemon restarts on either side
 //! while a task is in flight.
 
-// The harness uses Unix sockets under /tmp and `kill`; Windows runs the unit tests only.
-#![cfg(unix)]
-
 mod common;
 
 use common::*;
