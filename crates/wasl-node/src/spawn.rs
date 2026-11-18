@@ -353,28 +353,31 @@ impl Node {
             .await
     }
 
+    /// Runs to the end even when the caller is dropped (an RPC handler whose client went away
+    /// right after asking): a settled request must not keep its gate up.
     async fn withdraw_spawn_as(&self, id: &str, code: &str, message: String) {
-        let gate = {
-            let st = self.lock();
-            match st.spawns.get(id).map(|r| (&r.p.phase, &r.p.from)) {
-                Some((SpawnPhase::Asking { gate }, from)) => {
-                    (gate.raised, gate.request_id.clone(), from.session.clone())
-                }
-                _ => return,
-            }
-        };
+        let node = self.clone();
+        let (id, code) = (id.to_string(), code.to_string());
+        let task = tokio::spawn(async move { node.withdraw_spawn_now(&id, &code, message).await });
+        // Only a panic in the task (already reported) can fail the join.
+        let _ = task.await;
+    }
+
+    async fn withdraw_spawn_now(&self, id: &str, code: &str, message: String) {
         let failed = SpawnPhase::Failed {
             code: code.into(),
             message,
         };
-        if !self
-            .transition_spawn(id, |p| matches!(p, SpawnPhase::Asking { .. }), failed)
+        let Some((SpawnPhase::Asking { gate }, from)) = self
+            .replace_spawn_phase(id, |p| matches!(p, SpawnPhase::Asking { .. }), failed)
             .await
-        {
+        else {
             return;
-        }
-        if let (true, Some(sid)) = (gate.0, SessionId::parse(&gate.2)) {
-            self.withdraw_gate(&sid, &gate.1).await;
+        };
+        // Raised as of the transition: take it down. Not raised yet: the raiser finds the
+        // request no longer asking and takes its gate down itself.
+        if let (true, Some(sid)) = (gate.raised, SessionId::parse(&from.session)) {
+            self.withdraw_gate(&sid, &gate.request_id).await;
         }
     }
 
@@ -385,23 +388,32 @@ impl Node {
         from: impl Fn(&SpawnPhase) -> bool,
         phase: SpawnPhase,
     ) -> bool {
-        let ack = {
+        self.replace_spawn_phase(id, from, phase).await.is_some()
+    }
+
+    /// [`Node::transition_spawn`] returning the phase it replaced and the request's sender.
+    async fn replace_spawn_phase(
+        &self,
+        id: &str,
+        from: impl Fn(&SpawnPhase) -> bool,
+        phase: SpawnPhase,
+    ) -> Option<(SpawnPhase, wasl_proto::AgentId)> {
+        let (old, sender, ack) = {
             let mut st = self.lock();
-            let Some(r) = st.spawns.get_mut(id) else {
-                return false;
-            };
+            let r = st.spawns.get_mut(id)?;
             if !from(&r.p.phase) {
-                return false;
+                return None;
             }
-            r.p.phase = phase;
-            self.persist_spawn(&mut st, id)
+            let old = std::mem::replace(&mut r.p.phase, phase);
+            let sender = r.p.from.clone();
+            (old, sender, self.persist_spawn(&mut st, id))
         };
         if let Some(a) = ack {
             if let Err(e) = durable(a).await {
                 tracing::error!(error = %e, "a spawn record was not journaled");
             }
         }
-        true
+        Some((old, sender))
     }
 
     /// The watch of an existing request with this id (the caller must be its sender).
@@ -522,8 +534,8 @@ impl Node {
             (sid, gate, cursor, turn)
         };
         let request_id = gate.request_id().to_string();
-        match self.sessions().raise_gate(&sid, gate).await {
-            Ok(()) => {
+        match self.raise_or_adopt(&sid, gate, cursor).await {
+            Ok(cursor) => {
                 let info = GateInfo {
                     request_id,
                     raised: true,

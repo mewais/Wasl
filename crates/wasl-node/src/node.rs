@@ -869,8 +869,8 @@ impl Node {
             (sid, gate, cursor, turn)
         };
         let request_id = gate.request_id().to_string();
-        match self.inner.sessions.raise_gate(&sid, gate).await {
-            Ok(()) => {
+        match self.raise_or_adopt(&sid, gate, cursor).await {
+            Ok(cursor) => {
                 let info = GateInfo {
                     request_id,
                     raised: true,
@@ -903,11 +903,49 @@ impl Node {
         }
     }
 
-    pub(crate) async fn withdraw_gate(&self, sid: &SessionId, request_id: &str) {
-        if let Err(e) = self.inner.sessions.resolve_gate(sid, request_id).await {
-            // Already answered / the session ended: nothing is pending any more.
-            tracing::debug!(error = %e, request_id, "withdrawing a handoff gate");
+    /// Raise `gate` on `sid` and return the cursor to watch it from (`cursor`, taken right
+    /// before). A gate with its request id already pending was raised by an earlier run of
+    /// this node that ended before recording it: it is adopted, watched from just before it.
+    pub(crate) async fn raise_or_adopt(
+        &self,
+        sid: &SessionId,
+        gate: GateRequest,
+        cursor: u64,
+    ) -> Result<u64, wasit_runtime::wire::CommandError> {
+        let rid = gate.request_id().to_string();
+        let pending = || {
+            self.inner.sessions.snapshot(sid).ok().and_then(|s| {
+                s.pending_gates
+                    .iter()
+                    .find(|g| g.gate.request_id() == rid)
+                    .map(|g| g.cursor.saturating_sub(1))
+            })
+        };
+        if let Some(c) = pending() {
+            return Ok(c);
         }
+        match self.inner.sessions.raise_gate(sid, gate).await {
+            Ok(()) => Ok(cursor),
+            // Refused as a duplicate: the session (still loading when we looked) has it.
+            Err(e @ wasit_runtime::wire::CommandError::Rejected { .. }) => pending().ok_or(e),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Take a gate down on its session. Runs to the end even when the caller is dropped (an
+    /// RPC handler whose client disconnected right after asking for the withdrawal): the
+    /// request is already settled, so its gate must not stay up.
+    pub(crate) async fn withdraw_gate(&self, sid: &SessionId, request_id: &str) {
+        let sessions = self.inner.sessions.clone();
+        let (sid, request_id) = (sid.clone(), request_id.to_string());
+        let task = tokio::spawn(async move {
+            if let Err(e) = sessions.resolve_gate(&sid, &request_id).await {
+                // Already answered / the session ended: nothing is pending any more.
+                tracing::debug!(error = %e, request_id, "withdrawing a gate");
+            }
+        });
+        // Only a panic in the task (already reported) can fail the join.
+        let _ = task.await;
     }
 
     /// Apply a handoff decision (from the gate, an elicitation, or a supervisor).
@@ -1136,7 +1174,23 @@ impl Node {
     }
 
     /// Cancel or expire an outbound task, forwarding the withdrawal if it was delivered.
+    ///
+    /// Runs to the end even when the caller is dropped (an RPC handler whose client went away
+    /// right after asking): a settled task must not keep its gate up.
     pub(crate) async fn withdraw(
+        &self,
+        id: &TaskId,
+        reason: String,
+        expired: bool,
+    ) -> Result<(), RpcError> {
+        let node = self.clone();
+        let id = id.clone();
+        tokio::spawn(async move { node.withdraw_now(&id, reason, expired).await })
+            .await
+            .map_err(|e| err(codes::IO, format!("withdrawing the task failed: {e}")))?
+    }
+
+    async fn withdraw_now(
         &self,
         id: &TaskId,
         reason: String,
