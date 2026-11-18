@@ -19,6 +19,11 @@ pub struct GateInfo {
     pub raised: bool,
     /// The session's event cursor right before the raise (the watcher replays from it).
     pub cursor: u64,
+    /// Raised while the asking session's turn was running (from a tool call): the gate's
+    /// request ends with that turn — a handoff gate when the turn is interrupted, a spawn gate
+    /// when the turn ends at all (the blocked tool call can no longer receive its result).
+    #[serde(default)]
+    pub turn: bool,
 }
 
 /// A task this node's session delegated.
@@ -147,11 +152,23 @@ pub struct SpawnPersist {
     pub plan: SpawnPlan,
     pub phase: SpawnPhase,
     pub updated_ms: u64,
+    /// The inbound task the caller was working on when it asked: the spawn is for it, so it
+    /// is refused once that task is no longer running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub for_task: Option<TaskId>,
+    /// The spawn's deadline (ms since the epoch), fixed at request time: the first task's
+    /// deadline, capped by `for_task`'s. Approval after it is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_ms: Option<u64>,
 }
 
 pub struct SpawnRec {
     pub p: SpawnPersist,
     pub watch: watch::Sender<SpawnPhase>,
+    /// `wasl.spawn` calls waiting for this request right now (not journaled: after a restart
+    /// the caller re-sends the call). When the last one goes away while the request still
+    /// asks the human, the request is withdrawn.
+    pub waiters: usize,
 }
 
 /// Per receiving session: FIFO of queued tasks and the one being worked on.

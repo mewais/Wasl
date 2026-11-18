@@ -346,6 +346,66 @@ impl Daemon {
             .unwrap();
     }
 
+    /// The gate `request_id` was withdrawn on session `on`: it leaves the snapshot, the
+    /// session's events say `gate_resolved` with reason "withdrawn", and a late answer is
+    /// refused with `gate_withdrawn` (it does nothing).
+    pub async fn assert_withdrawn(&self, on: &AgentId, request_id: &str, choice: &str) {
+        self.wait_snapshot(&sid(on), "gate withdrawn", |s| {
+            !s.pending_gates
+                .iter()
+                .any(|g| g.gate.request_id() == request_id)
+        })
+        .await;
+        let events = self
+            .client
+            .history(&sid(on), None, 1000)
+            .await
+            .expect("history");
+        assert!(
+            events.events.iter().any(|e| matches!(
+                &e.kind,
+                SessionEventKind::Agent { event: AgentEvent::GateResolved { request_id: r, reason } }
+                    if r == request_id && reason.as_deref() == Some("withdrawn")
+            )),
+            "no withdrawn gate_resolved for {request_id}"
+        );
+        let late = self
+            .client
+            .command(
+                &sid(on),
+                Command::AnswerGate {
+                    request_id: request_id.into(),
+                    decision: GateDecision::choose(choice),
+                },
+            )
+            .await;
+        assert_eq!(
+            late,
+            Err(wasit_runtime::ClientError::Command(
+                wasit_runtime::wire::CommandError::GateWithdrawn {
+                    request_id: request_id.into()
+                }
+            ))
+        );
+    }
+
+    /// Start a turn on `on` that runs until it is interrupted (the scenario must have one).
+    pub async fn start_turn(&self, on: &AgentId) {
+        self.client
+            .command(&sid(on), Command::Prompt { text: "go".into() })
+            .await
+            .unwrap();
+        self.wait_snapshot(&sid(on), "turn running", |s| s.turn.is_some())
+            .await;
+    }
+
+    pub async fn interrupt(&self, on: &AgentId) {
+        self.client
+            .command(&sid(on), Command::Interrupt)
+            .await
+            .unwrap();
+    }
+
     /// Answer the next native (CLI) permission gate of session `on` with approve.
     pub async fn approve_native_gate(&self, on: &AgentId) {
         let s = self
@@ -564,6 +624,16 @@ impl TestHub {
     pub async fn shutdown(&self) {
         self.hub.shutdown().await;
     }
+}
+
+/// A session whose turns run until interrupted.
+pub fn busy_until_interrupted() -> Scenario {
+    use wasit_fake_cli::scenario::Turn;
+    let mut b = Scenario::builder();
+    for _ in 0..4 {
+        b = b.turn(Turn::builder().say("thinking").wait_for_interrupt());
+    }
+    b.build()
 }
 
 /// A worker that answers after `ms` of "work".

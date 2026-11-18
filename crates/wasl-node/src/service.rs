@@ -12,8 +12,8 @@ use wasit_control::{CallContext, CloseReason, Cursor, EventStream, RpcError, Ser
 use wasl_proto::{
     methods, topics, CancelRemoteRequest, CancelRequest, DecideRequest, DelegateRequest,
     DeliverRequest, DismissAsk, DismissRequest, MessageRequest, PeerStatusReply, PeerStatusRequest,
-    PeersRequest, Side, SpawnAsk, SpawnLaunch, SpawnRequest, SpawnableAsk, TaskEvent, TaskIds,
-    TaskView, Topology, UpdateRequest, WaitRequest,
+    PeersRequest, Side, SpawnAsk, SpawnCancel, SpawnLaunch, SpawnRequest, SpawnableAsk, TaskEvent,
+    TaskIds, TaskView, Topology, UpdateRequest, WaitRequest,
 };
 
 use crate::journal::{Entry, Rec};
@@ -104,6 +104,7 @@ impl Service for NodeService {
                 })
             }
             methods::SPAWN => ok(n.spawn(params::<SpawnRequest>(p)?).await?),
+            methods::SPAWN_CANCEL => ok(n.cancel_spawn(params::<SpawnCancel>(p)?).await?),
             methods::DISMISS => ok(n.dismiss(params::<DismissRequest>(p)?).await?),
             methods::SUPERVISOR_SPAWN_PLAN => {
                 ok(n.serving_authority()?.plan(params::<SpawnAsk>(p)?).await?)

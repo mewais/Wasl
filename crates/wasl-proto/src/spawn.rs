@@ -46,6 +46,10 @@ pub struct SpawnSpec {
     /// A first task, delegated to the new agent as soon as it exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction: Option<String>,
+    /// Seconds from the request until the first task's deadline (default: the workstream's).
+    /// Never later than the deadline of the task the caller is working on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_secs: Option<u64>,
 }
 
 /// `wasl.spawn` (MCP front-end → node). Waits for the human's decision.
@@ -57,6 +61,15 @@ pub struct SpawnRequest {
     /// Chosen by the caller and reused on retries (idempotency key).
     pub request_id: String,
     pub spec: SpawnSpec,
+}
+
+/// `wasl.spawn.cancel` (MCP front-end → node): the caller stopped waiting for a request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct SpawnCancel {
+    /// The calling session (on this host).
+    pub from: String,
+    pub request_id: String,
 }
 
 /// Result of `wasl.spawn`.

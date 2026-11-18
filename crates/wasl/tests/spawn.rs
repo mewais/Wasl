@@ -593,3 +593,151 @@ async fn restart_while_asking_does_not_spawn_twice() {
     assert_eq!(x.b.client.list().await.unwrap().len(), 1);
     x.hub.shutdown().await;
 }
+
+fn pending_spawn(
+    d: &Daemon,
+    from: &AgentId,
+    rid: &str,
+    spec: SpawnSpec,
+) -> tokio::task::JoinHandle<Result<SpawnReply, wasit_control::CallError>> {
+    let call = spawn_call(d, from, rid, spec);
+    let link = d.client.clone();
+    tokio::spawn(async move {
+        link.link()
+            .request::<SpawnReply>(
+                methods::SPAWN,
+                &call,
+                wasit_control::RequestOpts::new(std::time::Duration::from_secs(120)),
+                std::time::Duration::from_secs(30),
+            )
+            .await
+    })
+}
+
+async fn refused(
+    what: &str,
+    call: tokio::task::JoinHandle<Result<SpawnReply, wasit_control::CallError>>,
+) -> RpcError {
+    match within(what, call).await.unwrap() {
+        Err(wasit_control::CallError::Rpc(e)) => e,
+        other => panic!("{what}: expected a refusal, got {other:?}"),
+    }
+}
+
+/// A spawn gate raised from a turn is withdrawn when that turn is interrupted: the call fails
+/// with `spawn_withdrawn`, the gate leaves the session, a late "allow" is refused and starts
+/// nothing.
+#[tokio::test]
+async fn spawn_gate_is_withdrawn_when_the_asking_turn_is_interrupted() {
+    let x = setup(8).await;
+    let busy = x.a.session(&busy_until_interrupted()).await;
+    x.a.start_turn(&busy).await;
+    let call = pending_spawn(&x.a, &busy, "r1", spec("w", None, None));
+    let gate = spawn_gate(&x.a, &busy, "r1").await;
+    x.a.interrupt(&busy).await;
+    let e = refused("withdrawn", call).await;
+    assert_eq!(e.code, codes::SPAWN_WITHDRAWN, "{e:?}");
+    assert!(e.message.contains("interrupted"), "{}", e.message);
+    x.a.assert_withdrawn(&busy, gate.request_id(), "allow_once")
+        .await;
+    assert_eq!(x.sup.st().launch_calls, 0);
+    x.hub.shutdown().await;
+}
+
+/// The `spawn_agent` MCP call is cancelled by its client, or its client disconnects: the
+/// request is withdrawn either way and a late answer starts nothing.
+#[tokio::test]
+async fn spawn_gate_is_withdrawn_when_the_mcp_call_is_cancelled_or_its_client_disconnects() {
+    use rmcp::model::{CallToolRequestParam, ClientRequest, Request};
+    use rmcp::service::PeerRequestOptions;
+    use rmcp::ServiceExt;
+
+    let x = setup(8).await;
+    let mcp = || async {
+        let mut cmd = tokio::process::Command::new(wasl_bin());
+        cmd.args([
+            "mcp",
+            "--socket",
+            &x.a.socket().to_string_lossy(),
+            "--session",
+            &x.orch.session,
+        ]);
+        let transport = rmcp::transport::TokioChildProcess::new(cmd).expect("spawn wasl mcp");
+        within("mcp initialize", ().serve(transport))
+            .await
+            .expect("mcp client")
+    };
+    let spawn_req = |name: &str| {
+        ClientRequest::CallToolRequest(Request::new(CallToolRequestParam {
+            name: "spawn_agent".into(),
+            arguments: json!({"name": name, "role": "answers arithmetic"})
+                .as_object()
+                .cloned(),
+        }))
+    };
+    let first_gate = |snap: &wasit_runtime::wire::SessionSnapshot| {
+        snap.pending_gates
+            .iter()
+            .find(|g| matches!(g.gate, GateRequest::Spawn { .. }))
+            .map(|g| g.gate.request_id().to_string())
+    };
+
+    // Cancelled (`notifications/cancelled`).
+    let client = mcp().await;
+    let handle = client
+        .peer()
+        .send_cancellable_request(spawn_req("w1"), PeerRequestOptions::no_options())
+        .await
+        .unwrap();
+    let snap =
+        x.a.wait_snapshot(&sid(&x.orch), "spawn gate", |s| first_gate(s).is_some())
+            .await;
+    let rid = first_gate(&snap).unwrap();
+    handle
+        .cancel(Some("turn interrupted".into()))
+        .await
+        .unwrap();
+    x.a.assert_withdrawn(&x.orch, &rid, "allow_once").await;
+
+    // Disconnected (the MCP server process goes away with its stdio).
+    let handle = client
+        .peer()
+        .send_cancellable_request(spawn_req("w2"), PeerRequestOptions::no_options())
+        .await
+        .unwrap();
+    let snap =
+        x.a.wait_snapshot(&sid(&x.orch), "second spawn gate", |s| {
+            first_gate(s).is_some()
+        })
+        .await;
+    let rid = first_gate(&snap).unwrap();
+    drop(handle);
+    within("mcp client closes", client.cancel()).await.unwrap();
+    x.a.assert_withdrawn(&x.orch, &rid, "allow_once").await;
+    assert_eq!(x.sup.st().launch_calls, 0);
+    x.hub.shutdown().await;
+}
+
+/// A spawn whose first task's deadline already passed is refused at once; one whose deadline
+/// passes while it waits for the human is withdrawn (`spawn_expired`) and a late answer starts
+/// nothing.
+#[tokio::test]
+async fn spawn_past_its_deadline_is_refused_or_withdrawn() {
+    let x = setup(8).await;
+    let mut late = spec("w0", None, Some("what is 6*7?"));
+    late.deadline_secs = Some(0);
+    let e = refused("expired", pending_spawn(&x.a, &x.orch, "r0", late)).await;
+    assert_eq!(e.code, codes::SPAWN_EXPIRED, "{e:?}");
+    assert!(e.message.contains("deadline"), "{}", e.message);
+
+    let mut soon = spec("w1", None, Some("what is 6*7?"));
+    soon.deadline_secs = Some(1);
+    let call = pending_spawn(&x.a, &x.orch, "r1", soon);
+    let gate = spawn_gate(&x.a, &x.orch, "r1").await;
+    let e = refused("expired while asking", call).await;
+    assert_eq!(e.code, codes::SPAWN_EXPIRED, "{e:?}");
+    x.a.assert_withdrawn(&x.orch, gate.request_id(), "allow_once")
+        .await;
+    assert_eq!(x.sup.st().launch_calls, 0);
+    x.hub.shutdown().await;
+}

@@ -268,3 +268,75 @@ async fn pending_gate_survives_sender_restart() {
     assert_eq!(result_summary(&a.wait_done(&task.id).await), "survived");
     hub.shutdown().await;
 }
+
+/// A handoff gate lives as long as its task and the turn that delegated: it is withdrawn when
+/// that turn is interrupted, when the task is cancelled or expires, and when the sending
+/// session's process ends; each time the task
+/// ends without being delivered and a late "allow" is refused.
+#[tokio::test]
+async fn handoff_gate_is_withdrawn_on_interrupt_cancel_and_expiry() {
+    let s = Scratch::new();
+    let a = Daemon::start(&s, "a").await;
+    let b = Daemon::start(&s, "b").await;
+    let hub = TestHub::start(&[&a, &b]).await;
+    let orch = a.session(&busy_until_interrupted()).await;
+    let worker = b.session(&gated_worker()).await;
+    let t = topology(
+        1,
+        &[(&orch, "orchestrator"), (&worker, "worker")],
+        &[(&orch, &worker, EdgePolicy::Ask)],
+        Limits::default(),
+    );
+    a.set_topology(&t).await;
+    b.set_topology(&t).await;
+
+    // Interrupted: the delegating turn is interrupted while the gate waits.
+    a.start_turn(&orch).await;
+    let t1 = a.delegate1(&orch, &worker, "first").await;
+    let g1 = a.handoff_gate(&orch, &t1.id).await;
+    a.interrupt(&orch).await;
+    match a.wait_done(&t1.id).await {
+        TaskState::Cancelled { reason } => assert!(reason.contains("interrupted"), "{reason}"),
+        other => panic!("expected cancelled, got {other:?}"),
+    }
+    a.assert_withdrawn(&orch, g1.request_id(), "allow_once")
+        .await;
+
+    // Cancelled by the sender (the session is idle now: the gate is not tied to a turn).
+    let t2 = a.delegate1(&orch, &worker, "second").await;
+    let g2 = a.handoff_gate(&orch, &t2.id).await;
+    let _: TaskBrief = a.call(methods::TASK_CANCEL, json!({"id": t2.id})).await;
+    a.assert_withdrawn(&orch, g2.request_id(), "allow_once")
+        .await;
+    assert!(matches!(
+        a.status(&t2.id).await,
+        TaskState::Cancelled { .. }
+    ));
+
+    // Expired while asking.
+    let r = a
+        .delegate(&orch, &[&worker], TaskMode::Consult, "third", Some(1))
+        .await;
+    let t3 = r.results[0].task.clone().unwrap();
+    let g3 = a.handoff_gate(&orch, &t3.id).await;
+    assert_eq!(a.wait_done(&t3.id).await, TaskState::Expired);
+    a.assert_withdrawn(&orch, g3.request_id(), "allow_once")
+        .await;
+
+    // The sending session's process ends (its CLI and MCP client with it).
+    let t4 = a.delegate1(&orch, &worker, "fourth").await;
+    let g4 = a.handoff_gate(&orch, &t4.id).await;
+    a.client.stop(&sid(&orch)).await.unwrap();
+    assert!(matches!(
+        a.wait_done(&t4.id).await,
+        TaskState::Cancelled { .. }
+    ));
+    a.assert_withdrawn(&orch, g4.request_id(), "allow_once")
+        .await;
+
+    // Nothing ever reached the worker.
+    let snap = b.client.snapshot(&sid(&worker)).await.unwrap();
+    assert_eq!(snap.turns_completed, 0);
+    assert!(snap.turn.is_none());
+    hub.shutdown().await;
+}

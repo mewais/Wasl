@@ -22,6 +22,7 @@ wasit-shim = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome
 wasit-fake-cli = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
 
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"

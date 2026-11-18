@@ -146,6 +146,7 @@ impl Node {
                         crate::state::SpawnRec {
                             watch: watch::channel(sp.phase.clone()).0,
                             p: sp,
+                            waiters: 0,
                         },
                     );
                 }
@@ -818,7 +819,7 @@ impl Node {
 
     /// Raise the handoff gate of a pending task on its sending session.
     pub(crate) async fn raise_handoff(&self, id: TaskId) {
-        let (sid, gate, cursor) = {
+        let (sid, gate, cursor, turn) = {
             let st = self.lock();
             let Some(r) = st.out.get(&id) else { return };
             if !matches!(r.p.state, TaskState::PendingApproval { .. }) {
@@ -854,13 +855,13 @@ impl Node {
             let Some(sid) = SessionId::parse(&t.from.session) else {
                 return;
             };
-            let cursor = self
+            let (cursor, turn) = self
                 .inner
                 .sessions
                 .snapshot(&sid)
-                .map(|s| s.cursor)
-                .unwrap_or(0);
-            (sid, gate, cursor)
+                .map(|s| (s.cursor, s.turn.is_some()))
+                .unwrap_or((0, false));
+            (sid, gate, cursor, turn)
         };
         let request_id = gate.request_id().to_string();
         match self.inner.sessions.raise_gate(&sid, gate).await {
@@ -869,6 +870,7 @@ impl Node {
                     request_id,
                     raised: true,
                     cursor,
+                    turn,
                 };
                 let ack = {
                     let mut st = self.lock();

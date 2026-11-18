@@ -56,9 +56,9 @@ use wasit_core::{ChoiceText, GateChoice, GateChoiceKind, GateDecision, Usage};
 pub mod spawn;
 pub use spawn::{
     is_spawn_refusal, spawn_choice, spawn_choices, spawn_gate, spawn_request_id, DismissAsk,
-    DismissReply, DismissRequest, SpawnApproval, SpawnAsk, SpawnDecision, SpawnDriver, SpawnHost,
-    SpawnLaunch, SpawnLaunched, SpawnPlan, SpawnReply, SpawnRequest, SpawnSpec, Spawnable,
-    SpawnableAsk,
+    DismissReply, DismissRequest, SpawnApproval, SpawnAsk, SpawnCancel, SpawnDecision, SpawnDriver,
+    SpawnHost, SpawnLaunch, SpawnLaunched, SpawnPlan, SpawnReply, SpawnRequest, SpawnSpec,
+    Spawnable, SpawnableAsk,
 };
 
 /// Method names.
@@ -79,6 +79,9 @@ pub mod methods {
     pub const NODE_PEER_STATUS: &str = "wasl.node.peer_status";
     /// An agent asks for a new agent ([`crate::SpawnRequest`] → [`crate::SpawnReply`]).
     pub const SPAWN: &str = "wasl.spawn";
+    /// The caller no longer waits for a spawn ([`crate::SpawnCancel`] → [`crate::Ack`]): a
+    /// request still asking the human is withdrawn (its gate taken down).
+    pub const SPAWN_CANCEL: &str = "wasl.spawn.cancel";
     /// An agent stops an agent it spawned ([`crate::DismissRequest`] → [`crate::DismissReply`]).
     pub const DISMISS: &str = "wasl.dismiss";
     /// Served by the spawn authority (the supervisor; see [`crate::spawn`]). A node without an
@@ -130,6 +133,12 @@ pub mod codes {
     pub const SPAWN_LIMIT: &str = "spawn_limit";
     /// The human denied the spawn.
     pub const SPAWN_DENIED: &str = "spawn_denied";
+    /// The spawn request was withdrawn before anyone answered: the asking turn ended or was
+    /// interrupted, the tool call was cancelled, or its client went away.
+    pub const SPAWN_WITHDRAWN: &str = "spawn_withdrawn";
+    /// The spawn's deadline passed (its first task's, or that of the task the caller works
+    /// on), at request time or before approval.
+    pub const SPAWN_EXPIRED: &str = "spawn_expired";
     /// The agent named was not spawned by the caller.
     pub const NOT_SPAWNED_BY_CALLER: &str = "not_spawned_by_caller";
 }

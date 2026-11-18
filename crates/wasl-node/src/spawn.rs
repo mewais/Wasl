@@ -17,15 +17,58 @@ use tokio::sync::watch;
 use wasit_control::{codes as ctl_codes, RequestOpts, RpcError, Uplink};
 use wasit_runtime::wire::SessionId;
 use wasl_proto::{
-    codes, methods, spawn_gate, spawn_request_id, DelegateRequest, DismissAsk, DismissReply,
-    DismissRequest, SpawnApproval, SpawnAsk, SpawnDecision, SpawnLaunch, SpawnLaunched, SpawnPlan,
-    SpawnReply, SpawnRequest, Spawnable, SpawnableAsk, TaskMode,
+    codes, methods, spawn_gate, spawn_request_id, Ack, DelegateRequest, DismissAsk, DismissReply,
+    DismissRequest, SpawnApproval, SpawnAsk, SpawnCancel, SpawnDecision, SpawnLaunch,
+    SpawnLaunched, SpawnPlan, SpawnReply, SpawnRequest, Spawnable, SpawnableAsk, TaskMode,
 };
 
 use crate::gate::Answer;
 use crate::journal::{durable, Rec};
 use crate::node::{err, now_ms, Node};
 use crate::state::{GateInfo, SpawnPersist, SpawnPhase, SpawnRec};
+
+/// A `wasl.spawn` caller waiting for a request (see [`Node::spawn_outcome`]).
+struct Waiting {
+    node: Node,
+    id: String,
+}
+
+impl Waiting {
+    fn new(node: Node, id: String) -> Self {
+        if let Some(r) = node.lock().spawns.get_mut(&id) {
+            r.waiters += 1;
+        }
+        Waiting { node, id }
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        let abandoned = {
+            let mut st = self.node.lock();
+            match st.spawns.get_mut(&self.id) {
+                Some(r) => {
+                    r.waiters = r.waiters.saturating_sub(1);
+                    r.waiters == 0 && matches!(r.p.phase, SpawnPhase::Asking { .. })
+                }
+                None => false,
+            }
+        };
+        if abandoned {
+            let node = self.node.clone();
+            let id = std::mem::take(&mut self.id);
+            tokio::spawn(async move {
+                node.withdraw_spawn(
+                    &id,
+                    "the spawn request was withdrawn: its caller stopped waiting (the tool \
+                     call was cancelled or its client disconnected)"
+                        .into(),
+                )
+                .await
+            });
+        }
+    }
+}
 
 /// Who decides about and performs spawns: the supervisor. Implementations must make
 /// [`SpawnAuthority::launch`] idempotent by [`SpawnLaunch::request_id`].
@@ -158,8 +201,9 @@ impl Node {
         self.local_session(&req.from)?;
         let me = self.me(&req.from);
         if let Some(rx) = self.spawn_watch(&req.request_id, &me)? {
-            return self.spawn_outcome(rx).await;
+            return self.spawn_outcome(&req.request_id, rx).await;
         }
+        let (for_task, deadline_ms) = self.spawn_deadline(&req)?;
         let auth = self.authority()?;
         let ask = SpawnAsk {
             request_id: req.request_id.clone(),
@@ -185,6 +229,7 @@ impl Node {
                     request_id: spawn_request_id(&req.request_id),
                     raised: false,
                     cursor: 0,
+                    turn: false,
                 },
             },
         };
@@ -201,11 +246,19 @@ impl Node {
                     plan,
                     phase: phase.clone(),
                     updated_ms: now_ms(),
+                    for_task,
+                    deadline_ms,
                 };
                 let tx = watch::channel(phase.clone()).0;
                 let rx = tx.subscribe();
-                st.spawns
-                    .insert(req.request_id.clone(), SpawnRec { p, watch: tx });
+                st.spawns.insert(
+                    req.request_id.clone(),
+                    SpawnRec {
+                        p,
+                        watch: tx,
+                        waiters: 0,
+                    },
+                );
                 (rx, Some(self.persist_spawn(&mut st, &req.request_id)))
             }
         };
@@ -213,7 +266,137 @@ impl Node {
             self.settle(ack).await;
             self.advance_spawn(req.request_id.clone());
         }
-        self.spawn_outcome(rx).await
+        self.spawn_outcome(&req.request_id, rx).await
+    }
+
+    /// The task the caller works on and the spawn's deadline; refused when it already passed.
+    fn spawn_deadline(
+        &self,
+        req: &SpawnRequest,
+    ) -> Result<(Option<wasl_proto::TaskId>, Option<u64>), RpcError> {
+        let now = now_ms();
+        let st = self.lock();
+        let parent = st
+            .running_inbound(&req.from)
+            .map(|r| (r.p.task.id.clone(), r.p.task.deadline_ms));
+        // Without `deadline_secs` the first task gets the workstream's default deadline when
+        // it is delegated (never already passed).
+        let first = req
+            .spec
+            .instruction
+            .as_ref()
+            .and(req.spec.deadline_secs)
+            .map(|secs| now.saturating_add(secs.saturating_mul(1000)));
+        let deadline = match (first, parent.as_ref().map(|p| p.1)) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        if let Some(d) = deadline.filter(|d| *d <= now) {
+            let why = match &parent {
+                Some((id, pd)) if *pd == d => format!("the task you are working on ({id})"),
+                _ => "the first task".to_string(),
+            };
+            return Err(err(
+                codes::SPAWN_EXPIRED,
+                format!("not spawned: the deadline of {why} has already passed"),
+            ));
+        }
+        Ok((parent.map(|p| p.0), deadline))
+    }
+
+    /// Why an asking request may no longer be approved (its deadline passed, or the task it
+    /// was for is no longer being worked on).
+    fn spawn_expired(&self, id: &str) -> Option<String> {
+        let st = self.lock();
+        let r = st.spawns.get(id)?;
+        if let Some(t) = &r.p.for_task {
+            let running = st.inbound.get(t).is_some_and(|i| !i.p.state.is_terminal());
+            if !running {
+                return Some(format!(
+                    "not spawned: the task it was for ({t}) ended before the spawn was approved"
+                ));
+            }
+        }
+        match r.p.deadline_ms {
+            Some(d) if d <= now_ms() => {
+                Some("not spawned: its deadline passed before the spawn was approved".into())
+            }
+            _ => None,
+        }
+    }
+
+    /// `wasl.spawn.cancel`: the caller stopped waiting.
+    pub async fn cancel_spawn(&self, req: SpawnCancel) -> Result<Ack, RpcError> {
+        self.local_session(&req.from)?;
+        let me = self.me(&req.from);
+        // Validates the owner; an unknown id is fine (nothing to withdraw).
+        if self.spawn_watch(&req.request_id, &me)?.is_some() {
+            self.withdraw_spawn(
+                &req.request_id,
+                "the spawn request was withdrawn: the tool call was cancelled".into(),
+            )
+            .await;
+        }
+        Ok(Ack {})
+    }
+
+    /// Withdraw a request that still asks the human: it fails with `spawn_withdrawn` and its
+    /// gate is taken down (a late answer is then refused by the runtime). No-op once the
+    /// request was decided.
+    pub(crate) async fn withdraw_spawn(&self, id: &str, message: String) {
+        self.withdraw_spawn_as(id, codes::SPAWN_WITHDRAWN, message)
+            .await
+    }
+
+    async fn withdraw_spawn_as(&self, id: &str, code: &str, message: String) {
+        let gate = {
+            let st = self.lock();
+            match st.spawns.get(id).map(|r| (&r.p.phase, &r.p.from)) {
+                Some((SpawnPhase::Asking { gate }, from)) => {
+                    (gate.raised, gate.request_id.clone(), from.session.clone())
+                }
+                _ => return,
+            }
+        };
+        let failed = SpawnPhase::Failed {
+            code: code.into(),
+            message,
+        };
+        if !self
+            .transition_spawn(id, |p| matches!(p, SpawnPhase::Asking { .. }), failed)
+            .await
+        {
+            return;
+        }
+        if let (true, Some(sid)) = (gate.0, SessionId::parse(&gate.2)) {
+            self.withdraw_gate(&sid, &gate.1).await;
+        }
+    }
+
+    /// Move a request to `phase` if its current phase satisfies `from`; true if it moved.
+    async fn transition_spawn(
+        &self,
+        id: &str,
+        from: impl Fn(&SpawnPhase) -> bool,
+        phase: SpawnPhase,
+    ) -> bool {
+        let ack = {
+            let mut st = self.lock();
+            let Some(r) = st.spawns.get_mut(id) else {
+                return false;
+            };
+            if !from(&r.p.phase) {
+                return false;
+            }
+            r.p.phase = phase;
+            self.persist_spawn(&mut st, id)
+        };
+        if let Some(a) = ack {
+            if let Err(e) = durable(a).await {
+                tracing::error!(error = %e, "a spawn record was not journaled");
+            }
+        }
+        true
     }
 
     /// The watch of an existing request with this id (the caller must be its sender).
@@ -232,10 +415,15 @@ impl Node {
         }
     }
 
+    /// Wait for the request's outcome. While this waits it counts as a caller of the request;
+    /// when the last caller stops waiting (cancelled call, disconnected client) before the
+    /// human answered, the request is withdrawn.
     async fn spawn_outcome(
         &self,
+        id: &str,
         mut rx: watch::Receiver<SpawnPhase>,
     ) -> Result<SpawnReply, RpcError> {
+        let _waiting = Waiting::new(self.clone(), id.to_string());
         let phase = match rx.wait_for(|p| p.is_terminal()).await {
             Ok(p) => p.clone(),
             Err(_) => return Err(err(codes::IO, "the node is shutting down")),
@@ -314,19 +502,19 @@ impl Node {
     }
 
     async fn raise_spawn_gate(self, id: String) {
-        let (sid, gate, cursor) = {
+        let (sid, gate, cursor, turn) = {
             let st = self.lock();
             let Some(r) = st.spawns.get(&id) else { return };
             let Some(sid) = SessionId::parse(&r.p.from.session) else {
                 return;
             };
             let gate = spawn_gate(&id, &r.p.plan, r.p.spec.instruction.clone());
-            let cursor = self
+            let (cursor, turn) = self
                 .sessions()
                 .snapshot(&sid)
-                .map(|s| s.cursor)
-                .unwrap_or(0);
-            (sid, gate, cursor)
+                .map(|s| (s.cursor, s.turn.is_some()))
+                .unwrap_or((0, false));
+            (sid, gate, cursor, turn)
         };
         let request_id = gate.request_id().to_string();
         match self.sessions().raise_gate(&sid, gate).await {
@@ -335,9 +523,17 @@ impl Node {
                     request_id,
                     raised: true,
                     cursor,
+                    turn,
                 };
-                self.set_spawn_phase(&id, SpawnPhase::Asking { gate: info.clone() })
-                    .await;
+                let asking = |p: &SpawnPhase| matches!(p, SpawnPhase::Asking { .. });
+                if !self
+                    .transition_spawn(&id, asking, SpawnPhase::Asking { gate: info.clone() })
+                    .await
+                {
+                    // Withdrawn while the gate was being raised: take it back down.
+                    self.withdraw_gate(&sid, &info.request_id).await;
+                    return;
+                }
                 self.watch_spawn_gate(id, info).await;
             }
             Err(e) => {
@@ -365,9 +561,29 @@ impl Node {
             (SessionId::parse(&r.p.from.session), r.p.plan.name.clone())
         };
         let Some(sid) = sid else { return };
-        let answer = self
-            .await_answer(&sid, &gate, || self.still_asking(&id))
-            .await;
+        // The blocked `spawn_agent` call cannot receive a result once its turn is over.
+        let deadline = self.lock().spawns.get(&id).and_then(|r| r.p.deadline_ms);
+        let answer = self.await_answer(&sid, &gate, || self.still_asking(&id), |_| true);
+        let answer = match deadline {
+            None => answer.await,
+            Some(d) => {
+                let left = Duration::from_millis(d.saturating_sub(now_ms()));
+                match tokio::time::timeout(left, answer).await {
+                    Ok(a) => a,
+                    Err(_) => {
+                        self.withdraw_spawn_as(
+                            &id,
+                            codes::SPAWN_EXPIRED,
+                            "the spawn request was withdrawn: its deadline passed before anyone \
+                             answered"
+                                .into(),
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+        };
         let decision = match answer {
             Answer::Decided(d) => SpawnDecision::from_gate(&d).unwrap_or(SpawnDecision::Deny {
                 reason: Some(format!("unknown spawn choice {:?}", d.choice)),
@@ -376,18 +592,38 @@ impl Node {
                 reason: Some("answered as a question; spawning needs allow or deny".into()),
             },
             Answer::Gone => {
-                if self.still_asking(&id) {
-                    self.fail_spawn(
-                        &id,
-                        codes::SPAWN_DENIED,
-                        "the spawn request was withdrawn before anyone answered".into(),
-                    )
-                    .await;
-                }
+                // Taken down by `withdraw_spawn` (already failed), or by someone else.
+                self.fail_asking(
+                    &id,
+                    codes::SPAWN_WITHDRAWN,
+                    "the spawn request was withdrawn before anyone answered".into(),
+                )
+                .await;
+                return;
+            }
+            Answer::TurnEnded { interrupted } => {
+                let how = if interrupted {
+                    "was interrupted"
+                } else {
+                    "ended"
+                };
+                self.withdraw_spawn(
+                    &id,
+                    format!(
+                        "the spawn request was withdrawn: the asking turn {how} before anyone answered"
+                    ),
+                )
+                .await;
                 return;
             }
             Answer::SessionEnded(reason) => {
-                self.fail_spawn(&id, codes::SPAWN_DENIED, reason).await;
+                // The runtime withdrew the gate with the process.
+                self.fail_asking(
+                    &id,
+                    codes::SPAWN_WITHDRAWN,
+                    format!("the spawn request was withdrawn: {reason}"),
+                )
+                .await;
                 return;
             }
         };
@@ -396,17 +632,32 @@ impl Node {
                 Some(r) => format!("the human denied spawning {name}: {r}"),
                 None => format!("the human denied spawning {name}"),
             };
-            self.fail_spawn(&id, codes::SPAWN_DENIED, message).await;
+            self.fail_asking(&id, codes::SPAWN_DENIED, message).await;
             return;
         }
-        self.set_spawn_phase(
-            &id,
-            SpawnPhase::Launching {
-                decision: decision.clone(),
-            },
-        )
-        .await;
-        self.launch_spawn(id, decision).await;
+        if let Some(why) = self.spawn_expired(&id) {
+            self.fail_asking(&id, codes::SPAWN_EXPIRED, why).await;
+            return;
+        }
+        let launching = SpawnPhase::Launching {
+            decision: decision.clone(),
+        };
+        // Only an asking request launches: a withdrawal that got here first wins.
+        if self
+            .transition_spawn(&id, |p| matches!(p, SpawnPhase::Asking { .. }), launching)
+            .await
+        {
+            self.launch_spawn(id, decision).await;
+        }
+    }
+
+    async fn fail_asking(&self, id: &str, code: &str, message: String) {
+        let failed = SpawnPhase::Failed {
+            code: code.into(),
+            message,
+        };
+        self.transition_spawn(id, |p| matches!(p, SpawnPhase::Asking { .. }), failed)
+            .await;
     }
 
     async fn launch_spawn(self, id: String, decision: SpawnDecision) {
@@ -459,10 +710,14 @@ impl Node {
                 tracing::warn!(error = %e, "applying the topology of a spawn");
             }
         }
-        let (from, instruction) = {
+        let (from, instruction, deadline_ms) = {
             let st = self.lock();
             let Some(r) = st.spawns.get(&id) else { return };
-            (r.p.from.clone(), r.p.spec.instruction.clone())
+            (
+                r.p.from.clone(),
+                r.p.spec.instruction.clone(),
+                r.p.deadline_ms,
+            )
         };
         let mut reply = SpawnReply {
             agent: launched.agent.clone(),
@@ -477,7 +732,10 @@ impl Node {
                 to: vec![launched.agent.to_string()],
                 mode: TaskMode::Command,
                 instruction: text,
-                deadline_secs: None,
+                // What is left of the spawn's deadline (at least a second: the task then
+                // expires through the normal path).
+                deadline_secs: deadline_ms
+                    .map(|d| (d.saturating_sub(now_ms()).div_ceil(1000)).max(1)),
                 attachments: Vec::new(),
             };
             match self.delegate(req).await {

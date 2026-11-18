@@ -39,8 +39,8 @@ use wasit_core::{McpServerConfig, McpTransport};
 use wasl_proto::{
     methods, ApprovalVia, CancelRequest, DecideRequest, DelegateReply, DelegateRequest,
     DismissReply, DismissRequest, HandoffDecision, MessageRequest, PeerList, PeersRequest,
-    SpawnReply, SpawnRequest, SpawnSpec, Spawnable, TaskBrief, TaskId, TaskMode, TaskState,
-    TaskStates, WaitRequest,
+    SpawnCancel, SpawnReply, SpawnRequest, SpawnSpec, Spawnable, TaskBrief, TaskId, TaskMode,
+    TaskState, TaskStates, WaitRequest,
 };
 
 /// Name of the MCP server as agents see it (tools appear as `mcp__wasl__…` in claude).
@@ -198,6 +198,9 @@ pub struct SpawnArgs {
     /// First task; delegated at once, its task id returned (then use task_wait).
     #[serde(default)]
     pub instruction: Option<String>,
+    /// Seconds the first task may take (default: the workstream's).
+    #[serde(default)]
+    pub deadline_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -677,6 +680,7 @@ impl WaslMcp {
         &self,
         Parameters(a): Parameters<SpawnArgs>,
         peer: Peer<RoleServer>,
+        cancelled: tokio_util::sync::CancellationToken,
     ) -> Result<CallToolResult, McpError> {
         let req = SpawnRequest {
             from: self.session.clone(),
@@ -691,12 +695,30 @@ impl WaslMcp {
                 cwd: a.cwd.filter(|s| !s.trim().is_empty()),
                 mode: a.mode.filter(|s| !s.trim().is_empty()),
                 instruction: a.instruction.filter(|s| !s.trim().is_empty()),
+                deadline_secs: a.deadline_secs,
             },
         };
-        match self
-            .call::<SpawnReply>(methods::SPAWN, json!(req), SPAWN_DEADLINE, true)
-            .await
-        {
+        let call = self.call::<SpawnReply>(methods::SPAWN, json!(req), SPAWN_DEADLINE, true);
+        let outcome = tokio::select! {
+            r = call => r,
+            _ = cancelled.cancelled() => {
+                // The client cancelled the call (e.g. its turn was interrupted): withdraw the
+                // request so a later answer to its gate starts nothing. (If this process ends
+                // instead, the node sees the call's connection close and withdraws it too.)
+                let cancel = SpawnCancel {
+                    from: req.from.clone(),
+                    request_id: req.request_id.clone(),
+                };
+                if let Err(e) = self
+                    .call::<wasl_proto::Ack>(methods::SPAWN_CANCEL, json!(cancel), DEADLINE, true)
+                    .await
+                {
+                    tracing::warn!(error = %e, "withdrawing a cancelled spawn request failed");
+                }
+                return Ok(tool_error("cancelled"));
+            }
+        };
+        match outcome {
             Ok(r) => {
                 let mut v = json!({"name": r.name, "id": r.agent});
                 if let Some(mut t) = r.task {
