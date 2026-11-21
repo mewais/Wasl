@@ -390,12 +390,7 @@ impl Node {
                 .await;
                 if let Err(e) = self
                     .sessions()
-                    .command(
-                        &sid,
-                        Command::Prompt {
-                            text: prompt(&task, &from_name),
-                        },
-                    )
+                    .command(&sid, Command::prompt(prompt(&task, &from_name)))
                     .await
                 {
                     return TaskState::Failed {
@@ -492,12 +487,7 @@ impl Node {
                 resubmit_check = None;
                 if let Err(e) = self
                     .sessions()
-                    .command(
-                        sid,
-                        Command::Prompt {
-                            text: prompt(task, from_name),
-                        },
-                    )
+                    .command(sid, Command::prompt(prompt(task, from_name)))
                     .await
                 {
                     return Ok(TaskState::Failed {
@@ -546,7 +536,7 @@ impl Node {
                 from = Some(ev.cursor);
                 match &ev.kind {
                     SessionEventKind::Input {
-                        command: Command::Prompt { text: p },
+                        command: Command::Prompt { text: p, .. },
                         status,
                     } if p.starts_with(&mk) => {
                         if matches!(
@@ -648,12 +638,7 @@ impl Node {
                         if !seen_input {
                             if let Err(e) = self
                                 .sessions()
-                                .command(
-                                    sid,
-                                    Command::Prompt {
-                                        text: prompt(task, from_name),
-                                    },
-                                )
+                                .command(sid, Command::prompt(prompt(task, from_name)))
                                 .await
                             {
                                 return Ok(TaskState::Failed {

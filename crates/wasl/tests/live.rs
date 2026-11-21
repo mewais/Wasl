@@ -83,12 +83,11 @@ async fn run(
     d.client
         .command(
             &oid,
-            Command::Prompt {
-                text: "Use the wasl `consult` tool to ask the peer named \"worker\" exactly: \
+            Command::prompt(
+                "Use the wasl `consult` tool to ask the peer named \"worker\" exactly: \
                        \"What is 17 + 25? Reply with just the number.\" Then reply with only \
-                       the number it answered."
-                    .into(),
-            },
+                       the number it answered.",
+            ),
         )
         .await
         .unwrap();

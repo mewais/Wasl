@@ -392,7 +392,7 @@ impl Daemon {
     /// Start a turn on `on` that runs until it is interrupted (the scenario must have one).
     pub async fn start_turn(&self, on: &AgentId) {
         self.client
-            .command(&sid(on), Command::Prompt { text: "go".into() })
+            .command(&sid(on), Command::prompt("go"))
             .await
             .unwrap();
         self.wait_snapshot(&sid(on), "turn running", |s| s.turn.is_some())
