@@ -126,7 +126,8 @@ pub struct DelegateArgs {
     /// "command" (do the work; default) or "consult" (answer only, change nothing).
     #[serde(default)]
     pub mode: Option<String>,
-    /// Give up after this many seconds (default: the workstream's).
+    /// Give up after this many seconds (default: the workstream's; never later than the
+    /// deadline of the task you are working on, which a delegated task inherits).
     #[serde(default)]
     pub deadline_secs: Option<u64>,
 }

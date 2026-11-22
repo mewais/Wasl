@@ -264,6 +264,73 @@ async fn deadline_expires_task_and_interrupts_the_worker() {
     hub.shutdown().await;
 }
 
+/// A task delegated by an agent working on a task inherits that task's deadline: asking for
+/// more time (or the workstream default) never outlives the parent, and the delegated task
+/// expires with it.
+#[tokio::test]
+async fn delegated_task_inherits_the_parent_deadline() {
+    let s = Scratch::new();
+    let a = Daemon::start(&s, "a").await;
+    let b = Daemon::start(&s, "b").await;
+    let hub = TestHub::start(&[&a, &b]).await;
+    let orch = a.session(&Scenario::builder().build()).await;
+    let mid = b.session(&waiting_worker()).await;
+    let leaf = b.session(&waiting_worker()).await;
+    let t = topology(
+        1,
+        &[(&orch, "orch"), (&mid, "mid"), (&leaf, "leaf")],
+        &[
+            (&orch, &mid, EdgePolicy::AlwaysAllow),
+            (&mid, &leaf, EdgePolicy::AlwaysAllow),
+        ],
+        Limits::default(),
+    );
+    a.set_topology(&t).await;
+    b.set_topology(&t).await;
+    let mut a_events = a.tasks_topic();
+    let mut b_events = b.tasks_topic();
+    let started = std::time::Instant::now();
+    let r = a
+        .delegate(&orch, &[&mid], TaskMode::Command, "think", Some(4))
+        .await;
+    let t1 = r.results[0].task.as_ref().unwrap().id.clone();
+    let parent = next_task_event(&mut a_events, "parent running", |e| {
+        e.view.task.id == t1 && matches!(e.view.state, TaskState::Running { .. })
+    })
+    .await
+    .view
+    .task;
+    // mid asks for ten minutes, then for the workstream default: both capped by t1.
+    let mut kids = Vec::new();
+    for want in [Some(600), None] {
+        let r = b
+            .delegate(&mid, &[&leaf], TaskMode::Command, "dig", want)
+            .await;
+        let id = r.results[0].task.as_ref().expect("delegated").id.clone();
+        let child = next_task_event(&mut b_events, "child created", |e| e.view.task.id == id)
+            .await
+            .view
+            .task;
+        assert!(
+            child.deadline_ms <= parent.deadline_ms,
+            "asked {want:?}: child {} > parent {}",
+            child.deadline_ms,
+            parent.deadline_ms
+        );
+        assert_eq!(child.parent.as_ref(), Some(&t1));
+        kids.push(id);
+    }
+    // The first child expires with its parent, not ten minutes later.
+    assert_eq!(b.wait_done(&kids[0]).await, TaskState::Expired);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(a.wait_done(&t1).await, TaskState::Expired);
+    hub.shutdown().await;
+}
+
 /// Once the workstream's reported cost reaches its budget, further delegations are rejected.
 #[tokio::test]
 async fn budget_limit_rejects_further_delegations() {

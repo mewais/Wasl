@@ -584,9 +584,15 @@ impl Node {
         {
             let st = self.lock();
             let edges = st.edges_from(&from);
-            let (parent, mut chain) = match st.running_inbound(&req.from) {
-                Some(r) => (Some(r.p.task.id.clone()), r.p.task.chain.clone()),
-                None => (None, Vec::new()),
+            // The task the caller works on: its chain, and its deadline, which every task it
+            // delegates inherits (never outlives it).
+            let (parent, mut chain, parent_deadline) = match st.running_inbound(&req.from) {
+                Some(r) => (
+                    Some(r.p.task.id.clone()),
+                    r.p.task.chain.clone(),
+                    Some(r.p.task.deadline_ms),
+                ),
+                None => (None, Vec::new(), None),
             };
             chain.push(from.clone());
             let hop = chain.len() as u32;
@@ -709,6 +715,17 @@ impl Node {
                 }
                 let now = now_ms();
                 let deadline_secs = req.deadline_secs.unwrap_or(limits.default_deadline_secs);
+                let own = now.saturating_add(deadline_secs.saturating_mul(1000));
+                let deadline_ms = parent_deadline.map_or(own, |p| own.min(p));
+                if deadline_ms <= now {
+                    let msg = format!(
+                        "rejected: the task you are working on ({}) has reached its deadline; a task delegated now could not finish in time. Answer from what you have.",
+                        parent.as_ref().map(ToString::to_string).unwrap_or_default()
+                    );
+                    audits.push(audit_reject(codes::EXPIRED, &msg));
+                    results.push(reject(codes::EXPIRED, msg));
+                    continue;
+                }
                 let task = Task {
                     id: TaskId::random(),
                     workstream: ws.clone(),
@@ -717,7 +734,7 @@ impl Node {
                     mode: req.mode,
                     instruction: req.instruction.clone(),
                     attachments: req.attachments.clone(),
-                    deadline_ms: now.saturating_add(deadline_secs.saturating_mul(1000)),
+                    deadline_ms,
                     created_ms: now,
                     chain: chain.clone(),
                     hop,

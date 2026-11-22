@@ -122,6 +122,9 @@ pub mod codes {
     pub const PAUSED: &str = "paused";
     /// The request is not valid in the task's current state.
     pub const INVALID_STATE: &str = "invalid_state";
+    /// The task the caller works on has no time left: a delegated task could not finish
+    /// before its deadline (which it inherits).
+    pub const EXPIRED: &str = "expired";
     /// A topology with an older version than the one in force.
     pub const STALE_TOPOLOGY: &str = "stale_topology";
     pub const IO: &str = "io";
@@ -688,6 +691,8 @@ pub struct DelegateRequest {
     pub to: Vec<String>,
     pub mode: TaskMode,
     pub instruction: String,
+    /// Seconds the task may take (default: the workstream's). Never beyond the deadline of the
+    /// task the caller is working on: a delegated task inherits what is left of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
