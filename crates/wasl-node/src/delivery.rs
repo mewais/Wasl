@@ -538,6 +538,7 @@ impl Node {
                     SessionEventKind::Input {
                         command: Command::Prompt { text: p, .. },
                         status,
+                        ..
                     } if p.starts_with(&mk) => {
                         if matches!(
                             status,
