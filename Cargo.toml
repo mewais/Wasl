@@ -21,6 +21,8 @@ wasit-runtime = { git = "https://github.com/mewais/Wasit", branch = "session-flo
 wasit-shim = { git = "https://github.com/mewais/Wasit", branch = "session-flows" }
 wasit-fake-cli = { git = "https://github.com/mewais/Wasit", branch = "session-flows" }
 wasit-process = { git = "https://github.com/mewais/Wasit", branch = "session-flows" }
+# Libraries emit typed events and need no `tracing` bridge; the `wasl` binary turns it on.
+wasit-diag = { git = "https://github.com/mewais/Wasit", branch = "session-flows", default-features = false }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
@@ -28,6 +30,5 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 async-trait = "0.1"
 futures = "0.3"
-tracing = "0.1"
 fastrand = "2"
 rmcp = { version = "0.9", features = ["server", "transport-io", "elicitation"] }

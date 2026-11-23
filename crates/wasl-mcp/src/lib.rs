@@ -36,6 +36,8 @@ use wasit_control::{
     Supervised, SupervisedOptions,
 };
 use wasit_core::{McpServerConfig, McpTransport};
+use wasit_diag::Ident;
+use wasl_proto::diag::{emit, foreign, task as task_ident, WaslEvent};
 use wasl_proto::{
     methods, ApprovalVia, CancelRequest, DecideRequest, DelegateReply, DelegateRequest,
     DismissReply, DismissRequest, HandoffDecision, MessageRequest, PeerList, PeersRequest,
@@ -388,7 +390,12 @@ impl WaslMcp {
                 .await
             {
                 Ok(b) => *t = b,
-                Err(e) => tracing::warn!(error = %e, "reporting a handoff decision failed"),
+                // `e` is the daemon's message (it can quote a task state or what a supervisor
+                // wrote): only its size and fingerprint are recorded.
+                Err(e) => emit(WaslEvent::McpDecisionReportFailed {
+                    task: task_ident(&t.id),
+                    error: foreign("call", &e),
+                }),
             }
         }
     }
@@ -714,7 +721,10 @@ impl WaslMcp {
                     .call::<wasl_proto::Ack>(methods::SPAWN_CANCEL, json!(cancel), DEADLINE, true)
                     .await
                 {
-                    tracing::warn!(error = %e, "withdrawing a cancelled spawn request failed");
+                    emit(WaslEvent::McpSpawnCancelFailed {
+                        request: Ident::new(&req.request_id),
+                        error: foreign("call", &e),
+                    });
                 }
                 return Ok(tool_error("cancelled"));
             }

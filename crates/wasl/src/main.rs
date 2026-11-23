@@ -18,6 +18,18 @@
 //! * `mcp` is the stdio MCP server an agent CLI launches (see `wasl-mcp`).
 //! * `shim` is the per-session process holder entry.
 //!
+//! Diagnostics (`wasit-diag`): typed, content-free events (ids, sizes, counts, timings, error
+//! codes; never a prompt, a result, a name or a reason an agent wrote). Once `serve` holds its
+//! lock they go to `<dir>/diag/daemon.ndjson` (8 MiB, three older generations; the directory is
+//! `0700`, the file `0600`) and a panic leaves a `diag.panic` record there instead of text on
+//! stderr; `bridge` appends its few records to the machine's shared `<dir>/diag/aux.ndjson`
+//! (which the daemon keeps within 1 MiB); `mcp` is a helper an agent CLI starts, knows a socket
+//! and a session but no data directory, and has no sink: its effects are recorded by the
+//! daemon methods it calls, and a panic there prints and records nothing. `tracing` output
+//! (the libraries' and third parties') is counted per minute, not written. Developer override:
+//! `WASL_LOG=<filter>` prints plain `tracing` text (no colour) on stderr and lets a panic
+//! print its usual message too; `WASIT_DIAG_QUEUE=<n>` sizes the record queue.
+//!
 //! Options: `--driver-bin <driver>=<path>`, `--driver-env <driver>=<KEY>=<VALUE>` (repeatable),
 //! `--handshake-timeout-ms N`, `--command-timeout-ms N`, `--stop-grace-ms N`,
 //! `--spawn-wait-ms N` (how long a spawn request waits for an unreachable supervisor),
@@ -30,16 +42,69 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tracing_subscriber::prelude::*;
 use wasit_control::{
     bind_local_exclusive, local_endpoint, ConnConfig, ControlServer, Hello, ServiceMux,
 };
 use wasit_core::DriverId;
+use wasit_diag::{Code, ErrorInfo, HomePath, Ident, RotateShared, SinkConfig};
 use wasit_runtime::{
     Discovery, DiscoveryConfig, RuntimeConfig, RuntimeService, SessionManager, ShimLauncher,
 };
 use wasl_node::{Node, NodeConfig, NodeService};
+use wasl_proto::diag::{count, emit, WaslEvent};
 
 const BUILD: &str = concat!("wasl/", env!("CARGO_PKG_VERSION"));
+/// The build as a diagnostics identifier (which has no `/`).
+const BUILD_ID: &str = concat!("wasl-", env!("CARGO_PKG_VERSION"));
+/// The developer override: plain `tracing` text on stderr, and the usual panic message.
+const DEV_ENV: &str = "WASL_LOG";
+/// The shared file short-lived processes of this data directory (`bridge`) append to; the
+/// daemon rotates it when it holds more than `AUX_ROTATE` bytes, a writer stops at `AUX_CAP`.
+const AUX_FILE: &str = "aux.ndjson";
+const AUX_ROTATE: u64 = 1 << 20;
+const AUX_CAP: u64 = 4 << 20;
+
+/// `--panic-test <marker>` (any subcommand): panics with a message holding the marker once the
+/// process's diagnostics are set up. For `tests/diag_panic.rs`; only in builds with the
+/// `panic-test` feature, which this package's dev-dependency on itself turns on.
+#[cfg(feature = "panic-test")]
+static PANIC_MARKER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Takes `--panic-test <marker>` out of `args`.
+#[cfg(feature = "panic-test")]
+fn take_panic_test(mut args: Vec<String>) -> Vec<String> {
+    if let Some(i) = args.iter().position(|a| a == "--panic-test") {
+        if i + 1 < args.len() {
+            let marker = args.remove(i + 1);
+            args.remove(i);
+            let _ = PANIC_MARKER.set(marker);
+        }
+    }
+    args
+}
+
+#[cfg(feature = "panic-test")]
+fn panic_point() {
+    if let Some(m) = PANIC_MARKER.get() {
+        panic!("wasl panic test: {m}");
+    }
+}
+
+#[cfg(not(feature = "panic-test"))]
+fn panic_point() {}
+
+/// Installs this process's diagnostics sink and the panic hook, and records `process.start`.
+/// A failure has nowhere to go but stderr.
+fn install_diagnostics(cfg: SinkConfig) {
+    match wasit_diag::install(cfg) {
+        Ok(()) => {
+            wasit_diag::install_panic_hook(std::env::var_os(DEV_ENV).is_some());
+            wasit_diag::announce_process();
+        }
+        Err(e) => eprintln!("wasl: no diagnostics: {e}"),
+    }
+}
 
 #[derive(Debug, Clone)]
 struct Args {
@@ -156,6 +221,14 @@ fn default_host_id() -> String {
 }
 
 async fn serve(a: Args) -> ExitCode {
+    let code = serve_until_stopped(a).await;
+    // Waits (bounded) for the writer to write what was recorded, also when the daemon could
+    // not start; the process is ending.
+    let _written = wasit_diag::shutdown();
+    code
+}
+
+async fn serve_until_stopped(a: Args) -> ExitCode {
     if let Err(e) = tokio::fs::create_dir_all(&a.data).await {
         eprintln!("wasl: cannot create {}: {e}", a.data.display());
         return ExitCode::from(1);
@@ -174,6 +247,26 @@ async fn serve(a: Args) -> ExitCode {
             return ExitCode::from(3);
         }
     };
+    // The lock is held: this process owns the data directory's `daemon.ndjson`.
+    let mut sink = SinkConfig::new(
+        Code::st("daemon"),
+        Ident::st(BUILD_ID),
+        a.data.join("diag"),
+        "daemon.ndjson",
+    );
+    sink.rotate_shared = Some(RotateShared {
+        file: AUX_FILE.into(),
+        max_bytes: AUX_ROTATE,
+        generations: 1,
+    });
+    install_diagnostics(sink);
+    let host_id = a.host_id.clone().unwrap_or_else(default_host_id);
+    emit(WaslEvent::DaemonStart {
+        host: Ident::new(&host_id),
+        data: HomePath::new(&a.data),
+        socket: HomePath::new(&socket_path(&a)),
+    });
+    panic_point();
     let discovery = Discovery::new(DiscoveryConfig::from_runtime(&cfg));
     let manager = match SessionManager::new(cfg).await {
         Ok(m) => m,
@@ -184,13 +277,28 @@ async fn serve(a: Args) -> ExitCode {
     };
     match manager.adopt_all().await {
         Ok(r) => {
+            emit(WaslEvent::DaemonAdopted {
+                running: count(r.running.len()),
+                finished: count(r.finished.len()),
+                errors: count(r.errors.len()),
+            });
             for (dir, e) in r.errors {
-                tracing::warn!(dir = %dir.display(), error = %e, "session not adopted");
+                emit(WaslEvent::DaemonAdoptError {
+                    session: Ident::new(
+                        &dir.file_name()
+                            .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+                    ),
+                    // The runtime's reason can quote a file of the session: size and
+                    // fingerprint only.
+                    error: wasl_proto::diag::foreign("adopt", &e),
+                });
             }
         }
-        Err(e) => tracing::error!(error = %e, "cannot scan sessions"),
+        // Only `io_err` of the runtime's directory scan: an operation and the OS's reason.
+        Err(e) => emit(WaslEvent::DaemonScanFailed {
+            error: ErrorInfo::ours(Code::st("scan"), &e),
+        }),
     }
-    let host_id = a.host_id.clone().unwrap_or_else(default_host_id);
     let mut cfg = NodeConfig::new(host_id.clone(), a.data.join("wasl"));
     if let Some(ms) = a.spawn_wait_ms {
         cfg.spawn_connect_wait = std::time::Duration::from_millis(ms);
@@ -234,19 +342,27 @@ async fn serve(a: Args) -> ExitCode {
         "{}",
         serde_json::json!({"ready": true, "pid": std::process::id(), "socket": socket_path(&a)})
     );
+    emit(WaslEvent::DaemonReady {
+        pid: std::process::id(),
+    });
     tokio::select! {
-        r = server.serve(listener) => {
-            if let Err(e) = r {
-                eprintln!("wasl: serve failed: {e}");
-                return ExitCode::from(1);
+        r = server.serve(listener) => match r {
+            Ok(()) => {
+                emit(WaslEvent::DaemonShutdown { reason: Code::st("serve_ended") });
+                ExitCode::SUCCESS
             }
-        }
+            Err(e) => {
+                eprintln!("wasl: serve failed: {e}");
+                emit(WaslEvent::DaemonShutdown { reason: Code::st("serve_failed") });
+                ExitCode::from(1)
+            }
+        },
         what = termination() => {
-            tracing::info!("{what}: shutting down (sessions keep running)");
+            emit(WaslEvent::DaemonShutdown { reason: Code::new(what) });
             server.shutdown(Duration::from_secs(2)).await;
+            ExitCode::SUCCESS
         }
     }
-    ExitCode::SUCCESS
 }
 
 #[cfg(unix)]
@@ -261,7 +377,7 @@ async fn termination() -> &'static str {
             _ = i.recv() => "SIGINT",
         },
         _ => {
-            tracing::error!("cannot install signal handlers");
+            emit(WaslEvent::DaemonSignalHandlersFailed {});
             std::future::pending().await
         }
     }
@@ -271,11 +387,24 @@ async fn termination() -> &'static str {
 async fn termination() -> &'static str {
     match tokio::signal::ctrl_c().await {
         Ok(()) => "ctrl-c",
-        Err(_) => std::future::pending().await,
+        Err(_) => {
+            emit(WaslEvent::DaemonSignalHandlersFailed {});
+            std::future::pending().await
+        }
     }
 }
 
 async fn bridge(a: Args) -> ExitCode {
+    // A short-lived process of the machine: its few records (start, a panic) are appended to
+    // the shared file the daemon keeps within bounds.
+    install_diagnostics(SinkConfig::shared(
+        Code::st("bridge"),
+        Ident::st(BUILD_ID),
+        a.data.join("diag"),
+        AUX_FILE,
+        AUX_CAP,
+    ));
+    panic_point();
     let ep = local_endpoint(&socket_path(&a));
     let raw = a.raw.clone();
     let data = a.data.clone();
@@ -311,10 +440,13 @@ async fn start_daemon(raw: Vec<String>, data: PathBuf) -> std::io::Result<()> {
     use std::process::Stdio;
     use tokio::io::AsyncBufReadExt;
     tokio::fs::create_dir_all(&data).await?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(data.join("wasl.log"))?;
+    // The daemon's stderr: crash output and developer (`WASL_LOG`) text, never diagnostics.
+    let log = wasit_diag::private::open(&data.join("wasl.log"), |o| {
+        o.append(true);
+    })?;
+    if log.metadata()?.len() > (1 << 20) {
+        log.set_len(0)?;
+    }
     let exe = std::env::current_exe()?;
     let mut cmd = wasit_process::detached_command(exe);
     cmd.arg("serve")
@@ -363,14 +495,28 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let _ = tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("WASL_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
+    #[cfg(feature = "panic-test")]
+    let rest = take_panic_test(rest);
+    // `tracing` is counted into the diagnostics sink; its text goes nowhere unless a developer
+    // sets `WASL_LOG` (then to stderr, without colour).
+    let text = std::env::var_os(DEV_ENV).map(|_| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(std::io::stderr)
+            .with_filter(
+                tracing_subscriber::EnvFilter::try_from_env(DEV_ENV)
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            )
+    });
+    let _ = tracing_subscriber::registry()
+        .with(wasit_diag::tracing_layer())
+        .with(text)
         .try_init(); // only fails if a subscriber is already set
     if cmd == "mcp" {
+        // No sink (see the module docs), but the hook: a panic prints and records nothing
+        // unless a developer asked for stderr output.
+        wasit_diag::install_panic_hook(std::env::var_os(DEV_ENV).is_some());
+        panic_point();
         return wasl_mcp::run(&rest);
     }
     let parsed = match parse(&rest) {
@@ -392,7 +538,12 @@ fn main() -> ExitCode {
     };
     match cmd.to_str() {
         Some("serve") => rt.block_on(serve(parsed)),
-        Some("bridge") => rt.block_on(bridge(parsed)),
+        Some("bridge") => {
+            let code = rt.block_on(bridge(parsed));
+            // Waits (bounded) for the writer; the process is ending.
+            let _written = wasit_diag::shutdown();
+            code
+        }
         _ => usage(),
     }
 }

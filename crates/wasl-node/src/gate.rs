@@ -16,8 +16,10 @@
 use wasit_core::{AgentEvent, Command, GateDecision};
 use wasit_runtime::wire::{SessionEventKind, SessionId};
 use wasit_runtime::StreamEnd;
-use wasl_proto::{HandoffDecision, TaskId, TaskState};
+use wasl_proto::diag::{emit, task, WaslEvent, Watcher, WithdrawCause};
+use wasl_proto::{codes, HandoffDecision, TaskId, TaskState};
 
+use crate::diag::{rpc_error, session, stream_error};
 use crate::node::Node;
 use crate::state::GateInfo;
 
@@ -62,7 +64,12 @@ impl Node {
                     Ok(ev) => ev,
                     Err(StreamEnd::Lagged) => continue 'outer,
                     Err(StreamEnd::Error(e)) => {
-                        tracing::warn!(error = %e, "gate watcher: stream failed; resubscribing");
+                        emit(WaslEvent::StreamResubscribe {
+                            watcher: Watcher::Gate,
+                            session: session(sid),
+                            id: wasit_diag::Ident::new(&gate.request_id),
+                            error: stream_error(&e),
+                        });
                         continue 'outer;
                     }
                 };
@@ -192,7 +199,11 @@ impl Node {
                               handoff was approved"
                     .to_string();
                 if let Err(e) = self.withdraw(&id, reason, false).await {
-                    tracing::debug!(error = %e, task = %id, "withdrawing a handoff");
+                    emit(WaslEvent::TaskWithdrawFailed {
+                        task: task(&id),
+                        cause: WithdrawCause::TurnInterrupted,
+                        error: rpc_error(&e),
+                    });
                 }
                 return;
             }
@@ -210,8 +221,16 @@ impl Node {
                 return;
             }
         };
+        // After the human clicked: a failure here leaves the task pending with no gate, so it
+        // is always recorded. An I/O failure (the audit trail or the journal) is an error; a
+        // task that moved on meanwhile (cancelled, expired) is a refusal.
         if let Err(e) = self.decide(&id, decision, "gate").await {
-            tracing::debug!(error = %e, task = %id, "handoff decision not applied");
+            let (task, error) = (task(&id), rpc_error(&e));
+            emit(if e.code == codes::IO {
+                WaslEvent::GateDecideFailed { task, error }
+            } else {
+                WaslEvent::GateDecideRefused { task, error }
+            });
         }
     }
 }

@@ -60,6 +60,34 @@ host daemon A ◀──bridge──▶ hub (RoutingService) ◀──bridge─�
   within `spawn_connect_wait`: `spawn_unavailable`. `list_peers` carries `spawnable` (hosts,
   drivers, models, remaining) from the authority.
 
+## Diagnostics
+
+Wasl logs status only (Wasit's `ARCHITECTURE.md` §9): ids, sizes, counts, timings, states and
+error codes, never what an agent or a person wrote (prompts, titles, results, progress text,
+handoff reasons, agent and session names and descriptions, spawn text) and never anything read
+back from the journal or the audit trail.
+
+- Every log record is a `WaslEvent` (`wasl-proto/src/diag.rs`, declared with `diag_events!`):
+  there is no `tracing` call in Wasl. Ids are `Ident`s (`host` and `session` are two fields: an
+  agent address has a `/`); workstream ids are not written (a workstream is named by the
+  supervisor).
+- Errors reach a record by their source: `ErrorInfo::io` for an `io::Error`; `ours` for the
+  node's own journal and audit-trail errors (an operation and the OS's reason; the audit
+  reader's errors never quote a line); `foreign` (code, length, fingerprint) for everything else
+  (`RpcError`, `CommandError`, transport and stream messages, a `serde` error read from the
+  journal). `crates/wasl/tests/diag_sites.rs` pins every `ErrorInfo::ours(` and `DiagText::new(`
+  site.
+- Failures that used to be swallowed or only debug-logged (a failed decision after the human
+  clicked, journal and audit write failures, resubscribes, peer-status errors, withdrawals) are
+  recorded events; control flow and retries are unchanged.
+- `wasl serve` writes `<data>/diag/daemon.ndjson`; `wasl bridge` appends to the shared
+  `<data>/diag/aux.ndjson`; `wasl mcp` has no sink (it knows a socket and a session, not a data
+  directory; the daemon's `wasl.request` / `wasl.request_failed` records show what it asked) and
+  its panic prints and records nothing. `WASL_LOG=<filter>` is the developer override: plain
+  `tracing` text on stderr and the usual panic message. `tracing` output of libraries is only
+  counted.
+- Not built yet: the task / gate / spawn trail (a projection of the journal) and trace ids.
+
 ## Wasit additions made for Wasl
 
 - `wasit-runtime`: external gates (`raise_gate` / `resolve_gate`), `CreateSession::id`.

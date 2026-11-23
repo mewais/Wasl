@@ -11,11 +11,23 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tokio::time::Instant;
+use wasit_diag::{Ident, Ms};
+use wasl_proto::diag::{emit, task, SendWork, WaslEvent, WithdrawCause};
 use wasl_proto::{methods, CancelRemoteRequest, DeliverRequest, TaskId, TaskState, UpdateRequest};
 
+use crate::diag::{rpc_error, transport_error};
 use crate::node::{now_ms, Inner, Node};
 use crate::state::Work;
 use crate::transport::TransportError;
+
+/// The kind of work and the task it is for, as record fields.
+fn work_fields(w: &Work) -> (SendWork, Ident) {
+    match w {
+        Work::Deliver(id) => (SendWork::Deliver, task(id)),
+        Work::Cancel(id) => (SendWork::Cancel, task(id)),
+        Work::Update(id) => (SendWork::Update, task(id)),
+    }
+}
 
 enum Job {
     Deliver(DeliverRequest, String),
@@ -195,14 +207,28 @@ impl Node {
                         .retry_initial
                         .saturating_mul(1u32 << attempt.min(16))
                         .min(cfg.retry_max);
-                    tracing::debug!(?work, error = %e, ?delay, "node-to-node send failed; will retry");
+                    let (kind, id) = work_fields(&work);
+                    emit(WaslEvent::SendRetry {
+                        work: kind,
+                        task: id,
+                        host: Ident::new(&host),
+                        attempt: attempt.saturating_add(1),
+                        delay: Ms::of(delay),
+                        error: transport_error(&e),
+                    });
                     st.retry
                         .insert(work.clone(), (Instant::now() + delay, attempt));
                     None
                 }
                 Err(e) => {
                     st.retry.remove(&work);
-                    tracing::warn!(?work, error = %e, "node-to-node send failed permanently");
+                    let (kind, id) = work_fields(&work);
+                    emit(WaslEvent::SendFailed {
+                        work: kind,
+                        task: id,
+                        host: Ident::new(&host),
+                        error: transport_error(&e),
+                    });
                     match &job {
                         Job::Deliver(r, _) => {
                             failed_final = Some((r.task.id.clone(), e.message.clone()));
@@ -274,12 +300,20 @@ impl Node {
         };
         for id in out_ids {
             if let Err(e) = self.withdraw(&id, "deadline passed".into(), true).await {
-                tracing::debug!(error = %e, "expiring a task");
+                emit(WaslEvent::TaskWithdrawFailed {
+                    task: task(&id),
+                    cause: WithdrawCause::Deadline,
+                    error: rpc_error(&e),
+                });
             }
         }
         for req in in_reqs {
+            let id = task(&req.id);
             if let Err(e) = self.node_cancel(req).await {
-                tracing::debug!(error = %e, "expiring an inbound task");
+                emit(WaslEvent::TaskExpireInboundFailed {
+                    task: id,
+                    error: rpc_error(&e),
+                });
             }
         }
         next

@@ -15,13 +15,16 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::watch;
 use wasit_control::{codes as ctl_codes, RequestOpts, RpcError, Uplink};
+use wasit_diag::{Ident, Ms};
 use wasit_runtime::wire::SessionId;
+use wasl_proto::diag::{emit, JournalSite, WaslEvent};
 use wasl_proto::{
     codes, methods, spawn_gate, spawn_request_id, Ack, DelegateRequest, DismissAsk, DismissReply,
     DismissRequest, SpawnApproval, SpawnAsk, SpawnCancel, SpawnDecision, SpawnLaunch,
     SpawnLaunched, SpawnPlan, SpawnReply, SpawnRequest, Spawnable, SpawnableAsk, TaskMode,
 };
 
+use crate::diag::rpc_error;
 use crate::gate::Answer;
 use crate::journal::{durable, Rec};
 use crate::node::{err, now_ms, Node};
@@ -410,7 +413,10 @@ impl Node {
         };
         if let Some(a) = ack {
             if let Err(e) = durable(a).await {
-                tracing::error!(error = %e, "a spawn record was not journaled");
+                emit(WaslEvent::JournalNotDurable {
+                    site: JournalSite::Spawn,
+                    error: e.diag(),
+                });
             }
         }
         Some((old, sender))
@@ -479,7 +485,10 @@ impl Node {
         };
         if let Some(a) = ack {
             if let Err(e) = durable(a).await {
-                tracing::error!(error = %e, "a spawn record was not journaled");
+                emit(WaslEvent::JournalNotDurable {
+                    site: JournalSite::Spawn,
+                    error: e.diag(),
+                });
             }
         }
     }
@@ -724,7 +733,10 @@ impl Node {
         if let Err(e) = self.set_topology(launched.topology.clone()).await {
             // A newer version already arrived from the supervisor: fine.
             if e.code != codes::STALE_TOPOLOGY {
-                tracing::warn!(error = %e, "applying the topology of a spawn");
+                emit(WaslEvent::SpawnTopologyFailed {
+                    request: Ident::new(&id),
+                    error: rpc_error(&e),
+                });
             }
         }
         let (from, instruction, deadline_ms) = {
@@ -784,7 +796,10 @@ impl Node {
         loop {
             match f().await {
                 Err(e) if e.is_retryable() && tokio::time::Instant::now() + delay < give_up => {
-                    tracing::debug!(error = %e, "spawn authority not reachable; retrying");
+                    emit(WaslEvent::SpawnAuthorityRetry {
+                        delay: Ms::of(delay),
+                        error: rpc_error(&e),
+                    });
                     // Backoff schedule (the only sleep).
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(self.inner.cfg.retry_max);

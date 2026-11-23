@@ -8,9 +8,11 @@ use std::time::Duration;
 use tokio::sync::{watch, Notify};
 use wasit_control::{codes as ctl_codes, ControlServer, RpcError, Uplink};
 use wasit_core::GateRequest;
+use wasit_diag::{Code, ErrorInfo, Ident};
 use wasit_runtime::wire::{Phase, SessionId};
 use wasit_runtime::SessionManager;
 use wasl_audit::{AuditEntry, AuditKind, AuditLog};
+use wasl_proto::diag::{count, emit, foreign, JournalSite, PeerStatusFailure, WaslEvent};
 use wasl_proto::{
     codes, handoff_request_id, AgentId, ApprovalVia, CancelRemoteRequest, DelegateError,
     DelegateOutcome, DelegateReply, DelegateRequest, EdgeChangeCause, EdgeEvent, EdgePolicy,
@@ -18,6 +20,7 @@ use wasl_proto::{
     TaskId, TaskList, TaskMode, TaskState, TaskStates, Topology, TopologyApplied, TopologyList,
 };
 
+use crate::diag::{command_error, session, transport_error};
 use crate::journal::{durable, Ack, Journal, Rec};
 use crate::state::{GateInfo, InRec, OutPersist, OutRec, State};
 use crate::transport::{PeerTransport, UplinkTransport};
@@ -345,8 +348,13 @@ impl Node {
     /// Append to the audit trail; resolves once the entry is durable. Callers record an entry
     /// *before* the state change it describes becomes visible (durability first).
     pub(crate) async fn record_audit(&self, entry: AuditEntry) -> Result<(), RpcError> {
+        let (kind, task) = (entry.kind.name(), entry.task.clone());
         self.inner.audit.record(entry).await.map_err(|e| {
-            tracing::error!(error = %e, "audit entry not recorded");
+            emit(WaslEvent::AuditNotRecorded {
+                kind: Code::st(kind),
+                task: task.as_ref().map(wasl_proto::diag::task),
+                error: e.diag(),
+            });
             err(codes::IO, e.to_string())
         })
     }
@@ -381,7 +389,10 @@ impl Node {
     pub(crate) async fn settle(&self, ack: Option<Ack>) {
         if let Some(a) = ack {
             if let Err(e) = durable(a).await {
-                tracing::error!(error = %e, "a task record was not journaled");
+                emit(WaslEvent::JournalNotDurable {
+                    site: JournalSite::Task,
+                    error: e.diag(),
+                });
             }
         }
     }
@@ -512,13 +523,29 @@ impl Node {
                         .map(|x| (x.clone(), PeerStatus::Unreachable))
                         .collect::<Vec<_>>()
                 };
+                // The status shows as `unreachable`; the record says why it is not known.
+                let failed = |reason: PeerStatusFailure, error: Option<ErrorInfo>| {
+                    emit(WaslEvent::PeersStatusFailed {
+                        host: Ident::new(&host),
+                        reason,
+                        sessions: count(sessions.len()),
+                        error,
+                    })
+                };
                 let Some(t) = transport else {
+                    failed(PeerStatusFailure::NoRoute, None);
                     return (host, unreachable(&sessions));
                 };
                 let req = wasl_proto::PeerStatusRequest {
                     sessions: sessions.clone(),
                 };
-                let params = serde_json::to_value(&req).unwrap_or_default();
+                let params = serde_json::to_value(&req).unwrap_or_else(|e| {
+                    failed(
+                        PeerStatusFailure::BadRequest,
+                        Some(foreign("encode", &e.to_string())),
+                    );
+                    serde_json::Value::Null
+                });
                 let r = tokio::time::timeout(
                     Duration::from_secs(3),
                     t.call(&host, wasl_proto::methods::NODE_PEER_STATUS, params),
@@ -527,9 +554,22 @@ impl Node {
                 match r {
                     Ok(Ok(v)) => match serde_json::from_value::<wasl_proto::PeerStatusReply>(v) {
                         Ok(r) => (host, r.statuses),
-                        Err(_) => (host, unreachable(&sessions)),
+                        Err(e) => {
+                            failed(
+                                PeerStatusFailure::BadReply,
+                                Some(foreign("decode", &e.to_string())),
+                            );
+                            (host, unreachable(&sessions))
+                        }
                     },
-                    _ => (host, unreachable(&sessions)),
+                    Ok(Err(e)) => {
+                        failed(PeerStatusFailure::CallFailed, Some(transport_error(&e)));
+                        (host, unreachable(&sessions))
+                    }
+                    Err(_) => {
+                        failed(PeerStatusFailure::TimedOut, None);
+                        (host, unreachable(&sessions))
+                    }
                 }
             }
         });
@@ -958,7 +998,11 @@ impl Node {
         let task = tokio::spawn(async move {
             if let Err(e) = sessions.resolve_gate(&sid, &request_id).await {
                 // Already answered / the session ended: nothing is pending any more.
-                tracing::debug!(error = %e, request_id, "withdrawing a gate");
+                emit(WaslEvent::GateWithdrawFailed {
+                    session: session(&sid),
+                    gate: Ident::new(&request_id),
+                    error: command_error(&e),
+                });
             }
         });
         // Only a panic in the task (already reported) can fail the join.

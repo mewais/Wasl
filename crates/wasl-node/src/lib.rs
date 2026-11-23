@@ -34,6 +34,7 @@
 #![forbid(unsafe_code)]
 
 mod delivery;
+mod diag;
 mod gate;
 mod journal;
 mod node;

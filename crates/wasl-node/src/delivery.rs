@@ -9,11 +9,13 @@ use tokio::time::Instant;
 use wasit_core::{AgentEvent, Command, EndReason, Usage};
 use wasit_runtime::wire::{Phase, SessionEventKind, SessionId};
 use wasit_runtime::StreamEnd;
+use wasl_proto::diag::{emit, task as task_ident, WaslEvent, Watcher};
 use wasl_proto::{
     codes, Ack, CancelRemoteRequest, Progress, ResultStatus, Task, TaskId, TaskMode, TaskResult,
     TaskState, UpdateRequest,
 };
 
+use crate::diag::{command_error, runtime_error, session as session_ident, stream_error};
 use crate::node::{err, finished_audit, now_ms, truncate, Node};
 use crate::state::{InPersist, InRec, TurnMark};
 
@@ -357,7 +359,16 @@ impl Node {
                 // partly replayed, and trusting it would resubmit a prompt that did go out.
                 let now_cursor = match self.sessions().history(&sid, None, 1).await {
                     Ok(p) => p.events.last().map(|e| e.cursor),
-                    Err(_) => None,
+                    Err(e) => {
+                        // Recorded, not acted on: with no cursor the node assumes the prompt
+                        // was not sent (a duplicate prompt if it was).
+                        emit(WaslEvent::TaskRecoveryCursorFailed {
+                            task: task_ident(id),
+                            session: session_ident(&sid),
+                            error: runtime_error(&e),
+                        });
+                        None
+                    }
                 }
                 .unwrap_or(0);
                 (m, Some(now_cursor))
@@ -510,13 +521,13 @@ impl Node {
                     item = stream.next() => item,
                     _ = tokio::time::sleep_until(deadline), if interrupted.is_none() => {
                         interrupted = Some(CancelRemoteRequest { id: id.clone(), reason: "deadline passed".into(), expired: true });
-                        self.interrupt(sid).await;
+                        self.interrupt(sid, id).await;
                         continue;
                     }
                     c = wait_cancel(&mut cancel), if interrupted.is_none() => {
                         let c = c.unwrap_or(CancelRemoteRequest { id: id.clone(), reason: "cancelled".into(), expired: false });
                         interrupted = Some(c);
-                        self.interrupt(sid).await;
+                        self.interrupt(sid, id).await;
                         continue;
                     }
                 };
@@ -524,7 +535,12 @@ impl Node {
                     Some(Ok(ev)) => ev,
                     Some(Err(StreamEnd::Lagged)) => continue 'outer,
                     Some(Err(StreamEnd::Error(e))) => {
-                        tracing::warn!(error = %e, "task observer: stream failed; resubscribing");
+                        emit(WaslEvent::StreamResubscribe {
+                            watcher: Watcher::Observer,
+                            session: session_ident(sid),
+                            id: task_ident(id),
+                            error: stream_error(&e),
+                        });
                         continue 'outer;
                     }
                     None => {
@@ -655,9 +671,13 @@ impl Node {
         }
     }
 
-    async fn interrupt(&self, sid: &SessionId) {
+    async fn interrupt(&self, sid: &SessionId, id: &TaskId) {
         if let Err(e) = self.sessions().command(sid, Command::Interrupt).await {
-            tracing::warn!(error = %e, session = %sid, "interrupting a withdrawn task's turn failed");
+            emit(WaslEvent::TaskInterruptFailed {
+                task: task_ident(id),
+                session: session_ident(sid),
+                error: command_error(&e),
+            });
         }
     }
 }
