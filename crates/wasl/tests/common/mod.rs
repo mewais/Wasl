@@ -79,59 +79,10 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        kill_session_processes(&self.0);
+        // Daemons and session shims (with their CLIs) started anywhere below this directory
+        // outlive their starters on purpose: end them before their files go.
+        wasit_fake_cli::harness::stop_all_under(&self.0);
         let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-/// Kill the CLI processes of every session under `root` (their shims then exit).
-fn kill_session_processes(root: &Path) {
-    let Ok(hosts) = std::fs::read_dir(root) else {
-        return;
-    };
-    for h in hosts.flatten() {
-        let Ok(rd) = std::fs::read_dir(h.path().join("sessions")) else {
-            continue;
-        };
-        for ent in rd.flatten() {
-            let Ok(text) = std::fs::read_to_string(ent.path().join("journal.ndjson")) else {
-                continue;
-            };
-            for line in text.lines() {
-                let Ok(v) = serde_json::from_str::<Value>(line) else {
-                    continue;
-                };
-                if v["kind"] == "spawned" {
-                    if let Some(pid) = v["data"]["pid"].as_u64() {
-                        kill_hard(pid as u32);
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Kill a process outright (SIGKILL / TerminateProcess); a process that is gone is fine.
-pub fn kill_hard(pid: u32) {
-    #[cfg(unix)]
-    {
-        // SAFETY: plain syscall.
-        unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-    }
-    #[cfg(windows)]
-    {
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-        };
-        // SAFETY: plain Win32 calls; the handle is closed.
-        unsafe {
-            let h = OpenProcess(PROCESS_TERMINATE, 0, pid);
-            if !h.is_null() {
-                TerminateProcess(h, 1);
-                CloseHandle(h);
-            }
-        }
     }
 }
 
