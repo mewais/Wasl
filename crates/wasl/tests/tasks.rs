@@ -443,3 +443,111 @@ async fn paused_workstream_rejects_new_delegations_until_resumed() {
     let task = a.delegate1(&orch, &w, "go").await;
     assert_eq!(result_summary(&a.wait_done(&task.id).await), "resumed");
 }
+
+/// A receiver that hands the work to background subagents and ends its turn ("started them"):
+/// the task is not done at that turn. Its result is the turn the agent starts by itself when the
+/// work ended (the turn's completion alone, the first one after the prompt, was the old answer).
+#[tokio::test]
+async fn a_receiver_working_in_the_background_answers_with_the_turn_that_follows_its_work() {
+    use wasit_fake_cli::scenario::BackgroundStep;
+    let s = Scratch::new();
+    let a = Daemon::start(&s, "a").await;
+    let b = Daemon::start(&s, "b").await;
+    let hub = TestHub::start(&[&a, &b]).await;
+    let orch = a.session(&Scenario::builder().build()).await;
+    let worker = b
+        .session(
+            &Scenario::builder()
+                .turn(
+                    Turn::builder()
+                        .background(BackgroundStep {
+                            kind: "local_agent".into(),
+                            description: "research".into(),
+                            after_ms: 500,
+                            then: vec![Step::Say {
+                                text: "THE FINAL ANSWER".into(),
+                                chunks: None,
+                            }],
+                            ..BackgroundStep::default()
+                        })
+                        .say("I started the research agent"),
+                )
+                .build(),
+        )
+        .await;
+    let t = topology(
+        1,
+        &[(&orch, "o"), (&worker, "w")],
+        &[(&orch, &worker, EdgePolicy::AlwaysAllow)],
+        Limits::default(),
+    );
+    a.set_topology(&t).await;
+    b.set_topology(&t).await;
+    let task = a.delegate1(&orch, &worker, "research it").await;
+    assert_eq!(
+        result_summary(&a.wait_done(&task.id).await),
+        "THE FINAL ANSWER"
+    );
+    b.wait_snapshot(&sid(&worker), "idle after the agent's own turn", |s| {
+        s.phase.name() == "idle" && s.turns_completed == 2
+    })
+    .await;
+    hub.shutdown().await;
+}
+
+/// Cancelling a task whose receiver only waits for background work stops that work (the receiver's
+/// turn ended long ago: there is no turn to interrupt) and ends the task cancelled.
+#[tokio::test]
+async fn cancelling_a_task_whose_receiver_waits_for_background_work_stops_the_work() {
+    use wasit_fake_cli::scenario::BackgroundStep;
+    let s = Scratch::new();
+    let a = Daemon::start(&s, "a").await;
+    let b = Daemon::start(&s, "b").await;
+    let hub = TestHub::start(&[&a, &b]).await;
+    let orch = a.session(&Scenario::builder().build()).await;
+    let worker = b
+        .session(
+            &Scenario::builder()
+                .turn(
+                    Turn::builder()
+                        .background(BackgroundStep {
+                            kind: "local_bash".into(),
+                            description: "long job".into(),
+                            command: Some("sleep 600".into()),
+                            after_ms: 600_000,
+                            ..BackgroundStep::default()
+                        })
+                        .say("started the job"),
+                )
+                .build(),
+        )
+        .await;
+    let t = topology(
+        1,
+        &[(&orch, "o"), (&worker, "w")],
+        &[(&orch, &worker, EdgePolicy::AlwaysAllow)],
+        Limits::default(),
+    );
+    a.set_topology(&t).await;
+    b.set_topology(&t).await;
+    let task = a.delegate1(&orch, &worker, "run the job").await;
+    // The receiver's turn ended; the job runs: the session is working, the task is not done.
+    b.wait_snapshot(&sid(&worker), "background work with no turn", |s| {
+        s.turns_completed == 1 && s.turn.is_none() && s.background_running == 1
+    })
+    .await;
+    assert!(matches!(
+        a.status(&task.id).await,
+        TaskState::Running { .. } | TaskState::Queued
+    ));
+    let _: TaskBrief = a.call(methods::TASK_CANCEL, json!({"id": task.id})).await;
+    assert!(matches!(
+        a.status(&task.id).await,
+        TaskState::Cancelled { .. }
+    ));
+    b.wait_snapshot(&sid(&worker), "the job stopped", |s| {
+        s.phase.name() == "idle" && s.background_running == 0
+    })
+    .await;
+    hub.shutdown().await;
+}

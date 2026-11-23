@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use tokio::time::Instant;
-use wasit_core::{AgentEvent, Command, EndReason, Usage};
+use wasit_core::tasks::{self, TaskInfo};
+use wasit_core::{AgentEvent, Command, EndReason, InputId, TurnTrigger, Usage};
 use wasit_runtime::wire::{Phase, SessionEventKind, SessionId};
 use wasit_runtime::StreamEnd;
 use wasl_proto::diag::{emit, task as task_ident, WaslEvent, Watcher};
@@ -425,7 +426,8 @@ impl Node {
         .unwrap_or_else(|c| cancelled_state(&c))
     }
 
-    /// Wait until `sid` can take a prompt (continuing it if its process ended).
+    /// Wait until `sid` can take a prompt (continuing it if its process ended): `idle` — no turn
+    /// is open and no background work runs, which `working` covers both of.
     async fn ready(
         &self,
         sid: &SessionId,
@@ -486,7 +488,16 @@ impl Node {
         let mk = marker(id);
         let mut from = Some(mark.cursor);
         let mut seen_input = false;
+        // The task's prompt, by the id the runtime gave it.
+        let mut my_input: Option<InputId> = None;
+        // Some turn is open (whoever started it) / the open turn is part of this task's work.
+        let mut turn_open = false;
         let mut in_turn = false;
+        // The task's own turn ended while the receiver still worked in the background: the
+        // turns the agent starts by itself next are the rest of the work.
+        let mut continuing = false;
+        // The receiver's tasks, as the events tell (the same reduction as the session's).
+        let mut work: Vec<TaskInfo> = Vec::new();
         let mut progress = Progress::default();
         let mut text = String::new();
         let mut last_message: Option<String> = None;
@@ -552,6 +563,7 @@ impl Node {
                 from = Some(ev.cursor);
                 match &ev.kind {
                     SessionEventKind::Input {
+                        input,
                         command: Command::Prompt { text: p, .. },
                         status,
                         ..
@@ -562,76 +574,143 @@ impl Node {
                                 | wasit_runtime::wire::CommandStatus::Queued
                         ) {
                             seen_input = true;
+                            my_input = Some(*input);
                         }
                     }
-                    SessionEventKind::Agent { event } if seen_input => match event {
-                        AgentEvent::TurnStarted { .. } => in_turn = true,
-                        AgentEvent::AssistantDelta {
-                            text: t,
-                            message_id,
-                        } if in_turn => {
-                            // A new assistant message replaces the narration before it.
-                            if message_id.is_some() && *message_id != last_message {
-                                text.clear();
-                                last_message = message_id.clone();
+                    SessionEventKind::Agent { event } if seen_input => {
+                        // What the receiver's subagents say and do is not its answer: only the
+                        // session's own events (and the task events, which say what is still
+                        // running) take part.
+                        let (scope, event) = event.unscoped();
+                        tasks::apply(&mut work, event, 0);
+                        let own = scope.is_none();
+                        match event {
+                            AgentEvent::TurnStarted { input, trigger, .. } => {
+                                turn_open = true;
+                                // Ours when the agent says it runs for our input; or, once our
+                                // own turn ended with work still going, a turn the agent
+                                // started by itself; or when the driver cannot attribute turns
+                                // at all (then the first turn after our prompt is ours, as it
+                                // always was).
+                                in_turn = match (input, trigger) {
+                                    (Some(i), _) => Some(*i) == my_input,
+                                    (None, TurnTrigger::Agent) => continuing,
+                                    (None, _) => true,
+                                };
+                                if in_turn {
+                                    text.clear();
+                                    last_message = None;
+                                }
                             }
-                            text.push_str(t);
-                            progress.last_text = Some(truncate(text.trim(), 200));
-                        }
-                        AgentEvent::ToolCallStarted { name, .. } if in_turn => {
-                            progress.tool_calls += 1;
-                            progress.last_tool = Some(name.clone());
-                            // The result is the final message: text before a tool call is
-                            // narration.
-                            text.clear();
-                            if last_report.elapsed() >= self.inner.cfg.progress_interval {
-                                last_report = Instant::now();
-                                self.set_in_state(
-                                    id,
-                                    TaskState::Running {
-                                        progress: progress.clone(),
-                                    },
-                                    None,
-                                )
-                                .await;
+                            // Our prompt joined the turn that was running.
+                            AgentEvent::InputAcknowledged {
+                                input,
+                                steered: true,
+                            } if Some(*input) == my_input && turn_open => in_turn = true,
+                            AgentEvent::InputDropped { input, reason, .. }
+                                if Some(*input) == my_input =>
+                            {
+                                if let Some(c) = interrupted.take() {
+                                    return Err(c);
+                                }
+                                return Ok(TaskState::Failed {
+                                    error: format!(
+                                        "the receiving session dropped the task's prompt ({reason:?})"
+                                    ),
+                                });
                             }
+                            AgentEvent::AssistantDelta {
+                                text: t,
+                                message_id,
+                            } if in_turn && own => {
+                                // A new assistant message replaces the narration before it.
+                                if message_id.is_some() && *message_id != last_message {
+                                    text.clear();
+                                    last_message = message_id.clone();
+                                }
+                                text.push_str(t);
+                                progress.last_text = Some(truncate(text.trim(), 200));
+                            }
+                            AgentEvent::ToolCallStarted { name, .. } if in_turn => {
+                                progress.tool_calls += 1;
+                                progress.last_tool = Some(name.clone());
+                                if own {
+                                    // The result is the final message: text before a tool call
+                                    // is narration.
+                                    text.clear();
+                                }
+                                if last_report.elapsed() >= self.inner.cfg.progress_interval {
+                                    last_report = Instant::now();
+                                    self.set_in_state(
+                                        id,
+                                        TaskState::Running {
+                                            progress: progress.clone(),
+                                        },
+                                        None,
+                                    )
+                                    .await;
+                                }
+                            }
+                            AgentEvent::TurnCompleted {
+                                end_reason,
+                                was_interrupted,
+                                usage,
+                                reply,
+                                ..
+                            } => {
+                                turn_open = false;
+                                let ours = in_turn;
+                                in_turn = false;
+                                if ours {
+                                    if let Some(c) = interrupted.take() {
+                                        return Err(c);
+                                    }
+                                    if *was_interrupted || *end_reason == Some(EndReason::Cancelled)
+                                    {
+                                        return Ok(TaskState::Failed {
+                                            error: "the receiver's turn was interrupted".into(),
+                                        });
+                                    }
+                                    if tasks::background_running(&work) > 0 {
+                                        // The receiver handed work to background tasks and
+                                        // ended its turn: this is not the answer. The turns it
+                                        // starts when they end are.
+                                        continuing = true;
+                                    } else {
+                                        let summary = match reply.as_deref().map(str::trim) {
+                                            Some(r) if !r.is_empty() => r.to_string(),
+                                            _ => text.trim().to_string(),
+                                        };
+                                        let usage = (*usage != Usage::default())
+                                            .then(|| usage_delta(&mark.usage_before, usage));
+                                        return Ok(TaskState::Completed {
+                                            result: TaskResult {
+                                                status: if end_reason.is_some() {
+                                                    ResultStatus::Error
+                                                } else {
+                                                    ResultStatus::Success
+                                                },
+                                                summary,
+                                                artifacts: Vec::new(),
+                                                usage,
+                                            },
+                                        });
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
-                        AgentEvent::TurnCompleted {
-                            end_reason,
-                            was_interrupted,
-                            usage,
-                            reply,
-                            ..
-                        } if in_turn => {
+                        // Withdrawn while the receiver only waits for background work (no turn
+                        // open, nothing running any more): nothing is left to interrupt.
+                        if interrupted.is_some()
+                            && !turn_open
+                            && tasks::background_running(&work) == 0
+                        {
                             if let Some(c) = interrupted.take() {
                                 return Err(c);
                             }
-                            if *was_interrupted || *end_reason == Some(EndReason::Cancelled) {
-                                return Ok(TaskState::Failed {
-                                    error: "the receiver's turn was interrupted".into(),
-                                });
-                            }
-                            let summary = match reply.as_deref().map(str::trim) {
-                                Some(r) if !r.is_empty() => r.to_string(),
-                                _ => text.trim().to_string(),
-                            };
-                            let usage = (*usage != Usage::default())
-                                .then(|| usage_delta(&mark.usage_before, usage));
-                            return Ok(TaskState::Completed {
-                                result: TaskResult {
-                                    status: if end_reason.is_some() {
-                                        ResultStatus::Error
-                                    } else {
-                                        ResultStatus::Success
-                                    },
-                                    summary,
-                                    artifacts: Vec::new(),
-                                    usage,
-                                },
-                            });
                         }
-                        _ => {}
-                    },
+                    }
                     SessionEventKind::Exited { code, signal } => {
                         if let Some(c) = interrupted.take() {
                             return Err(c);
