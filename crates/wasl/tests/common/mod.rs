@@ -143,6 +143,9 @@ pub struct Daemon {
     pub client: RuntimeClient,
     real: bool,
     extra: Vec<String>,
+    /// Started without the `WASL_LOG` developer override: stderr then holds only what the
+    /// daemon itself prints.
+    quiet: bool,
 }
 
 impl Daemon {
@@ -180,6 +183,12 @@ impl Daemon {
         Self::start_with(scratch, host, false, &[]).await
     }
 
+    /// A daemon without the `WASL_LOG` developer override (its stderr capture is then what a
+    /// user's would be).
+    pub async fn start_quiet(scratch: &Scratch, host: &str) -> Daemon {
+        Self::start_inner(scratch, host, false, &[], true).await
+    }
+
     /// A daemon with extra `serve` options.
     pub async fn start_args(scratch: &Scratch, host: &str, extra: &[&str]) -> Daemon {
         Self::start_with(scratch, host, false, extra).await
@@ -191,10 +200,20 @@ impl Daemon {
     }
 
     async fn start_with(scratch: &Scratch, host: &str, real: bool, extra: &[&str]) -> Daemon {
+        Self::start_inner(scratch, host, real, extra, false).await
+    }
+
+    async fn start_inner(
+        scratch: &Scratch,
+        host: &str,
+        real: bool,
+        extra: &[&str],
+        quiet: bool,
+    ) -> Daemon {
         let dir = scratch.0.join(host);
         std::fs::create_dir_all(&dir).unwrap();
         let extra: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
-        let child = Self::spawn(host, &dir, real, &extra).await;
+        let child = Self::spawn(host, &dir, real, &extra, quiet).await;
         let client = RuntimeClient::connect_endpoint(
             local_endpoint(&dir.join("wasl.sock")),
             Hello::new("test", "test", "test"),
@@ -207,20 +226,32 @@ impl Daemon {
             client,
             real,
             extra,
+            quiet,
         }
     }
 
-    async fn spawn(host: &str, dir: &Path, real: bool, extra: &[String]) -> tokio::process::Child {
+    async fn spawn(
+        host: &str,
+        dir: &Path,
+        real: bool,
+        extra: &[String],
+        quiet: bool,
+    ) -> tokio::process::Child {
         let log = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(dir.join("serve.log"))
             .unwrap();
-        let mut child = tokio::process::Command::new(wasl_bin())
-            .arg("serve")
+        let mut cmd = tokio::process::Command::new(wasl_bin());
+        cmd.arg("serve")
             .args(Self::args(host, dir, real))
-            .args(extra)
-            .env("WASL_LOG", "info,wasl_node=debug")
+            .args(extra);
+        if quiet {
+            cmd.env_remove("WASL_LOG");
+        } else {
+            cmd.env("WASL_LOG", "info,wasl_node=debug");
+        }
+        let mut child = cmd
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::from(log))
@@ -251,7 +282,25 @@ impl Daemon {
 
     pub async fn restart(&mut self) {
         self.kill().await;
-        self.child = Some(Self::spawn(&self.host, &self.dir, self.real, &self.extra).await);
+        self.child =
+            Some(Self::spawn(&self.host, &self.dir, self.real, &self.extra, self.quiet).await);
+    }
+
+    /// Stop the daemon the way a service manager does (SIGTERM) and wait for it to exit: it
+    /// writes what it recorded before it goes (sessions keep running in their shims).
+    #[cfg(unix)]
+    pub async fn terminate(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let pid = c.id().expect("the daemon runs");
+            // SAFETY: plain syscall on the child this harness started.
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+            let status = within("daemon exit", c.wait()).await.unwrap();
+            assert!(
+                status.success(),
+                "daemon {} exited with {status}",
+                self.host
+            );
+        }
     }
 
     pub async fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> T {

@@ -21,6 +21,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{broadcast, mpsc, oneshot};
+use wasit_diag::{Code, ErrorInfo, HomePath, Ident};
+use wasl_proto::diag::{count, emit, foreign, task, WaslEvent};
 use wasl_proto::{EdgeEvent, TaskId, Topology};
 
 use crate::state::{InPersist, OutPersist, SpawnPersist};
@@ -56,6 +58,19 @@ pub enum Key {
 }
 
 impl Rec {
+    /// What the record is, for diagnostics: its kind and, for a task or a spawn request, its
+    /// id (a topology is named by the supervisor, and a name is content).
+    fn describe(&self) -> (Code, Option<Ident>) {
+        match self {
+            Rec::Out(o) => (Code::st("out"), Some(task(&o.task.id))),
+            Rec::In(i) => (Code::st("in"), Some(task(&i.task.id))),
+            Rec::Topology(_) => (Code::st("topology"), None),
+            Rec::TopologyRemoved { .. } => (Code::st("topology_removed"), None),
+            Rec::Edge(_) => (Code::st("edge"), None),
+            Rec::Spawn(s) => (Code::st("spawn"), Some(Ident::new(&s.request_id))),
+        }
+    }
+
     fn key(&self, seq: u64) -> Key {
         match self {
             Rec::Out(o) => Key::Out(o.task.id.clone()),
@@ -83,6 +98,15 @@ pub enum JournalError {
     /// The queue is full (the disk is not keeping up).
     Busy,
     Io(String),
+}
+
+impl JournalError {
+    /// The error as a diagnostics field. The text names an operation and the OS's reason (or
+    /// says the queue is full or the writer gone); it is built here from `io::Error`s and
+    /// never from a record's content, so it is kept (scrubbed).
+    pub fn diag(&self) -> ErrorInfo {
+        ErrorInfo::ours(Code::st("journal"), self)
+    }
 }
 
 impl std::fmt::Display for JournalError {
@@ -143,17 +167,28 @@ impl Journal {
         let path = dir.join("journal.ndjson");
         let mut latest = BTreeMap::new();
         let mut next_seq = 1;
+        let mut skipped = 0u32;
         match tokio::fs::read_to_string(&path).await {
             Ok(text) => {
-                for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                for (n, line) in text
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, l)| !l.trim().is_empty())
+                {
                     match serde_json::from_str::<Entry>(line) {
                         Ok(e) => {
                             next_seq = next_seq.max(e.seq + 1);
                             fold(&mut latest, e);
                         }
                         // A torn last line after a crash: everything before it is intact.
+                        // The parse error quotes the line, so only its size and fingerprint
+                        // are recorded.
                         Err(err) => {
-                            tracing::warn!(error = %err, "skipping an unreadable journal line")
+                            skipped = skipped.saturating_add(1);
+                            emit(WaslEvent::JournalLineSkipped {
+                                line: n as u64 + 1,
+                                error: foreign("journal_line", &err.to_string()),
+                            });
                         }
                     }
                 }
@@ -175,6 +210,11 @@ impl Journal {
         let mut entries: Vec<Entry> = latest.values().cloned().collect();
         entries.sort_by_key(|e| e.seq);
         compact(&path, &entries).await?;
+        emit(WaslEvent::JournalOpened {
+            path: HomePath::new(&path),
+            records: count(entries.len()),
+            skipped,
+        });
         let file = tokio::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -198,10 +238,24 @@ impl Journal {
         match self.tx.try_send(Pending { rev, t, rec, ack }) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(p)) => {
-                let _ = p.ack.send(Err(JournalError::Busy)); // receiver is `rx` below
+                let (record, id) = p.rec.describe();
+                let e = JournalError::Busy;
+                emit(WaslEvent::JournalSubmitFailed {
+                    record,
+                    id,
+                    error: e.diag(),
+                });
+                let _ = p.ack.send(Err(e)); // receiver is `rx` below
             }
             Err(mpsc::error::TrySendError::Closed(p)) => {
-                let _ = p.ack.send(Err(JournalError::Io("writer is gone".into())));
+                let (record, id) = p.rec.describe();
+                let e = JournalError::Io("writer is gone".into());
+                emit(WaslEvent::JournalSubmitFailed {
+                    record,
+                    id,
+                    error: e.diag(),
+                });
+                let _ = p.ack.send(Err(e));
                 // as above
             }
         }
@@ -279,7 +333,12 @@ async fn writer(
         }
         for e in &entries {
             if let Err(err) = serde_json::to_writer(&mut buf, e) {
-                tracing::error!(error = %err, "cannot encode a journal record");
+                let (record, id) = e.rec.describe();
+                emit(WaslEvent::JournalEncodeFailed {
+                    record,
+                    id,
+                    error: foreign("encode", &err.to_string()),
+                });
             }
             buf.push(b'\n');
         }
@@ -300,12 +359,45 @@ async fn writer(
                 }
             }
             Err(err) => {
-                tracing::error!(path = %path.display(), error = %err, "cannot append to the node journal");
+                emit(WaslEvent::JournalAppendFailed {
+                    path: HomePath::new(&path),
+                    records: count(entries.len()),
+                    ids: entries.iter().filter_map(|e| e.rec.describe().1).collect(),
+                    error: ErrorInfo::io(&err),
+                });
                 for item in batch.drain(..) {
                     let _ = item.ack.send(Err(JournalError::Io(err.to_string())));
                     // as above
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The premise of the `foreign` classification of an unreadable line: `serde_json`'s error
+    /// quotes the offending value, so its text must never reach a record.
+    #[test]
+    fn the_parse_error_of_a_journal_line_quotes_the_line() {
+        let line = r#"{"seq":"JOURNAL-MARKER-7c1e","rev":1,"t":1,"rec":"topology_removed","workstream":"w"}"#;
+        let e = serde_json::from_str::<Entry>(line).unwrap_err();
+        assert!(e.to_string().contains("JOURNAL-MARKER-7c1e"), "{e}");
+        let info = foreign("journal_line", &e.to_string());
+        assert!(!format!("{info:?}").contains("JOURNAL-MARKER-7c1e"));
+    }
+
+    /// What is recorded about a journal record: its kind, and an id only for tasks and spawn
+    /// requests (a topology is named by the supervisor).
+    #[test]
+    fn a_record_is_described_by_kind_and_task_or_request_id_only() {
+        let (kind, id) = Rec::TopologyRemoved {
+            workstream: "Secret plan".into(),
+        }
+        .describe();
+        assert_eq!(kind, Code::st("topology_removed"));
+        assert!(id.is_none());
     }
 }

@@ -1,6 +1,6 @@
 //! [`NodeService`]: the node's `wasl.*` methods and topics as a [`wasit_control::Service`].
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -9,6 +9,8 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::broadcast;
 use wasit_control::{CallContext, CloseReason, Cursor, EventStream, RpcError, Service};
+use wasit_diag::{Code, Ms};
+use wasl_proto::diag::{emit, WaslEvent};
 use wasl_proto::{
     methods, topics, CancelRemoteRequest, CancelRequest, DecideRequest, DelegateRequest,
     DeliverRequest, DismissAsk, DismissRequest, MessageRequest, PeerStatusReply, PeerStatusRequest,
@@ -69,9 +71,8 @@ fn project(topic: &str, e: &Entry) -> Option<Value> {
     }
 }
 
-#[async_trait]
-impl Service for NodeService {
-    async fn call(&self, _ctx: CallContext, method: &str, p: Value) -> Result<Value, RpcError> {
+impl NodeService {
+    async fn dispatch(&self, method: &str, p: Value) -> Result<Value, RpcError> {
         let n = &self.node;
         match method {
             methods::TOPOLOGY_SET => ok(n.set_topology(params::<Topology>(p)?).await?),
@@ -123,6 +124,46 @@ impl Service for NodeService {
                 .await?),
             other => Err(RpcError::method_not_found(other)),
         }
+    }
+}
+
+/// Requests that are reads, long polls or frequent reports: recorded only when they fail.
+const QUIET: &[&str] = &[
+    methods::TOPOLOGY_GET,
+    methods::PEERS_LIST,
+    methods::TASK_STATUS,
+    methods::TASK_WAIT,
+    methods::TASKS_LIST,
+    methods::NODE_PEER_STATUS,
+    methods::NODE_UPDATE,
+    methods::SUPERVISOR_SPAWNABLE,
+];
+
+/// Records how a request ended: its method and time, and on failure its error code (never the
+/// message, which can name what an agent asked for).
+fn record(method: &str, r: &Result<Value, RpcError>, began: Instant) {
+    let ms = Ms::of(began.elapsed());
+    match r {
+        Ok(_) if QUIET.contains(&method) => {}
+        Ok(_) => emit(WaslEvent::Request {
+            method: Code::new(method),
+            ms,
+        }),
+        Err(e) => emit(WaslEvent::RequestFailed {
+            method: Code::new(method),
+            code: Code::new(&e.code),
+            ms,
+        }),
+    }
+}
+
+#[async_trait]
+impl Service for NodeService {
+    async fn call(&self, _ctx: CallContext, method: &str, p: Value) -> Result<Value, RpcError> {
+        let began = Instant::now();
+        let r = self.dispatch(method, p).await;
+        record(method, &r, began);
+        r
     }
 
     async fn subscribe(

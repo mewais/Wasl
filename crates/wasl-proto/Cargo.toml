@@ -13,5 +13,6 @@ ts = ["dep:ts-rs", "wasit-core/ts"]
 serde = { workspace = true }
 serde_json = { workspace = true }
 wasit-core = { workspace = true }
+wasit-diag = { workspace = true }
 fastrand = { workspace = true }
 ts-rs = { version = "12", optional = true, features = ["serde-json-impl", "no-serde-warnings"] }

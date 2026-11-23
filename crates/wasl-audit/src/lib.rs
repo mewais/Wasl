@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
+use wasit_diag::{Code, ErrorInfo, HomePath};
+use wasl_proto::diag::{emit, WaslEvent};
 use wasl_proto::{AgentId, EdgePolicy, HandoffDecision, TaskId, TaskMode};
 
 /// Bound on entries queued for the writer.
@@ -49,6 +51,19 @@ pub enum AuditKind {
     },
 }
 
+impl AuditKind {
+    /// The kind as the `kind` field of its JSON line (`delegated`, `rejected`, ...).
+    pub fn name(&self) -> &'static str {
+        match self {
+            AuditKind::Delegated { .. } => "delegated",
+            AuditKind::Rejected { .. } => "rejected",
+            AuditKind::Decided { .. } => "decided",
+            AuditKind::PolicyChanged { .. } => "policy_changed",
+            AuditKind::Finished { .. } => "finished",
+        }
+    }
+}
+
 /// One audit record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AuditEntry {
@@ -64,9 +79,19 @@ pub struct AuditEntry {
     pub kind: AuditKind,
 }
 
-/// Why the trail could not be written or read.
+/// Why the trail could not be written or read. The text names an operation and the reason the
+/// OS (or the writer) gave; it never quotes an entry (a trail holds what agents and people
+/// wrote), which is what lets [`AuditError::diag`] keep it in a diagnostics record.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditError(pub String);
+
+impl AuditError {
+    /// The error as a diagnostics field: its text is the operation and the OS's reason only
+    /// (see the type's documentation).
+    pub fn diag(&self) -> ErrorInfo {
+        ErrorInfo::ours(Code::st("audit"), self)
+    }
+}
 
 impl std::fmt::Display for AuditError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -145,6 +170,7 @@ async fn writer(mut file: tokio::fs::File, path: PathBuf, mut rx: mpsc::Receiver
         for msg in batch {
             match msg {
                 Msg::Entry(e, done) => {
+                    let (kind, task) = (e.kind.name(), e.task.clone());
                     let r = match serde_json::to_vec(&e) {
                         Ok(mut line) => {
                             line.push(b'\n');
@@ -161,7 +187,7 @@ async fn writer(mut file: tokio::fs::File, path: PathBuf, mut rx: mpsc::Receiver
                     if let Err(err) = &r {
                         failed.get_or_insert_with(|| err.clone());
                     }
-                    waiters.push(Waiter::Entry(done, r));
+                    waiters.push(Waiter::Entry(done, r, kind, task));
                 }
                 Msg::Flush(reply) => waiters.push(Waiter::Flush(reply)),
             }
@@ -174,13 +200,21 @@ async fn writer(mut file: tokio::fs::File, path: PathBuf, mut rx: mpsc::Receiver
         }
         .map_err(|e| AuditError(format!("sync: {e}")));
         if let Err(e) = &synced {
-            tracing::error!(path = %path.display(), error = %e, "cannot sync the audit trail");
+            emit(WaslEvent::AuditSyncFailed {
+                path: HomePath::new(&path),
+                error: e.diag(),
+            });
         }
         for w in waiters {
             match w {
-                Waiter::Entry(done, r) => {
+                Waiter::Entry(done, r, kind, task) => {
                     if let Err(e) = &r {
-                        tracing::error!(path = %path.display(), error = %e, "audit entry lost");
+                        emit(WaslEvent::AuditEntryLost {
+                            path: HomePath::new(&path),
+                            kind: Code::st(kind),
+                            task: task.as_ref().map(wasl_proto::diag::task),
+                            error: e.diag(),
+                        });
                     }
                     let r = r.and(synced.clone());
                     let _ = done.send(r); // the recorder may have given up
@@ -201,6 +235,8 @@ enum Waiter {
     Entry(
         oneshot::Sender<Result<(), AuditError>>,
         Result<(), AuditError>,
+        &'static str,
+        Option<TaskId>,
     ),
     Flush(oneshot::Sender<Result<(), AuditError>>),
 }
@@ -210,9 +246,26 @@ pub async fn read_entries(path: impl AsRef<Path>) -> Result<Vec<AuditEntry>, Aud
     let text = tokio::fs::read_to_string(path.as_ref())
         .await
         .map_err(|e| AuditError(format!("read {}: {e}", path.as_ref().display())))?;
+    // The error says where and what kind of failure, not what the line held: `serde_json`'s
+    // text quotes the offending value, and the trail holds what agents and people wrote.
     text.lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).map_err(|e| AuditError(format!("bad entry {l:?}: {e}"))))
+        .enumerate()
+        .filter(|(_, l)| !l.trim().is_empty())
+        .map(|(i, l)| {
+            serde_json::from_str(l).map_err(|e| {
+                AuditError(format!(
+                    "bad entry on line {}: {} at column {}",
+                    i + 1,
+                    match e.classify() {
+                        serde_json::error::Category::Io => "i/o error",
+                        serde_json::error::Category::Syntax => "syntax error",
+                        serde_json::error::Category::Data => "unexpected shape",
+                        serde_json::error::Category::Eof => "unexpected end",
+                    },
+                    e.column()
+                ))
+            })
+        })
         .collect()
 }
 
@@ -249,6 +302,26 @@ mod tests {
         }
         assert_eq!(read_entries(&path).await.unwrap().len(), 21);
         log.flush().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
+    }
+
+    /// A trail that cannot be read back reports where and what kind of failure, not what the
+    /// line held (`serde_json` quotes the offending value, and the trail holds what agents and
+    /// people wrote): this is what lets `AuditError::diag` keep the text.
+    #[tokio::test]
+    async fn an_unreadable_entry_is_reported_without_its_text() {
+        let dir = std::env::temp_dir().join(format!("wasl-audit-bad-{}", fastrand_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("audit.ndjson");
+        std::fs::write(
+            &path,
+            "{\"t_ms\":\"AUDIT-MARKER-5e2a\",\"workstream\":\"w\"}\n",
+        )
+        .unwrap();
+        let e = read_entries(&path).await.unwrap_err();
+        assert!(e.0.starts_with("bad entry on line 1"), "{e}");
+        assert!(!e.0.contains("AUDIT-MARKER-5e2a"), "{e}");
+        assert!(!format!("{:?}", e.diag()).contains("AUDIT-MARKER-5e2a"));
         let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
     }
 

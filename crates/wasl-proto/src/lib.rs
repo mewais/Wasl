@@ -53,6 +53,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use wasit_core::{ChoiceText, GateChoice, GateChoiceKind, GateDecision, Usage};
 
+pub mod diag;
 pub mod spawn;
 pub use spawn::{
     is_spawn_refusal, spawn_choice, spawn_choices, spawn_gate, spawn_request_id, DismissAsk,
