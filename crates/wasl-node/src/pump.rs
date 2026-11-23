@@ -13,7 +13,9 @@ use serde_json::Value;
 use tokio::time::Instant;
 use wasit_diag::{Ident, Ms};
 use wasl_proto::diag::{emit, task, SendWork, WaslEvent, WithdrawCause};
-use wasl_proto::{methods, CancelRemoteRequest, DeliverRequest, TaskId, TaskState, UpdateRequest};
+use wasl_proto::{
+    methods, CancelRemoteRequest, DeliverRequest, EndCode, TaskId, TaskState, UpdateRequest,
+};
 
 use crate::diag::{rpc_error, transport_error};
 use crate::node::{now_ms, Inner, Node};
@@ -299,7 +301,10 @@ impl Node {
             (out_ids, in_reqs, next)
         };
         for id in out_ids {
-            if let Err(e) = self.withdraw(&id, "deadline passed".into(), true).await {
+            if let Err(e) = self
+                .withdraw(&id, EndCode::DeadlinePassed, "deadline passed".into())
+                .await
+            {
                 emit(WaslEvent::TaskWithdrawFailed {
                     task: task(&id),
                     cause: WithdrawCause::Deadline,

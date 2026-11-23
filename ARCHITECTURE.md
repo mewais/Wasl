@@ -19,7 +19,7 @@ host daemon A ◀──bridge──▶ hub (RoutingService) ◀──bridge─�
 - **Tasks**: `delegate` creates one task per target and returns at once. Every state change is
   an upsert record (with a node-wide revision) in `<data>/wasl/journal.ndjson`, submitted under
   the state lock and awaited after it; the journal is compacted on open and its sequence numbers
-  are the cursors of the `wasl.tasks` / `wasl.edges` topics. `task_wait` waits on per-task
+  are the cursors of the `wasl.tasks` / `wasl.edges` / `wasl.spawns` topics. `task_wait` waits on per-task
   `watch` channels, never on a lock.
 - **Handoff gates**: an `ask` edge raises `GateRequest::Handoff` on the sending session through
   Wasit's external-gate facility (`SessionManager::raise_gate`, journaled as session notes, so
@@ -59,6 +59,17 @@ host daemon A ◀──bridge──▶ hub (RoutingService) ◀──bridge─�
   hub serves itself); the hub sets its own authority. No authority, or no supervisor reachable
   within `spawn_connect_wait`: `spawn_unavailable`. `list_peers` carries `spawnable` (hosts,
   drivers, models, remaining) from the authority.
+- **How a request ended** (`wasl-proto/src/end.rs`, the one vocabulary for spawn requests and
+  handoff gates): an `End` (`EndCode` machine word, plus the supervisor's error code as `cause`
+  for `refused` / `launch_failed`). A spawn's final state (`Failed{code, message, end}`, or
+  `Done` = `launched`) is journaled with it; its `message` is the sentence the agent's tool
+  result carries and the human-facing detail. A final refusal before any gate (the supervisor's
+  plan refusal, a deadline already past) is a journaled record too (no plan). The same code and
+  sentence go to the session as the reason of the gate's resolution (`resolve_gate(.., reason)`,
+  Wasit `GateReason`), and the node publishes every ended request once on the `wasl.spawns`
+  topic (`SpawnEnded`; cursors are the journal's, replay yields every ended request). Not
+  recorded: a supervisor that cannot be reached (nobody to tell; `RequestFailed` in the
+  diagnostics, and the agent may ask again).
 
 ## Diagnostics
 

@@ -18,7 +18,7 @@
 use serde::{Deserialize, Serialize};
 use wasit_core::{ChoiceText, GateChoice, GateChoiceKind, GateDecision};
 
-use crate::{codes, AgentId, DelegateError, TaskBrief, Topology};
+use crate::{codes, AgentId, DelegateError, End, TaskBrief, Topology};
 
 /// What an agent asks for.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -173,6 +173,26 @@ pub struct SpawnLaunched {
     pub workstream: String,
     /// The workstream's topology with the new agent (the node applies it before delegating).
     pub topology: Topology,
+}
+
+/// A spawn request that ended (the payload of [`topics::SPAWNS`](crate::topics::SPAWNS)): the
+/// latest word of the node's journal record, sent once when the request reaches its final
+/// state (launched, or why not).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct SpawnEnded {
+    pub request_id: String,
+    /// The asking agent.
+    pub from: AgentId,
+    /// The name the agent asked for (what the gate showed).
+    pub name: String,
+    /// When it ended (ms since the epoch).
+    pub ended_ms: u64,
+    pub end: End,
+    /// The sentence the asking agent's tool result carries: why, in words (bounded). Absent
+    /// when the request launched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// `wasl.dismiss` (MCP front-end → node).

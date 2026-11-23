@@ -179,6 +179,10 @@ wasit_diag::diag_events! {
         /// decided elsewhere): nothing was applied.
         #[diag(ev = "wasl.gate.decide_refused", lvl = warn)]
         GateDecideRefused { task: Ident, error: ErrorInfo },
+        /// A gate was taken down on its session because its request ended; `reason` is the
+        /// code of the ending (the text the agent is told is never recorded).
+        #[diag(ev = "wasl.gate.withdrawn")]
+        GateWithdrawn { session: Ident, gate: Ident, reason: Code },
         /// Taking a gate down on its session failed (usually because it was answered or the
         /// session ended: nothing is pending any more).
         #[diag(ev = "wasl.gate.withdraw_failed", lvl = debug)]
@@ -212,6 +216,12 @@ wasit_diag::diag_events! {
         },
 
         // ── spawning ───────────────────────────────────────────────────────
+        /// A spawn request reached its final state: `code` is how it ended (`launched`, or why
+        /// not) and `cause` the supervisor's error code for a refusal or a failed launch. The
+        /// words that go with it (names, what the human or the supervisor said) are not
+        /// recorded.
+        #[diag(ev = "wasl.spawn.ended")]
+        SpawnEnded { request: Ident, code: Code, cause: Option<Code> },
         /// The topology the supervisor returned for a spawn could not be applied.
         #[diag(ev = "wasl.spawn.topology_failed", lvl = warn)]
         SpawnTopologyFailed { request: Ident, error: ErrorInfo },

@@ -4,7 +4,8 @@
 //! the same replay finds an answer given while nobody watched.
 //!
 //! A gate lives as long as the request that raised it. It is withdrawn — taken down on the
-//! session (`gate_resolved`, reason `withdrawn`; the runtime then refuses a late answer with
+//! session (`gate_resolved`, with the reason the request ended: an [`wasl_proto::EndCode`] and
+//! the sentence the agent is told; the runtime then refuses a late answer with
 //! `gate_withdrawn`) and its request settled without acting — when that request is gone:
 //!
 //! - handoff (the task): the task is cancelled or expires, the sending session's process
@@ -13,11 +14,11 @@
 //!   the call is cancelled or its MCP client disconnects (no `wasl.spawn` caller waits any
 //!   more), the session's process ends, or its deadline passes before approval.
 
-use wasit_core::{AgentEvent, Command, GateDecision};
+use wasit_core::{AgentEvent, Command, GateDecision, GateReason};
 use wasit_runtime::wire::{SessionEventKind, SessionId};
 use wasit_runtime::StreamEnd;
 use wasl_proto::diag::{emit, task, WaslEvent, Watcher, WithdrawCause};
-use wasl_proto::{codes, HandoffDecision, TaskId, TaskState};
+use wasl_proto::{codes, EndCode, HandoffDecision, TaskId, TaskState};
 
 use crate::diag::{rpc_error, session, stream_error};
 use crate::node::Node;
@@ -30,7 +31,10 @@ pub(crate) enum Answer {
     AsQuestion,
     /// Withdrawn, or no longer wanted (`still` returned false).
     Gone,
+    /// The session's process ended (or was lost or stopped) before the gate was answered.
     SessionEnded(String),
+    /// The session was deleted, or its events cannot be followed any more.
+    SessionGone(String),
     /// The asking turn ended after the raise (only for gates raised during a turn, and only
     /// for the turn ends the caller said end the request).
     TurnEnded {
@@ -57,7 +61,7 @@ impl Node {
         'outer: loop {
             let mut stream = match self.sessions().subscribe(sid, from).await {
                 Ok(s) => s,
-                Err(e) => return Answer::SessionEnded(format!("the session is gone: {e}")),
+                Err(e) => return Answer::SessionGone(format!("the session is gone: {e}")),
             };
             while let Some(item) = stream.next().await {
                 let ev = match item {
@@ -90,16 +94,14 @@ impl Node {
                         ..
                     } if *request_id == gate.request_id => return Answer::AsQuestion,
                     SessionEventKind::Agent {
-                        event: AgentEvent::GateResolved { request_id, .. },
+                        event: AgentEvent::GateResolved { request_id, reason },
                     } if *request_id == gate.request_id => {
-                        // Taken down by us (the request is settled: `still()` is false), or by
-                        // the runtime because the process ended (its exit follows).
-                        let ended = still()
-                            && self
-                                .sessions()
-                                .snapshot(sid)
-                                .map(|s| !s.phase.is_live())
-                                .unwrap_or(true);
+                        // Taken down by us (the request is settled), or by the runtime because
+                        // the process ended or the session was stopped (its exit follows).
+                        let ended = reason.as_ref().is_some_and(|r| {
+                            r.code == GateReason::PROCESS_ENDED
+                                || r.code == GateReason::SESSION_STOPPED
+                        });
                         return if ended {
                             Answer::SessionEnded(
                                 "the session ended before the gate was answered".into(),
@@ -136,7 +138,7 @@ impl Node {
                 }
             }
             // The stream ended: the session was deleted.
-            return Answer::SessionEnded("the session was deleted".into());
+            return Answer::SessionGone("the session was deleted".into());
         }
     }
 
@@ -198,7 +200,7 @@ impl Node {
                 let reason = "withdrawn: the turn that delegated was interrupted before the \
                               handoff was approved"
                     .to_string();
-                if let Err(e) = self.withdraw(&id, reason, false).await {
+                if let Err(e) = self.withdraw(&id, EndCode::TurnInterrupted, reason).await {
                     emit(WaslEvent::TaskWithdrawFailed {
                         task: task(&id),
                         cause: WithdrawCause::TurnInterrupted,
@@ -207,8 +209,9 @@ impl Node {
                 }
                 return;
             }
-            Answer::SessionEnded(reason) => {
-                // The runtime already withdrew the gate with the process.
+            Answer::SessionEnded(reason) | Answer::SessionGone(reason) => {
+                // The runtime already withdrew the gate with the process (or the session is
+                // gone, with its gates).
                 if self.still_pending(&id) {
                     self.finish_out(
                         &id,

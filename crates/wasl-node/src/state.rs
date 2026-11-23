@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 use wasit_core::Usage;
 use wasl_proto::{
-    AgentId, CancelRemoteRequest, EdgePolicy, PeerCard, SpawnDecision, SpawnLaunched, SpawnPlan,
-    SpawnReply, SpawnSpec, Task, TaskBrief, TaskId, TaskState, TaskView, Topology,
+    AgentId, CancelRemoteRequest, EdgePolicy, End, EndCode, PeerCard, SpawnDecision, SpawnEnded,
+    SpawnLaunched, SpawnPlan, SpawnReply, SpawnSpec, Task, TaskBrief, TaskId, TaskState, TaskView,
+    Topology,
 };
 
 /// A handoff gate raised on the sending session.
@@ -131,15 +132,29 @@ pub enum SpawnPhase {
     Done {
         reply: SpawnReply,
     },
+    /// Ended without a launch. `code` and `message` are what the asking agent's call fails
+    /// with; `end` says why, from Wasl's fixed vocabulary (and `message` is its detail). A
+    /// record written before endings were recorded has no `end`: it reads as unrecorded.
     Failed {
         code: String,
         message: String,
+        #[serde(default = "End::unrecorded")]
+        end: End,
     },
 }
 
 impl SpawnPhase {
     pub fn is_terminal(&self) -> bool {
         matches!(self, SpawnPhase::Done { .. } | SpawnPhase::Failed { .. })
+    }
+
+    /// A failure for `end`: the agent's error code follows from it, `message` is its detail.
+    pub fn failed(end: End, message: impl Into<String>) -> SpawnPhase {
+        SpawnPhase::Failed {
+            code: end.rpc_code(),
+            message: message.into(),
+            end,
+        }
     }
 }
 
@@ -149,7 +164,9 @@ pub struct SpawnPersist {
     pub request_id: String,
     pub from: AgentId,
     pub spec: SpawnSpec,
-    pub plan: SpawnPlan,
+    /// What the supervisor resolved the request into; none when it refused to plan one.
+    #[serde(default)]
+    pub plan: Option<SpawnPlan>,
     pub phase: SpawnPhase,
     pub updated_ms: u64,
     /// The inbound task the caller was working on when it asked: the spawn is for it, so it
@@ -160,6 +177,25 @@ pub struct SpawnPersist {
     /// deadline, capped by `for_task`'s. Approval after it is refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline_ms: Option<u64>,
+}
+
+impl SpawnPersist {
+    /// The request's ending, once it has reached a final state.
+    pub fn ended(&self) -> Option<SpawnEnded> {
+        let (end, detail) = match &self.phase {
+            SpawnPhase::Done { .. } => (End::new(EndCode::Launched), None),
+            SpawnPhase::Failed { message, end, .. } => (end.clone(), wasl_proto::bounded(message)),
+            _ => return None,
+        };
+        Some(SpawnEnded {
+            request_id: self.request_id.clone(),
+            from: self.from.clone(),
+            name: self.spec.name.clone(),
+            ended_ms: self.updated_ms,
+            end,
+            detail,
+        })
+    }
 }
 
 pub struct SpawnRec {
@@ -239,5 +275,70 @@ impl State {
     pub fn running_inbound(&self, session: &str) -> Option<&InRec> {
         let id = self.queues.get(session)?.running.as_ref()?;
         self.inbound.get(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wasl_proto::{codes, EndCode};
+
+    fn persist(phase: SpawnPhase) -> SpawnPersist {
+        SpawnPersist {
+            request_id: "r1".into(),
+            from: AgentId::new("h", "s"),
+            spec: SpawnSpec {
+                name: "w".into(),
+                role: "r".into(),
+                ..Default::default()
+            },
+            plan: None,
+            phase,
+            updated_ms: 7,
+            for_task: None,
+            deadline_ms: None,
+        }
+    }
+
+    #[test]
+    fn only_a_final_state_is_an_ending_and_an_old_failure_reads_as_unrecorded() {
+        let asking = SpawnPhase::Asking {
+            gate: GateInfo {
+                request_id: "g".into(),
+                raised: false,
+                cursor: 0,
+                turn: false,
+            },
+        };
+        assert_eq!(persist(asking).ended(), None);
+        let denied = SpawnPhase::failed(End::new(EndCode::Denied), "the human denied spawning w");
+        let SpawnPhase::Failed { code, .. } = &denied else {
+            panic!("a failure")
+        };
+        assert_eq!(code, codes::SPAWN_DENIED);
+        let e = persist(denied).ended().unwrap();
+        assert_eq!(e.end, End::new(EndCode::Denied));
+        assert_eq!(e.detail.as_deref(), Some("the human denied spawning w"));
+        assert_eq!((e.ended_ms, e.name.as_str()), (7, "w"));
+
+        // A record journaled before endings were recorded has a code and a message only.
+        let old: SpawnPhase = serde_json::from_value(serde_json::json!({
+            "phase": "failed", "code": "spawn_withdrawn", "message": "gone"
+        }))
+        .unwrap();
+        let e = persist(old).ended().unwrap();
+        assert_eq!(e.end, End::new(EndCode::Unrecorded));
+        assert_eq!(e.detail.as_deref(), Some("gone"));
+        // Nor does one have a plan field.
+        let mut v = serde_json::to_value(persist(SpawnPhase::failed(
+            End::new(EndCode::Cancelled),
+            "x",
+        )))
+        .unwrap();
+        v.as_object_mut().unwrap().remove("plan");
+        assert!(serde_json::from_value::<SpawnPersist>(v)
+            .unwrap()
+            .plan
+            .is_none());
     }
 }

@@ -295,19 +295,27 @@ async fn handoff_gate_is_withdrawn_on_interrupt_cancel_and_expiry() {
     let t1 = a.delegate1(&orch, &worker, "first").await;
     let g1 = a.handoff_gate(&orch, &t1.id).await;
     a.interrupt(&orch).await;
-    match a.wait_done(&t1.id).await {
-        TaskState::Cancelled { reason } => assert!(reason.contains("interrupted"), "{reason}"),
+    let why = match a.wait_done(&t1.id).await {
+        TaskState::Cancelled { reason } => {
+            assert!(reason.contains("interrupted"), "{reason}");
+            reason
+        }
         other => panic!("expected cancelled, got {other:?}"),
-    }
-    a.assert_withdrawn(&orch, g1.request_id(), "allow_once")
+    };
+    // The session says why too: the code, and the sentence the task records.
+    let r = a
+        .assert_withdrawn(&orch, g1.request_id(), "allow_once", "turn_interrupted")
         .await;
+    assert_eq!(r.detail.as_deref(), Some(why.as_str()));
 
     // Cancelled by the sender (the session is idle now: the gate is not tied to a turn).
     let t2 = a.delegate1(&orch, &worker, "second").await;
     let g2 = a.handoff_gate(&orch, &t2.id).await;
     let _: TaskBrief = a.call(methods::TASK_CANCEL, json!({"id": t2.id})).await;
-    a.assert_withdrawn(&orch, g2.request_id(), "allow_once")
+    let r = a
+        .assert_withdrawn(&orch, g2.request_id(), "allow_once", "cancelled")
         .await;
+    assert_eq!(r.detail.as_deref(), Some("cancelled by the sender"));
     assert!(matches!(
         a.status(&t2.id).await,
         TaskState::Cancelled { .. }
@@ -320,8 +328,26 @@ async fn handoff_gate_is_withdrawn_on_interrupt_cancel_and_expiry() {
     let t3 = r.results[0].task.clone().unwrap();
     let g3 = a.handoff_gate(&orch, &t3.id).await;
     assert_eq!(a.wait_done(&t3.id).await, TaskState::Expired);
-    a.assert_withdrawn(&orch, g3.request_id(), "allow_once")
+    let r = a
+        .assert_withdrawn(&orch, g3.request_id(), "allow_once", "deadline_passed")
         .await;
+    assert_eq!(r.detail.as_deref(), Some("deadline passed"));
+
+    // Decided without the gate (a supervisor or an elicitation answers): the gate comes down
+    // saying so.
+    let t5 = a.delegate1(&orch, &worker, "fifth").await;
+    let g5 = a.handoff_gate(&orch, &t5.id).await;
+    let _: TaskBrief = a
+        .call(
+            methods::TASK_DECIDE,
+            json!({"id": t5.id, "decision": {"decision": "deny", "reason": "no thanks"}}),
+        )
+        .await;
+    let r = a
+        .assert_withdrawn(&orch, g5.request_id(), "allow_once", "decided_elsewhere")
+        .await;
+    assert!(r.detail.is_some_and(|d| d.contains("elicitation")));
+    assert!(matches!(a.status(&t5.id).await, TaskState::Denied { .. }));
 
     // The sending session's process ends (its CLI and MCP client with it).
     let t4 = a.delegate1(&orch, &worker, "fourth").await;
@@ -331,8 +357,11 @@ async fn handoff_gate_is_withdrawn_on_interrupt_cancel_and_expiry() {
         a.wait_done(&t4.id).await,
         TaskState::Cancelled { .. }
     ));
-    a.assert_withdrawn(&orch, g4.request_id(), "allow_once")
+    // The runtime ended the gate with the process it was stopped with; Wasl said nothing.
+    let r = a
+        .assert_withdrawn(&orch, g4.request_id(), "allow_once", "session_stopped")
         .await;
+    assert_eq!(r.detail, None);
 
     // Nothing ever reached the worker.
     let snap = b.client.snapshot(&sid(&worker)).await.unwrap();

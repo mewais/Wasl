@@ -15,9 +15,10 @@ use wasl_audit::{AuditEntry, AuditKind, AuditLog};
 use wasl_proto::diag::{count, emit, foreign, JournalSite, PeerStatusFailure, WaslEvent};
 use wasl_proto::{
     codes, handoff_request_id, AgentId, ApprovalVia, CancelRemoteRequest, DelegateError,
-    DelegateOutcome, DelegateReply, DelegateRequest, EdgeChangeCause, EdgeEvent, EdgePolicy,
-    HandoffDecision, MessageRequest, PeerCard, PeerList, PeerStatus, PeerView, Task, TaskBrief,
-    TaskId, TaskList, TaskMode, TaskState, TaskStates, Topology, TopologyApplied, TopologyList,
+    DelegateOutcome, DelegateReply, DelegateRequest, EdgeChangeCause, EdgeEvent, EdgePolicy, End,
+    EndCode, HandoffDecision, MessageRequest, PeerCard, PeerList, PeerStatus, PeerView, Task,
+    TaskBrief, TaskId, TaskList, TaskMode, TaskState, TaskStates, Topology, TopologyApplied,
+    TopologyList,
 };
 
 use crate::diag::{command_error, session, transport_error};
@@ -945,8 +946,10 @@ impl Node {
                     }
                 };
                 let Some(ack) = ack else {
-                    // Decided or withdrawn meanwhile: take the gate back down.
-                    self.withdraw_gate(&sid, &info.request_id).await;
+                    // Decided or withdrawn meanwhile: take the gate back down, saying how the
+                    // request ended.
+                    let reason = self.handoff_gate_reason(&id);
+                    self.withdraw_gate(&sid, &info.request_id, reason).await;
                     return;
                 };
                 self.settle(ack).await;
@@ -992,21 +995,53 @@ impl Node {
     /// Take a gate down on its session. Runs to the end even when the caller is dropped (an
     /// RPC handler whose client disconnected right after asking for the withdrawal): the
     /// request is already settled, so its gate must not stay up.
-    pub(crate) async fn withdraw_gate(&self, sid: &SessionId, request_id: &str) {
+    pub(crate) async fn withdraw_gate(
+        &self,
+        sid: &SessionId,
+        request_id: &str,
+        reason: wasit_core::GateReason,
+    ) {
         let sessions = self.inner.sessions.clone();
         let (sid, request_id) = (sid.clone(), request_id.to_string());
         let task = tokio::spawn(async move {
-            if let Err(e) = sessions.resolve_gate(&sid, &request_id).await {
+            // The diagnostics hold the reason under its code only.
+            let code = Code::new(&reason.code);
+            match sessions.resolve_gate(&sid, &request_id, reason).await {
+                Ok(()) => emit(WaslEvent::GateWithdrawn {
+                    session: session(&sid),
+                    gate: Ident::new(&request_id),
+                    reason: code,
+                }),
                 // Already answered / the session ended: nothing is pending any more.
-                emit(WaslEvent::GateWithdrawFailed {
+                Err(e) => emit(WaslEvent::GateWithdrawFailed {
                     session: session(&sid),
                     gate: Ident::new(&request_id),
                     error: command_error(&e),
-                });
+                }),
             }
         });
         // Only a panic in the task (already reported) can fail the join.
         let _ = task.await;
+    }
+
+    /// Why a handoff gate raised for `id` is taken down because the task already left
+    /// approval: how it ended, as a gate resolution.
+    fn handoff_gate_reason(&self, id: &TaskId) -> wasit_core::GateReason {
+        let st = self.lock();
+        match st.out.get(id).map(|r| &r.p.state) {
+            Some(TaskState::Cancelled { reason }) => {
+                End::new(EndCode::Cancelled).gate_reason(reason)
+            }
+            Some(TaskState::Expired) => {
+                End::new(EndCode::DeadlinePassed).gate_reason("deadline passed")
+            }
+            Some(TaskState::Denied { reason }) => {
+                End::new(EndCode::DecidedElsewhere).gate_reason(reason)
+            }
+            Some(other) => End::new(EndCode::DecidedElsewhere)
+                .gate_reason(&format!("the handoff moved on ({})", other.name())),
+            None => wasit_core::GateReason::new(wasit_core::GateReason::WITHDRAWN),
+        }
     }
 
     /// Apply a handoff decision (from the gate, an elicitation, or a supervisor).
@@ -1123,7 +1158,9 @@ impl Node {
             self.settle(a).await;
         }
         if let Some((sid, rid)) = gate_to_withdraw {
-            self.withdraw_gate(&sid, &rid).await;
+            let reason = End::new(EndCode::DecidedElsewhere)
+                .gate_reason(&format!("the handoff was decided ({by}) without its gate"));
+            self.withdraw_gate(&sid, &rid, reason).await;
         }
         self.inner.kick.notify_one();
         brief.ok_or_else(|| err(codes::UNKNOWN_TASK, format!("no task {id}")))
@@ -1223,8 +1260,8 @@ impl Node {
     pub async fn cancel(&self, id: &TaskId, reason: Option<String>) -> Result<TaskBrief, RpcError> {
         self.withdraw(
             id,
+            EndCode::Cancelled,
             reason.unwrap_or_else(|| "cancelled by the sender".into()),
-            false,
         )
         .await?;
         self.lock()
@@ -1238,15 +1275,18 @@ impl Node {
     ///
     /// Runs to the end even when the caller is dropped (an RPC handler whose client went away
     /// right after asking): a settled task must not keep its gate up.
+    ///
+    /// `end` is why: `DeadlinePassed` expires it, anything else cancels it with `reason`; the
+    /// gate of a task that still waited for approval is resolved with the code and `reason`.
     pub(crate) async fn withdraw(
         &self,
         id: &TaskId,
+        end: EndCode,
         reason: String,
-        expired: bool,
     ) -> Result<(), RpcError> {
         let node = self.clone();
         let id = id.clone();
-        tokio::spawn(async move { node.withdraw_now(&id, reason, expired).await })
+        tokio::spawn(async move { node.withdraw_now(&id, end, reason).await })
             .await
             .map_err(|e| err(codes::IO, format!("withdrawing the task failed: {e}")))?
     }
@@ -1254,9 +1294,11 @@ impl Node {
     async fn withdraw_now(
         &self,
         id: &TaskId,
+        end: EndCode,
         reason: String,
-        expired: bool,
     ) -> Result<(), RpcError> {
+        let expired = end == EndCode::DeadlinePassed;
+        let gate_reason = End::new(end).gate_reason(&reason);
         let new_state = if expired {
             TaskState::Expired
         } else {
@@ -1303,7 +1345,7 @@ impl Node {
         };
         self.settle(ack).await;
         if let Some((sid, rid)) = gate {
-            self.withdraw_gate(&sid, &rid).await;
+            self.withdraw_gate(&sid, &rid, gate_reason).await;
         }
         self.inner.kick.notify_one();
         Ok(())

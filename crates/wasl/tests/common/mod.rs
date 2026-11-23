@@ -19,7 +19,7 @@ use wasit_control::{
     local_endpoint, CommandConnector, DurableOpts, DurableSubscription, Hello, HostSpec, Hub,
     HubConfig, LinkState, NoService, RequestOpts, RoutingService, Service,
 };
-use wasit_core::{AgentEvent, Command, GateDecision, GateRequest};
+use wasit_core::{AgentEvent, Command, GateDecision, GateReason, GateRequest};
 use wasit_fake_cli::scenario::Scenario;
 use wasit_runtime::wire::{CreateSession, SessionEventKind, SessionId, SessionSnapshot};
 use wasit_runtime::RuntimeClient;
@@ -396,9 +396,15 @@ impl Daemon {
     }
 
     /// The gate `request_id` was withdrawn on session `on`: it leaves the snapshot, the
-    /// session's events say `gate_resolved` with reason "withdrawn", and a late answer is
-    /// refused with `gate_withdrawn` (it does nothing).
-    pub async fn assert_withdrawn(&self, on: &AgentId, request_id: &str, choice: &str) {
+    /// session's events say `gate_resolved` with reason code `code` (returned, with its detail),
+    /// and a late answer is refused with `gate_withdrawn` (it does nothing).
+    pub async fn assert_withdrawn(
+        &self,
+        on: &AgentId,
+        request_id: &str,
+        choice: &str,
+        code: &str,
+    ) -> GateReason {
         self.wait_snapshot(&sid(on), "gate withdrawn", |s| {
             !s.pending_gates
                 .iter()
@@ -410,13 +416,23 @@ impl Daemon {
             .history(&sid(on), None, 1000)
             .await
             .expect("history");
-        assert!(
-            events.events.iter().any(|e| matches!(
-                &e.kind,
-                SessionEventKind::Agent { event: AgentEvent::GateResolved { request_id: r, reason } }
-                    if r == request_id && reason.as_deref() == Some("withdrawn")
-            )),
-            "no withdrawn gate_resolved for {request_id}"
+        let reason = events
+            .events
+            .iter()
+            .find_map(|e| match &e.kind {
+                SessionEventKind::Agent {
+                    event:
+                        AgentEvent::GateResolved {
+                            request_id: r,
+                            reason: Some(reason),
+                        },
+                } if r == request_id => Some(reason.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("no gate_resolved with a reason for {request_id}"));
+        assert_eq!(
+            reason.code, code,
+            "why {request_id} was withdrawn: {reason:?}"
         );
         let late = self
             .client
@@ -436,6 +452,7 @@ impl Daemon {
                 }
             ))
         );
+        reason
     }
 
     /// Start a turn on `on` that runs until it is interrupted (the scenario must have one).
@@ -544,6 +561,13 @@ impl Daemon {
             .subscribe_durable(topics::TASKS, DurableOpts::default())
     }
 
+    /// The `wasl.spawns` topic of this daemon (every spawn request that ended).
+    pub fn spawns_topic(&self) -> DurableSubscription {
+        self.client
+            .link()
+            .subscribe_durable(topics::SPAWNS, DurableOpts::default())
+    }
+
     pub fn edges_topic(&self) -> DurableSubscription {
         self.client
             .link()
@@ -553,6 +577,24 @@ impl Daemon {
 
 pub fn sid(a: &AgentId) -> SessionId {
     SessionId(a.session.clone())
+}
+
+/// Next ended spawn request matching `pred` (bounded).
+pub async fn next_spawn_ended(
+    sub: &mut DurableSubscription,
+    what: &str,
+    pred: impl Fn(&SpawnEnded) -> bool,
+) -> SpawnEnded {
+    within(what, async {
+        loop {
+            let (_, v) = sub.next().await.expect("topic").expect("topic item");
+            let e: SpawnEnded = serde_json::from_value(v).unwrap();
+            if pred(&e) {
+                return e;
+            }
+        }
+    })
+    .await
 }
 
 /// Next task event matching `pred` (bounded).

@@ -67,6 +67,8 @@ fn project(topic: &str, e: &Entry) -> Option<Value> {
         })
         .ok(),
         (topics::EDGES, Rec::Edge(ev)) => serde_json::to_value(ev.as_ref()).ok(),
+        // Only a request that reached its final state is an event of this topic.
+        (topics::SPAWNS, Rec::Spawn(s)) => s.ended().and_then(|e| serde_json::to_value(e).ok()),
         _ => None,
     }
 }
@@ -173,7 +175,7 @@ impl Service for NodeService {
         _params: Value,
         from: Option<Cursor>,
     ) -> Result<EventStream, RpcError> {
-        if topic != topics::TASKS && topic != topics::EDGES {
+        if ![topics::TASKS, topics::EDGES, topics::SPAWNS].contains(&topic) {
             return Err(RpcError::topic_not_found(topic));
         }
         let from = match &from {

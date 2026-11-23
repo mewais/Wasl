@@ -122,6 +122,9 @@ impl Supervisor {
         {
             let mut st = self.st();
             st.launch_calls += 1;
+            if l.spec.name == "boom" {
+                return Err(rpc("launch_broke", "the host refused to start boom"));
+            }
             if let Some(a) = st.launched.get(&l.request_id) {
                 let topo = st.topo.clone().unwrap();
                 return Ok(SpawnLaunched {
@@ -503,6 +506,16 @@ async fn deny_allow_once_and_limits() {
         other => panic!("expected a denial, got {other:?}"),
     }
     assert_eq!(x.sup.st().launch_calls, 0);
+    // Its final state, as the node publishes it: denied, with what the human said.
+    let mut ended = x.a.spawns_topic();
+    let e = next_spawn_ended(&mut ended, "r1 ended", |e| e.request_id == "r1").await;
+    assert_eq!(e.end, End::new(EndCode::Denied));
+    assert_eq!(e.from, x.orch);
+    assert_eq!(e.name, "w1");
+    assert!(
+        e.detail.as_deref().is_some_and(|d| d.contains("not today")),
+        "{e:?}"
+    );
 
     let call = spawn_call(&x.a, &x.orch, "r2", spec("w2", None, None));
     let a2 = x.a.client.clone();
@@ -525,6 +538,9 @@ async fn deny_allow_once_and_limits() {
     .await;
     let r = within("allowed", pending).await.unwrap().unwrap();
     assert_eq!(r.agent.host, "a");
+    let e = next_spawn_ended(&mut ended, "r2 ended", |e| e.request_id == "r2").await;
+    assert_eq!(e.end, End::new(EndCode::Launched));
+    assert_eq!(e.detail, None);
     // The edge to it asks (allow once does not extend to handoffs).
     let peers: PeerList =
         x.a.call(methods::PEERS_LIST, json!({"from": x.orch.session}))
@@ -545,6 +561,11 @@ async fn deny_allow_once_and_limits() {
         }
         other => panic!("expected the limit, got {other:?}"),
     }
+    // The supervisor's refusal is the request's ending too, with its own code as the cause and
+    // its words as the detail (the same as the agent was told).
+    let e = next_spawn_ended(&mut ended, "r3 ended", |e| e.request_id == "r3").await;
+    assert_eq!(e.end, End::caused_by(EndCode::Refused, codes::SPAWN_LIMIT));
+    assert!(e.detail.is_some_and(|d| d.contains("at most 1")));
     x.hub.shutdown().await;
 }
 
@@ -595,6 +616,15 @@ async fn restart_while_asking_does_not_spawn_twice() {
     assert_eq!(r.agent.host, "b");
     assert_eq!(x.sup.st().launched.len(), 1);
     assert_eq!(x.b.client.list().await.unwrap().len(), 1);
+    // The ending is in the node's journal: a restart does not lose it, and the topic replays
+    // it to whoever subscribes next.
+    x.a.restart().await;
+    let e = next_spawn_ended(&mut x.a.spawns_topic(), "r1 replayed", |e| {
+        e.request_id == "r1"
+    })
+    .await;
+    assert_eq!(e.end, End::new(EndCode::Launched));
+    assert_eq!(e.from, x.orch);
     x.hub.shutdown().await;
 }
 
@@ -628,6 +658,14 @@ async fn refused(
     }
 }
 
+/// The ending the node published for request `rid`.
+async fn ended_spawn(d: &Daemon, rid: &str) -> SpawnEnded {
+    next_spawn_ended(&mut d.spawns_topic(), "spawn ended", |e| {
+        e.request_id == rid
+    })
+    .await
+}
+
 /// A spawn gate raised from a turn is withdrawn when that turn is interrupted: the call fails
 /// with `spawn_withdrawn`, the gate leaves the session, a late "allow" is refused and starts
 /// nothing.
@@ -642,8 +680,15 @@ async fn spawn_gate_is_withdrawn_when_the_asking_turn_is_interrupted() {
     let e = refused("withdrawn", call).await;
     assert_eq!(e.code, codes::SPAWN_WITHDRAWN, "{e:?}");
     assert!(e.message.contains("interrupted"), "{}", e.message);
-    x.a.assert_withdrawn(&busy, gate.request_id(), "allow_once")
-        .await;
+    // The session, the node's final state and the agent say the same.
+    let r =
+        x.a.assert_withdrawn(&busy, gate.request_id(), "allow_once", "turn_interrupted")
+            .await;
+    assert_eq!(r.detail.as_deref(), Some(e.message.as_str()));
+    let ended = ended_spawn(&x.a, "r1").await;
+    assert_eq!(ended.end, End::new(EndCode::TurnInterrupted));
+    assert_eq!(ended.detail.as_deref(), Some(e.message.as_str()));
+    assert_eq!(ended.from, busy);
     assert_eq!(x.sup.st().launch_calls, 0);
     x.hub.shutdown().await;
 }
@@ -701,7 +746,12 @@ async fn spawn_gate_is_withdrawn_when_the_mcp_call_is_cancelled_or_its_client_di
         .cancel(Some("turn interrupted".into()))
         .await
         .unwrap();
-    x.a.assert_withdrawn(&x.orch, &rid, "allow_once").await;
+    let r =
+        x.a.assert_withdrawn(&x.orch, &rid, "allow_once", "cancelled")
+            .await;
+    assert!(r.detail.is_some_and(|d| d.contains("cancelled")));
+    let ended = ended_spawn(&x.a, &rid["wasl-spawn-".len()..]).await;
+    assert_eq!(ended.end, End::new(EndCode::Cancelled));
 
     // Disconnected (the MCP server process goes away with its stdio).
     let handle = client
@@ -717,7 +767,10 @@ async fn spawn_gate_is_withdrawn_when_the_mcp_call_is_cancelled_or_its_client_di
     let rid = first_gate(&snap).unwrap();
     drop(handle);
     within("mcp client closes", client.cancel()).await.unwrap();
-    x.a.assert_withdrawn(&x.orch, &rid, "allow_once").await;
+    x.a.assert_withdrawn(&x.orch, &rid, "allow_once", "caller_gone")
+        .await;
+    let ended = ended_spawn(&x.a, &rid["wasl-spawn-".len()..]).await;
+    assert_eq!(ended.end, End::new(EndCode::CallerGone));
     assert_eq!(x.sup.st().launch_calls, 0);
     x.hub.shutdown().await;
 }
@@ -733,6 +786,10 @@ async fn spawn_past_its_deadline_is_refused_or_withdrawn() {
     let e = refused("expired", pending_spawn(&x.a, &x.orch, "r0", late)).await;
     assert_eq!(e.code, codes::SPAWN_EXPIRED, "{e:?}");
     assert!(e.message.contains("deadline"), "{}", e.message);
+    // Refused on arrival, and still a recorded ending.
+    let ended = ended_spawn(&x.a, "r0").await;
+    assert_eq!(ended.end, End::new(EndCode::DeadlinePassed));
+    assert_eq!(ended.detail.as_deref(), Some(e.message.as_str()));
 
     let mut soon = spec("w1", None, Some("what is 6*7?"));
     soon.deadline_secs = Some(1);
@@ -740,8 +797,141 @@ async fn spawn_past_its_deadline_is_refused_or_withdrawn() {
     let gate = spawn_gate(&x.a, &x.orch, "r1").await;
     let e = refused("expired while asking", call).await;
     assert_eq!(e.code, codes::SPAWN_EXPIRED, "{e:?}");
-    x.a.assert_withdrawn(&x.orch, gate.request_id(), "allow_once")
-        .await;
+    let r =
+        x.a.assert_withdrawn(&x.orch, gate.request_id(), "allow_once", "deadline_passed")
+            .await;
+    assert_eq!(r.detail.as_deref(), Some(e.message.as_str()));
+    assert_eq!(
+        ended_spawn(&x.a, "r1").await.end,
+        End::new(EndCode::DeadlinePassed)
+    );
     assert_eq!(x.sup.st().launch_calls, 0);
+    x.hub.shutdown().await;
+}
+
+/// The asking turn ends on its own (not interrupted) while the gate waits: the blocked tool
+/// call can no longer get a result, so the request is withdrawn as `turn_ended`.
+#[tokio::test]
+async fn spawn_gate_is_withdrawn_when_the_asking_turn_ends() {
+    let x = setup(8).await;
+    // The turn's own work outlasts the time the request needs to raise its gate.
+    let asker = x.a.session(&slow_worker("done", 5000)).await;
+    x.a.start_turn(&asker).await;
+    let call = pending_spawn(&x.a, &asker, "r1", spec("w", None, None));
+    let gate = spawn_gate(&x.a, &asker, "r1").await;
+    let e = refused("withdrawn", call).await;
+    assert_eq!(e.code, codes::SPAWN_WITHDRAWN, "{e:?}");
+    assert!(e.message.contains("ended"), "{}", e.message);
+    let r =
+        x.a.assert_withdrawn(&asker, gate.request_id(), "allow_once", "turn_ended")
+            .await;
+    assert_eq!(r.detail.as_deref(), Some(e.message.as_str()));
+    assert_eq!(
+        ended_spawn(&x.a, "r1").await.end,
+        End::new(EndCode::TurnEnded)
+    );
+    assert_eq!(x.sup.st().launch_calls, 0);
+    x.hub.shutdown().await;
+}
+
+/// The asking session's process ends while the gate waits (the runtime takes the gate down
+/// with it, saying why), or the session is deleted: the request ends either way.
+#[tokio::test]
+async fn spawn_request_ends_with_its_asking_session() {
+    let x = setup(8).await;
+    let stopped = x.a.session(&Scenario::builder().build()).await;
+    let call = pending_spawn(&x.a, &stopped, "r1", spec("w", None, None));
+    let gate = spawn_gate(&x.a, &stopped, "r1").await;
+    x.a.client.stop(&sid(&stopped)).await.unwrap();
+    let e = refused("session ended", call).await;
+    assert_eq!(e.code, codes::SPAWN_WITHDRAWN, "{e:?}");
+    let r =
+        x.a.assert_withdrawn(&stopped, gate.request_id(), "allow_once", "session_stopped")
+            .await;
+    assert_eq!(r.detail, None, "the runtime's own code carries no text");
+    let ended = ended_spawn(&x.a, "r1").await;
+    assert_eq!(ended.end, End::new(EndCode::SessionEnded));
+    assert_eq!(ended.detail.as_deref(), Some(e.message.as_str()));
+
+    // Deleting a running session stops it and then removes it: the watcher sees the process
+    // end or the session vanish, whichever it reads first, and both are true.
+    let doomed = x.a.session(&Scenario::builder().build()).await;
+    let call = pending_spawn(&x.a, &doomed, "r2", spec("w", None, None));
+    spawn_gate(&x.a, &doomed, "r2").await;
+    x.a.client.delete(&sid(&doomed)).await.unwrap();
+    let e = refused("session deleted", call).await;
+    assert_eq!(e.code, codes::SPAWN_WITHDRAWN, "{e:?}");
+    let end = ended_spawn(&x.a, "r2").await.end;
+    assert!(
+        end == End::new(EndCode::SessionEnded) || end == End::new(EndCode::SessionGone),
+        "{end:?}"
+    );
+    assert_eq!(x.sup.st().launch_calls, 0);
+    x.hub.shutdown().await;
+}
+
+/// A session that is not running cannot show the gate: the request ends as
+/// `gate_unavailable`, `spawn_unavailable` for the agent.
+#[tokio::test]
+async fn spawn_from_a_stopped_session_ends_as_gate_unavailable() {
+    let x = setup(8).await;
+    let gone = x.a.session(&Scenario::builder().build()).await;
+    x.a.client.stop(&sid(&gone)).await.unwrap();
+    x.a.wait_snapshot(&sid(&gone), "stopped", |s| s.phase.name() == "exited")
+        .await;
+    let e = refused(
+        "no gate",
+        pending_spawn(&x.a, &gone, "r1", spec("w", None, None)),
+    )
+    .await;
+    assert_eq!(e.code, codes::SPAWN_UNAVAILABLE, "{e:?}");
+    let ended = ended_spawn(&x.a, "r1").await;
+    assert_eq!(ended.end, End::new(EndCode::GateUnavailable));
+    assert_eq!(ended.detail.as_deref(), Some(e.message.as_str()));
+    x.hub.shutdown().await;
+}
+
+/// The supervisor's two refusals are endings with their own codes: a plan it refuses, and a
+/// launch it cannot do after the human approved.
+#[tokio::test]
+async fn supervisor_refusal_and_launch_failure_are_recorded_with_their_codes() {
+    let x = setup(8).await;
+    let e = refused(
+        "refused",
+        pending_spawn(&x.a, &x.orch, "r1", spec("w", Some("zz"), None)),
+    )
+    .await;
+    assert_eq!(e.code, codes::SPAWN_REFUSED, "{e:?}");
+    let ended = ended_spawn(&x.a, "r1").await;
+    assert_eq!(
+        ended.end,
+        End::caused_by(EndCode::Refused, codes::SPAWN_REFUSED)
+    );
+    assert_eq!(ended.detail.as_deref(), Some(e.message.as_str()));
+    // A retry with the same id gets the same answer (the request is settled).
+    let again = refused(
+        "refused again",
+        pending_spawn(&x.a, &x.orch, "r1", spec("w", Some("zz"), None)),
+    )
+    .await;
+    assert_eq!(again.code, codes::SPAWN_REFUSED);
+
+    let call = pending_spawn(&x.a, &x.orch, "r2", spec("boom", None, None));
+    let gate = spawn_gate(&x.a, &x.orch, "r2").await;
+    x.a.answer(
+        &x.orch,
+        gate.request_id(),
+        SpawnDecision::AllowOnce.to_gate(),
+    )
+    .await;
+    let e = refused("launch failed", call).await;
+    assert_eq!(e.code, "launch_broke", "{e:?}");
+    let ended = ended_spawn(&x.a, "r2").await;
+    assert_eq!(
+        ended.end,
+        End::caused_by(EndCode::LaunchFailed, "launch_broke")
+    );
+    assert_eq!(ended.detail.as_deref(), Some(e.message.as_str()));
+    assert_eq!(x.sup.st().launch_calls, 1);
     x.hub.shutdown().await;
 }

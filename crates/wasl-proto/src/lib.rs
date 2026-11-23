@@ -36,6 +36,7 @@
 //! |---|---|
 //! | [`topics::TASKS`] | [`TaskEvent`] — replay from a cursor yields the latest state of every task changed after it, then live changes |
 //! | [`topics::EDGES`] | [`EdgeEvent`] — edge policy changes (e.g. "always allow" chosen in a handoff gate) for the supervisor to persist |
+//! | [`topics::SPAWNS`] | [`SpawnEnded`] — a spawn request that reached its final state, launched or why not (replay yields every ended request after the cursor, then live) |
 //!
 //! # Handoff gates
 //!
@@ -54,12 +55,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use wasit_core::{ChoiceText, GateChoice, GateChoiceKind, GateDecision, Usage};
 
 pub mod diag;
+pub mod end;
 pub mod spawn;
+pub use end::{bounded, End, EndCode, END_DETAIL_MAX};
 pub use spawn::{
     is_spawn_refusal, spawn_choice, spawn_choices, spawn_gate, spawn_request_id, DismissAsk,
     DismissReply, DismissRequest, SpawnApproval, SpawnAsk, SpawnCancel, SpawnDecision, SpawnDriver,
-    SpawnHost, SpawnLaunch, SpawnLaunched, SpawnPlan, SpawnReply, SpawnRequest, SpawnSpec,
-    Spawnable, SpawnableAsk,
+    SpawnEnded, SpawnHost, SpawnLaunch, SpawnLaunched, SpawnPlan, SpawnReply, SpawnRequest,
+    SpawnSpec, Spawnable, SpawnableAsk,
 };
 
 /// Method names.
@@ -97,6 +100,7 @@ pub mod methods {
 pub mod topics {
     pub const TASKS: &str = "wasl.tasks";
     pub const EDGES: &str = "wasl.edges";
+    pub const SPAWNS: &str = "wasl.spawns";
 }
 
 /// The route prefix the node serves (register it in a `ServiceMux`).

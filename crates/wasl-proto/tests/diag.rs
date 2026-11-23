@@ -255,6 +255,16 @@ fn table() -> Vec<(WaslEvent, &'static str, &'static str, Vec<&'static str>)> {
             vec!["task", "error"],
         ),
         (
+            WaslEvent::GateWithdrawn {
+                session: id("abcdefghijkl"),
+                gate: id("wasl-handoff-tabc"),
+                reason: Code::st("turn_interrupted"),
+            },
+            "wasl.gate.withdrawn",
+            "info",
+            vec!["session", "gate", "reason"],
+        ),
+        (
             WaslEvent::GateWithdrawFailed {
                 session: id("abcdefghijkl"),
                 gate: id("wasl-handoff-tabc"),
@@ -337,6 +347,16 @@ fn table() -> Vec<(WaslEvent, &'static str, &'static str, Vec<&'static str>)> {
             "wasl.peers.status_failed",
             "warn",
             vec!["host", "reason", "sessions", "error"],
+        ),
+        (
+            WaslEvent::SpawnEnded {
+                request: id("r1"),
+                code: Code::st("refused"),
+                cause: Some(Code::st("spawn_limit")),
+            },
+            "wasl.spawn.ended",
+            "info",
+            vec!["request", "code", "cause"],
         ),
         (
             WaslEvent::SpawnTopologyFailed {

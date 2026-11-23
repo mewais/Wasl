@@ -15,12 +15,13 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::watch;
 use wasit_control::{codes as ctl_codes, RequestOpts, RpcError, Uplink};
+use wasit_core::GateReason;
 use wasit_diag::{Ident, Ms};
 use wasit_runtime::wire::SessionId;
 use wasl_proto::diag::{emit, JournalSite, WaslEvent};
 use wasl_proto::{
     codes, methods, spawn_gate, spawn_request_id, Ack, DelegateRequest, DismissAsk, DismissReply,
-    DismissRequest, SpawnApproval, SpawnAsk, SpawnCancel, SpawnDecision, SpawnLaunch,
+    DismissRequest, End, EndCode, SpawnApproval, SpawnAsk, SpawnCancel, SpawnDecision, SpawnLaunch,
     SpawnLaunched, SpawnPlan, SpawnReply, SpawnRequest, Spawnable, SpawnableAsk, TaskMode,
 };
 
@@ -69,6 +70,7 @@ impl Drop for Waiting {
             }
             node.withdraw_spawn(
                 &id,
+                End::new(EndCode::CallerGone),
                 "the spawn request was withdrawn: its caller stopped waiting (the tool call was \
                  cancelled or its client disconnected)"
                     .into(),
@@ -207,23 +209,41 @@ impl Node {
         if let Some(rx) = self.spawn_watch(&req.request_id, &me)? {
             return self.spawn_outcome(&req.request_id, rx).await;
         }
-        let (for_task, deadline_ms) = self.spawn_deadline(&req)?;
+        let (for_task, deadline_ms) = match self.spawn_deadline(&req) {
+            Ok(d) => d,
+            Err(why) => {
+                // Final: the request would be dead on arrival.
+                let end = End::new(EndCode::DeadlinePassed);
+                return Err(self.refuse_spawn(&req, &me, end, why).await);
+            }
+        };
         let auth = self.authority()?;
         let ask = SpawnAsk {
             request_id: req.request_id.clone(),
             parent: me.clone(),
             spec: req.spec.clone(),
         };
-        let plan = self
+        let plan = match self
             .patiently(self.inner.cfg.spawn_connect_wait, || auth.plan(ask.clone()))
             .await
-            .map_err(|e| {
-                if e.is_retryable() {
-                    unavailable(format!("the supervisor cannot be reached ({})", e.message))
-                } else {
-                    e
-                }
-            })?;
+        {
+            Ok(plan) => plan,
+            // The supervisor cannot be reached: nothing is recorded (nobody could be told, and
+            // the agent may ask again).
+            Err(e) if e.is_retryable() => {
+                return Err(unavailable(format!(
+                    "the supervisor cannot be reached ({})",
+                    e.message
+                )))
+            }
+            // The supervisor's final answer: recorded as the request's ending, and returned
+            // to the agent as it came.
+            Err(e) => {
+                let end = End::caused_by(EndCode::Refused, e.code.clone());
+                self.refuse_spawn(&req, &me, end, e.message.clone()).await;
+                return Err(e);
+            }
+        };
         let phase = match plan.approval {
             SpawnApproval::Allowed => SpawnPhase::Launching {
                 decision: SpawnDecision::Policy,
@@ -247,7 +267,7 @@ impl Node {
                     request_id: req.request_id.clone(),
                     from: me,
                     spec: req.spec,
-                    plan,
+                    plan: Some(plan),
                     phase: phase.clone(),
                     updated_ms: now_ms(),
                     for_task,
@@ -273,11 +293,12 @@ impl Node {
         self.spawn_outcome(&req.request_id, rx).await
     }
 
-    /// The task the caller works on and the spawn's deadline; refused when it already passed.
+    /// The task the caller works on and the spawn's deadline; the reason (in words) when it
+    /// already passed.
     fn spawn_deadline(
         &self,
         req: &SpawnRequest,
-    ) -> Result<(Option<wasl_proto::TaskId>, Option<u64>), RpcError> {
+    ) -> Result<(Option<wasl_proto::TaskId>, Option<u64>), String> {
         let now = now_ms();
         let st = self.lock();
         let parent = st
@@ -300,31 +321,86 @@ impl Node {
                 Some((id, pd)) if *pd == d => format!("the task you are working on ({id})"),
                 _ => "the first task".to_string(),
             };
-            return Err(err(
-                codes::SPAWN_EXPIRED,
-                format!("not spawned: the deadline of {why} has already passed"),
+            return Err(format!(
+                "not spawned: the deadline of {why} has already passed"
             ));
         }
         Ok((parent.map(|p| p.0), deadline))
     }
 
+    /// Record a request that ended before it had a plan or a gate (a final refusal) and
+    /// return what the agent's call fails with. A record of this id that is already there (a
+    /// concurrent retry got here first) is left as it is.
+    async fn refuse_spawn(
+        &self,
+        req: &SpawnRequest,
+        me: &wasl_proto::AgentId,
+        end: End,
+        message: String,
+    ) -> RpcError {
+        let phase = SpawnPhase::failed(end, message);
+        let error = match &phase {
+            SpawnPhase::Failed { code, message, .. } => err(code, message.clone()),
+            _ => unreachable!("failed() builds a failure"),
+        };
+        let ack = {
+            let mut st = self.lock();
+            if st.spawns.contains_key(&req.request_id) {
+                None
+            } else {
+                let p = SpawnPersist {
+                    request_id: req.request_id.clone(),
+                    from: me.clone(),
+                    spec: req.spec.clone(),
+                    plan: None,
+                    phase: phase.clone(),
+                    updated_ms: now_ms(),
+                    for_task: None,
+                    deadline_ms: None,
+                };
+                st.spawns.insert(
+                    req.request_id.clone(),
+                    SpawnRec {
+                        watch: watch::channel(phase).0,
+                        p,
+                        waiters: watch::channel(0).0,
+                    },
+                );
+                self.persist_spawn(&mut st, &req.request_id)
+            }
+        };
+        if let Some(a) = ack {
+            if let Err(e) = durable(a).await {
+                emit(WaslEvent::JournalNotDurable {
+                    site: JournalSite::Spawn,
+                    error: e.diag(),
+                });
+            }
+        }
+        error
+    }
+
     /// Why an asking request may no longer be approved (its deadline passed, or the task it
-    /// was for is no longer being worked on).
-    fn spawn_expired(&self, id: &str) -> Option<String> {
+    /// was for is no longer being worked on), as its ending and in words.
+    fn spawn_expired(&self, id: &str) -> Option<(End, String)> {
         let st = self.lock();
         let r = st.spawns.get(id)?;
         if let Some(t) = &r.p.for_task {
             let running = st.inbound.get(t).is_some_and(|i| !i.p.state.is_terminal());
             if !running {
-                return Some(format!(
-                    "not spawned: the task it was for ({t}) ended before the spawn was approved"
+                return Some((
+                    End::new(EndCode::TaskEnded),
+                    format!(
+                        "not spawned: the task it was for ({t}) ended before the spawn was approved"
+                    ),
                 ));
             }
         }
         match r.p.deadline_ms {
-            Some(d) if d <= now_ms() => {
-                Some("not spawned: its deadline passed before the spawn was approved".into())
-            }
+            Some(d) if d <= now_ms() => Some((
+                End::new(EndCode::DeadlinePassed),
+                "not spawned: its deadline passed before the spawn was approved".into(),
+            )),
             _ => None,
         }
     }
@@ -337,6 +413,7 @@ impl Node {
         if self.spawn_watch(&req.request_id, &me)?.is_some() {
             self.withdraw_spawn(
                 &req.request_id,
+                End::new(EndCode::Cancelled),
                 "the spawn request was withdrawn: the tool call was cancelled".into(),
             )
             .await;
@@ -344,29 +421,24 @@ impl Node {
         Ok(Ack {})
     }
 
-    /// Withdraw a request that still asks the human: it fails with `spawn_withdrawn` and its
-    /// gate is taken down (a late answer is then refused by the runtime). No-op once the
-    /// request was decided.
-    pub(crate) async fn withdraw_spawn(&self, id: &str, message: String) {
-        self.withdraw_spawn_as(id, codes::SPAWN_WITHDRAWN, message)
-            .await
-    }
-
+    /// Withdraw a request that still asks the human: it ends as `end` (`message` is its
+    /// detail, the same for the agent, the record and the gate's resolution) and its gate is
+    /// taken down (a late answer is then refused by the runtime). No-op once the request was
+    /// decided.
+    ///
     /// Runs to the end even when the caller is dropped (an RPC handler whose client went away
     /// right after asking): a settled request must not keep its gate up.
-    async fn withdraw_spawn_as(&self, id: &str, code: &str, message: String) {
+    pub(crate) async fn withdraw_spawn(&self, id: &str, end: End, message: String) {
         let node = self.clone();
-        let (id, code) = (id.to_string(), code.to_string());
-        let task = tokio::spawn(async move { node.withdraw_spawn_now(&id, &code, message).await });
+        let id = id.to_string();
+        let task = tokio::spawn(async move { node.withdraw_spawn_now(&id, end, message).await });
         // Only a panic in the task (already reported) can fail the join.
         let _ = task.await;
     }
 
-    async fn withdraw_spawn_now(&self, id: &str, code: &str, message: String) {
-        let failed = SpawnPhase::Failed {
-            code: code.into(),
-            message,
-        };
+    async fn withdraw_spawn_now(&self, id: &str, end: End, message: String) {
+        let reason = end.gate_reason(&message);
+        let failed = SpawnPhase::failed(end, message);
         let Some((SpawnPhase::Asking { gate }, from)) = self
             .replace_spawn_phase(id, |p| matches!(p, SpawnPhase::Asking { .. }), failed)
             .await
@@ -376,7 +448,7 @@ impl Node {
         // Raised as of the transition: take it down. Not raised yet: the raiser finds the
         // request no longer asking and takes its gate down itself.
         if let (true, Some(sid)) = (gate.raised, SessionId::parse(&from.session)) {
-            self.withdraw_gate(&sid, &gate.request_id).await;
+            self.withdraw_gate(&sid, &gate.request_id, reason).await;
         }
     }
 
@@ -449,7 +521,7 @@ impl Node {
         };
         match phase {
             SpawnPhase::Done { reply } => Ok(reply),
-            SpawnPhase::Failed { code, message } => Err(err(&code, message)),
+            SpawnPhase::Failed { code, message, .. } => Err(err(&code, message)),
             _ => Err(err(codes::IO, "spawn request in an unexpected state")),
         }
     }
@@ -459,6 +531,14 @@ impl Node {
         let rev = st.next_rev();
         let r = st.spawns.get_mut(id)?;
         r.p.updated_ms = now_ms();
+        if let Some(ended) = r.p.ended() {
+            // The final state is journaled once: this is where the ending is recorded.
+            emit(WaslEvent::SpawnEnded {
+                request: Ident::new(id),
+                code: wasit_diag::Code::new(ended.end.code.as_str()),
+                cause: ended.end.cause.as_deref().map(wasit_diag::Code::new),
+            });
+        }
         r.watch.send_replace(r.p.phase.clone());
         Some(
             self.inner
@@ -489,15 +569,18 @@ impl Node {
         }
     }
 
-    async fn fail_spawn(&self, id: &str, code: &str, message: String) {
-        self.set_spawn_phase(
-            id,
-            SpawnPhase::Failed {
-                code: code.into(),
-                message,
-            },
-        )
-        .await;
+    async fn fail_spawn(&self, id: &str, end: End, message: String) {
+        self.set_spawn_phase(id, SpawnPhase::failed(end, message))
+            .await;
+    }
+
+    /// Why the (already ended) request ended, as a gate resolution: for a gate that was raised
+    /// after its request was withdrawn.
+    fn spawn_gate_reason(&self, id: &str) -> GateReason {
+        match self.lock().spawns.get(id).map(|r| &r.p.phase) {
+            Some(SpawnPhase::Failed { end, message, .. }) => end.gate_reason(message),
+            _ => GateReason::new(GateReason::WITHDRAWN),
+        }
     }
 
     /// Drive a request from wherever it stands (also used on recovery).
@@ -530,7 +613,8 @@ impl Node {
             let Some(sid) = SessionId::parse(&r.p.from.session) else {
                 return;
             };
-            let gate = spawn_gate(&id, &r.p.plan, r.p.spec.instruction.clone());
+            let Some(plan) = &r.p.plan else { return };
+            let gate = spawn_gate(&id, plan, r.p.spec.instruction.clone());
             let (cursor, turn) = self
                 .sessions()
                 .snapshot(&sid)
@@ -552,8 +636,10 @@ impl Node {
                     .transition_spawn(&id, asking, SpawnPhase::Asking { gate: info.clone() })
                     .await
                 {
-                    // Withdrawn while the gate was being raised: take it back down.
-                    self.withdraw_gate(&sid, &info.request_id).await;
+                    // Withdrawn while the gate was being raised: take it back down, saying
+                    // what the request's ending was.
+                    let reason = self.spawn_gate_reason(&id);
+                    self.withdraw_gate(&sid, &info.request_id, reason).await;
                     return;
                 }
                 self.watch_spawn_gate(id, info).await;
@@ -561,7 +647,7 @@ impl Node {
             Err(e) => {
                 self.fail_spawn(
                     &id,
-                    codes::SPAWN_UNAVAILABLE,
+                    End::new(EndCode::GateUnavailable),
                     format!("the spawn gate could not be raised on the calling session: {e}"),
                 )
                 .await
@@ -580,7 +666,13 @@ impl Node {
         let (sid, name) = {
             let st = self.lock();
             let Some(r) = st.spawns.get(&id) else { return };
-            (SessionId::parse(&r.p.from.session), r.p.plan.name.clone())
+            (
+                SessionId::parse(&r.p.from.session),
+                r.p.plan
+                    .as_ref()
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default(),
+            )
         };
         let Some(sid) = sid else { return };
         // The blocked `spawn_agent` call cannot receive a result once its turn is over.
@@ -593,9 +685,9 @@ impl Node {
                 match tokio::time::timeout(left, answer).await {
                     Ok(a) => a,
                     Err(_) => {
-                        self.withdraw_spawn_as(
+                        self.withdraw_spawn(
                             &id,
-                            codes::SPAWN_EXPIRED,
+                            End::new(EndCode::DeadlinePassed),
                             "the spawn request was withdrawn: its deadline passed before anyone \
                              answered"
                                 .into(),
@@ -617,20 +709,21 @@ impl Node {
                 // Taken down by `withdraw_spawn` (already failed), or by someone else.
                 self.fail_asking(
                     &id,
-                    codes::SPAWN_WITHDRAWN,
+                    End::new(EndCode::GateGone),
                     "the spawn request was withdrawn before anyone answered".into(),
                 )
                 .await;
                 return;
             }
             Answer::TurnEnded { interrupted } => {
-                let how = if interrupted {
-                    "was interrupted"
+                let (code, how) = if interrupted {
+                    (EndCode::TurnInterrupted, "was interrupted")
                 } else {
-                    "ended"
+                    (EndCode::TurnEnded, "ended")
                 };
                 self.withdraw_spawn(
                     &id,
+                    End::new(code),
                     format!(
                         "the spawn request was withdrawn: the asking turn {how} before anyone answered"
                     ),
@@ -642,7 +735,16 @@ impl Node {
                 // The runtime withdrew the gate with the process.
                 self.fail_asking(
                     &id,
-                    codes::SPAWN_WITHDRAWN,
+                    End::new(EndCode::SessionEnded),
+                    format!("the spawn request was withdrawn: {reason}"),
+                )
+                .await;
+                return;
+            }
+            Answer::SessionGone(reason) => {
+                self.fail_asking(
+                    &id,
+                    End::new(EndCode::SessionGone),
                     format!("the spawn request was withdrawn: {reason}"),
                 )
                 .await;
@@ -654,11 +756,12 @@ impl Node {
                 Some(r) => format!("the human denied spawning {name}: {r}"),
                 None => format!("the human denied spawning {name}"),
             };
-            self.fail_asking(&id, codes::SPAWN_DENIED, message).await;
+            self.fail_asking(&id, End::new(EndCode::Denied), message)
+                .await;
             return;
         }
-        if let Some(why) = self.spawn_expired(&id) {
-            self.fail_asking(&id, codes::SPAWN_EXPIRED, why).await;
+        if let Some((end, why)) = self.spawn_expired(&id) {
+            self.fail_asking(&id, end, why).await;
             return;
         }
         let launching = SpawnPhase::Launching {
@@ -673,11 +776,8 @@ impl Node {
         }
     }
 
-    async fn fail_asking(&self, id: &str, code: &str, message: String) {
-        let failed = SpawnPhase::Failed {
-            code: code.into(),
-            message,
-        };
+    async fn fail_asking(&self, id: &str, end: End, message: String) {
+        let failed = SpawnPhase::failed(end, message);
         self.transition_spawn(id, |p| matches!(p, SpawnPhase::Asking { .. }), failed)
             .await;
     }
@@ -694,8 +794,8 @@ impl Node {
             }
         };
         let Some(auth) = self.spawn_authority() else {
-            self.fail_spawn(&id, codes::SPAWN_UNAVAILABLE, NO_SUPERVISOR.into())
-                .await;
+            let end = End::caused_by(EndCode::LaunchFailed, codes::SPAWN_UNAVAILABLE);
+            self.fail_spawn(&id, end, NO_SUPERVISOR.into()).await;
             return;
         };
         match self
@@ -714,12 +814,14 @@ impl Node {
                 self.finish_spawn(id, launched).await;
             }
             Err(e) => {
-                let code = if e.is_retryable() {
+                // A supervisor that stayed unreachable ends it as `spawn_unavailable`.
+                let cause = if e.is_retryable() {
                     codes::SPAWN_UNAVAILABLE.to_string()
                 } else {
                     e.code.clone()
                 };
-                self.fail_spawn(&id, &code, e.message).await;
+                self.fail_spawn(&id, End::caused_by(EndCode::LaunchFailed, cause), e.message)
+                    .await;
             }
         }
     }
