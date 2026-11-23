@@ -685,6 +685,9 @@ async fn spawn_gate_is_withdrawn_when_the_asking_turn_is_interrupted() {
         x.a.assert_withdrawn(&busy, gate.request_id(), "allow_once", "turn_interrupted")
             .await;
     assert_eq!(r.detail.as_deref(), Some(e.message.as_str()));
+    // The session itself resolved the gate, before the interrupted turn completed.
+    x.a.assert_gate_resolved_before_its_turn_completed(&busy, gate.request_id(), true)
+        .await;
     let ended = ended_spawn(&x.a, "r1").await;
     assert_eq!(ended.end, End::new(EndCode::TurnInterrupted));
     assert_eq!(ended.detail.as_deref(), Some(e.message.as_str()));
@@ -826,6 +829,10 @@ async fn spawn_gate_is_withdrawn_when_the_asking_turn_ends() {
         x.a.assert_withdrawn(&asker, gate.request_id(), "allow_once", "turn_ended")
             .await;
     assert_eq!(r.detail.as_deref(), Some(e.message.as_str()));
+    // The session itself resolved the gate, in the step that ended the turn, ahead of the
+    // turn's completion.
+    x.a.assert_gate_resolved_before_its_turn_completed(&asker, gate.request_id(), false)
+        .await;
     assert_eq!(
         ended_spawn(&x.a, "r1").await.end,
         End::new(EndCode::TurnEnded)

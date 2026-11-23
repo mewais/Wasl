@@ -13,12 +13,19 @@
 //! - spawn (the blocked `spawn_agent` call): the turn that called it ends or is interrupted,
 //!   the call is cancelled or its MCP client disconnects (no `wasl.spawn` caller waits any
 //!   more), the session's process ends, or its deadline passes before approval.
+//!
+//! The turn is not watched from here. The gate is raised *bound to the turn that asks*
+//! ([`TurnBinding`]), and the session itself resolves it — ordered before the turn's own
+//! completion — with the runtime's `turn_interrupted` / `turn_ended`. The watcher only observes
+//! that `gate_resolved` ([`Answer::TurnEnded`]) and settles its request. Everything else that
+//! takes a gate down (the request cancelled, a deadline, a decision made elsewhere, the caller
+//! gone) is resolved by this node, as before.
 
-use wasit_core::{AgentEvent, Command, GateDecision, GateReason};
+use wasit_core::{AgentEvent, Command, GateDecision, GateReason, TurnBinding};
 use wasit_runtime::wire::{SessionEventKind, SessionId};
 use wasit_runtime::StreamEnd;
-use wasl_proto::diag::{emit, task, WaslEvent, Watcher, WithdrawCause};
-use wasl_proto::{codes, EndCode, HandoffDecision, TaskId, TaskState};
+use wasl_proto::diag::{emit, task, WaslEvent, Watcher};
+use wasl_proto::{codes, HandoffDecision, TaskId, TaskState};
 
 use crate::diag::{rpc_error, session, stream_error};
 use crate::node::Node;
@@ -35,29 +42,57 @@ pub(crate) enum Answer {
     SessionEnded(String),
     /// The session was deleted, or its events cannot be followed any more.
     SessionGone(String),
-    /// The asking turn ended after the raise (only for gates raised during a turn, and only
-    /// for the turn ends the caller said end the request).
+    /// The session resolved the gate because the turn it was raised for was interrupted or
+    /// ended; `detail` is the sentence this node gave the binding for it.
     TurnEnded {
         interrupted: bool,
+        detail: Option<String>,
     },
 }
 
+/// What a handoff's task and gate say when the turn that delegated is interrupted.
+fn handoff_interrupted_text() -> String {
+    "withdrawn: the turn that delegated was interrupted before the handoff was approved".into()
+}
+
+/// A handoff gate is bound to the turn that delegated, for an interrupt only: the task outlives
+/// a turn that ends normally (its result can be awaited later).
+pub(crate) fn handoff_binding() -> TurnBinding {
+    TurnBinding::Interrupt {
+        detail: Some(handoff_interrupted_text()),
+    }
+}
+
+/// What a spawn request and its gate say when the turn that asked ended or was interrupted.
+pub(crate) fn spawn_turn_text(interrupted: bool) -> String {
+    let how = if interrupted {
+        "was interrupted"
+    } else {
+        "ended"
+    };
+    format!("the spawn request was withdrawn: the asking turn {how} before anyone answered")
+}
+
+/// A spawn gate is bound to the turn that asked, for every end of it: the blocked
+/// `spawn_agent` call can no longer receive a result once its turn is over.
+pub(crate) fn spawn_binding() -> TurnBinding {
+    TurnBinding::Turn {
+        interrupted: Some(spawn_turn_text(true)),
+        ended: Some(spawn_turn_text(false)),
+    }
+}
+
 impl Node {
-    /// Follow `sid`'s events from `gate.cursor` until the gate is answered or withdrawn, the
-    /// session ends, `still()` turns false, or (for a gate raised during a turn) that turn
-    /// ends in a way `ends_request(interrupted)` accepts.
+    /// Follow `sid`'s events from `gate.cursor` until the gate is answered or resolved (by the
+    /// session: its turn or process ended; or by this node), the session ends, or `still()`
+    /// turns false.
     pub(crate) async fn await_answer(
         &self,
         sid: &SessionId,
         gate: &GateInfo,
         still: impl Fn() -> bool,
-        ends_request: impl Fn(bool) -> bool,
     ) -> Answer {
         let mut from = Some(gate.cursor);
-        // Turn ends before the raise belong to earlier turns; only the first one after it is
-        // the asking turn's.
-        let mut raised = false;
-        let mut bound = gate.turn;
         'outer: loop {
             let mut stream = match self.sessions().subscribe(sid, from).await {
                 Ok(s) => s,
@@ -96,35 +131,29 @@ impl Node {
                     SessionEventKind::Agent {
                         event: AgentEvent::GateResolved { request_id, reason },
                     } if *request_id == gate.request_id => {
-                        // Taken down by us (the request is settled), or by the runtime because
-                        // the process ended or the session was stopped (its exit follows).
-                        let ended = reason.as_ref().is_some_and(|r| {
-                            r.code == GateReason::PROCESS_ENDED
-                                || r.code == GateReason::SESSION_STOPPED
-                        });
-                        return if ended {
-                            Answer::SessionEnded(
-                                "the session ended before the gate was answered".into(),
-                            )
-                        } else {
-                            Answer::Gone
+                        // Taken down by us (the request is settled), or by the runtime: the
+                        // turn it was raised for ended or was interrupted, or the process
+                        // ended or was stopped (its exit follows).
+                        return match reason {
+                            Some(r)
+                                if r.code == GateReason::TURN_INTERRUPTED
+                                    || r.code == GateReason::TURN_ENDED =>
+                            {
+                                Answer::TurnEnded {
+                                    interrupted: r.code == GateReason::TURN_INTERRUPTED,
+                                    detail: r.detail.clone(),
+                                }
+                            }
+                            Some(r)
+                                if r.code == GateReason::PROCESS_ENDED
+                                    || r.code == GateReason::SESSION_STOPPED =>
+                            {
+                                Answer::SessionEnded(
+                                    "the session ended before the gate was answered".into(),
+                                )
+                            }
+                            _ => Answer::Gone,
                         };
-                    }
-                    SessionEventKind::Agent {
-                        event: AgentEvent::GateRequested { gate: g },
-                    } if g.request_id() == gate.request_id => raised = true,
-                    SessionEventKind::Agent {
-                        event:
-                            AgentEvent::TurnCompleted {
-                                was_interrupted, ..
-                            },
-                    } if raised && bound => {
-                        if ends_request(*was_interrupted) {
-                            return Answer::TurnEnded {
-                                interrupted: *was_interrupted,
-                            };
-                        }
-                        bound = false;
                     }
                     SessionEventKind::Exited { .. } | SessionEventKind::Lost { .. } => {
                         return Answer::SessionEnded(
@@ -162,15 +191,8 @@ impl Node {
                 .and_then(|r| SessionId::parse(&r.p.task.from.session))
         };
         let Some(sid) = sid else { return };
-        // The task outlives a turn that ends normally (its result can be awaited later); an
-        // interrupted turn takes its pending handoffs with it.
         let answer = self
-            .await_answer(
-                &sid,
-                &gate,
-                || self.still_pending(&id),
-                |interrupted| interrupted,
-            )
+            .await_answer(&sid, &gate, || self.still_pending(&id))
             .await;
         let decision = match answer {
             // The runtime refuses answers that pick no offered choice, so this only fails for a
@@ -196,16 +218,18 @@ impl Node {
                 }
                 return;
             }
-            Answer::TurnEnded { .. } => {
-                let reason = "withdrawn: the turn that delegated was interrupted before the \
-                              handoff was approved"
-                    .to_string();
-                if let Err(e) = self.withdraw(&id, EndCode::TurnInterrupted, reason).await {
-                    emit(WaslEvent::TaskWithdrawFailed {
-                        task: task(&id),
-                        cause: WithdrawCause::TurnInterrupted,
-                        error: rpc_error(&e),
-                    });
+            Answer::TurnEnded { detail, .. } => {
+                // The session took the gate down with the turn (a handoff is bound to an
+                // interrupt only, and the task outlives a turn that ends normally): settle
+                // the task with the sentence the gate says.
+                if self.still_pending(&id) {
+                    self.finish_out(
+                        &id,
+                        TaskState::Cancelled {
+                            reason: detail.unwrap_or_else(handoff_interrupted_text),
+                        },
+                    )
+                    .await;
                 }
                 return;
             }

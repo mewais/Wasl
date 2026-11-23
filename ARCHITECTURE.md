@@ -70,6 +70,20 @@ host daemon A ◀──bridge──▶ hub (RoutingService) ◀──bridge─�
   topic (`SpawnEnded`; cursors are the journal's, replay yields every ended request). Not
   recorded: a supervisor that cannot be reached (nobody to tell; `RequestFailed` in the
   diagnostics, and the agent may ask again).
+- **Gates and the turn that asked.** A handoff or spawn gate is raised *bound to the turn open on
+  the sending session* (`SessionManager::raise_gate_for_turn`, Wasit's `TurnBinding`; rules in
+  Wasit's ARCHITECTURE.md, external gates): a handoff gate follows an interrupt of that turn (the
+  task outlives a turn that ends normally), a spawn gate follows every end of it (the blocked
+  `spawn_agent` call can no longer receive a result). The *session's reducer* resolves the gate,
+  in the step that interrupts or ends the turn and ahead of the turn's own completion, with the
+  runtime's `turn_interrupted` / `turn_ended` (the very words of `EndCode::TurnInterrupted` /
+  `TurnEnded`: one meaning, owned by the runtime) and the sentence the node supplied when it
+  raised the gate. The node does not watch the turn: its watcher only observes `gate_resolved`
+  and settles the task or spawn with the matching ending. A gate raised while no turn is open
+  belongs to the session. Everything else that takes a gate down (cancel, deadline, a decision
+  elsewhere, the caller gone, the supervisor's refusal) stays the node's, via `resolve_gate`. A
+  gate raised before this existed carries no binding and keeps living until answered or
+  withdrawn.
 
 ## Diagnostics
 
@@ -112,5 +126,3 @@ back from the journal or the audit trail.
 - `message` is a task of mode `message` (gated like any delegation; its result is ignored).
 - The multi-daemon tests run on Linux, macOS and Windows (local endpoints are Unix sockets or named pipes).
 - `transfer` is not implemented (a new task mode / node methods later).
-- A spawn gate stays up if the asking turn is interrupted (as a handoff gate does); answering it
-  later still starts the worker.

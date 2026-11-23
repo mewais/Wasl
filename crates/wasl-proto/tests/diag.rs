@@ -277,7 +277,7 @@ fn table() -> Vec<(WaslEvent, &'static str, &'static str, Vec<&'static str>)> {
         (
             WaslEvent::TaskWithdrawFailed {
                 task: id("tabc"),
-                cause: WithdrawCause::TurnInterrupted,
+                cause: WithdrawCause::Deadline,
                 error: err(),
             },
             "wasl.task.withdraw_failed",
@@ -431,7 +431,7 @@ fn an_absent_optional_field_is_left_out_and_enums_are_words() {
             },
             WaslEvent::TaskWithdrawFailed {
                 task: id("tabc"),
-                cause: WithdrawCause::TurnInterrupted,
+                cause: WithdrawCause::Deadline,
                 error: err(),
             },
         ],
@@ -439,7 +439,7 @@ fn an_absent_optional_field_is_left_out_and_enums_are_words() {
     assert!(lines[0].get("error").is_none(), "{}", lines[0]);
     assert_eq!(lines[0]["reason"], "no_route");
     assert!(lines[1].get("task").is_none(), "{}", lines[1]);
-    assert_eq!(lines[2]["cause"], "turn_interrupted");
+    assert_eq!(lines[2]["cause"], "deadline");
 }
 
 #[test]

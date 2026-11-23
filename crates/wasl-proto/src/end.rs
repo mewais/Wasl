@@ -26,10 +26,11 @@ pub enum EndCode {
     /// Spawn: the human denied it (also an answer that is neither allow nor deny).
     Denied,
     /// Spawn: the asking turn ended before anyone answered, so its `spawn_agent` call can no
-    /// longer receive a result.
+    /// longer receive a result. The word is the runtime's own gate reason
+    /// ([`GateReason::TURN_ENDED`]): the session resolves the gate of its turn and says so.
     TurnEnded,
     /// Spawn or handoff: the asking (delegating) turn was interrupted before the gate was
-    /// answered.
+    /// answered. The word is the runtime's own gate reason ([`GateReason::TURN_INTERRUPTED`]).
     TurnInterrupted,
     /// Spawn: the agent's tool call was cancelled. Handoff: the task was cancelled (by the
     /// sender, a supervisor or the human).
@@ -71,8 +72,8 @@ impl EndCode {
         match self {
             EndCode::Launched => "launched",
             EndCode::Denied => "denied",
-            EndCode::TurnEnded => "turn_ended",
-            EndCode::TurnInterrupted => "turn_interrupted",
+            EndCode::TurnEnded => GateReason::TURN_ENDED,
+            EndCode::TurnInterrupted => GateReason::TURN_INTERRUPTED,
             EndCode::Cancelled => "cancelled",
             EndCode::CallerGone => "caller_gone",
             EndCode::SessionEnded => "session_ended",

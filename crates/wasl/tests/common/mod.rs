@@ -455,6 +455,77 @@ impl Daemon {
         reason
     }
 
+    /// The order the session itself guarantees for a gate bound to its asking turn: in `on`'s
+    /// events the gate `request_id` is resolved before the turn it was raised in completes
+    /// (the first completion after the raise) and, when that turn was `interrupted`, right
+    /// behind the interrupt's `input` event, ahead of anything the CLI said about it.
+    pub async fn assert_gate_resolved_before_its_turn_completed(
+        &self,
+        on: &AgentId,
+        request_id: &str,
+        interrupted: bool,
+    ) {
+        self.wait_snapshot(&sid(on), "the turn completed", |s| {
+            s.turns_completed > 0 && s.turn.is_none()
+        })
+        .await;
+        let events = self
+            .client
+            .history(&sid(on), None, 1000)
+            .await
+            .expect("history")
+            .events;
+        let find = |from: usize, f: &dyn Fn(&SessionEventKind) -> bool| {
+            events[from..]
+                .iter()
+                .position(|e| f(&e.kind))
+                .map(|i| i + from)
+        };
+        let requested = find(0, &|k| {
+            matches!(k, SessionEventKind::Agent {
+                event: AgentEvent::GateRequested { gate }
+            } if gate.request_id() == request_id)
+        })
+        .expect("the gate was raised");
+        let resolved = find(requested, &|k| {
+            matches!(k, SessionEventKind::Agent {
+                event: AgentEvent::GateResolved { request_id: r, .. }
+            } if r == request_id)
+        })
+        .expect("the gate was resolved");
+        let completed = find(requested, &|k| {
+            matches!(
+                k,
+                SessionEventKind::Agent {
+                    event: AgentEvent::TurnCompleted { .. }
+                }
+            )
+        })
+        .expect("the turn completed");
+        assert!(
+            resolved < completed,
+            "the gate must be resolved before its turn completes: resolved at {resolved}, \
+             completed at {completed}"
+        );
+        if interrupted {
+            let interrupt = find(requested, &|k| {
+                matches!(
+                    k,
+                    SessionEventKind::Input {
+                        command: Command::Interrupt,
+                        ..
+                    }
+                )
+            })
+            .expect("the interrupt is an event");
+            assert_eq!(
+                resolved,
+                interrupt + 1,
+                "the gate is resolved right behind the interrupt"
+            );
+        }
+    }
+
     /// Start a turn on `on` that runs until it is interrupted (the scenario must have one).
     pub async fn start_turn(&self, on: &AgentId) {
         self.client

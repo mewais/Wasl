@@ -307,6 +307,9 @@ async fn handoff_gate_is_withdrawn_on_interrupt_cancel_and_expiry() {
         .assert_withdrawn(&orch, g1.request_id(), "allow_once", "turn_interrupted")
         .await;
     assert_eq!(r.detail.as_deref(), Some(why.as_str()));
+    // The session itself resolved the gate, before the interrupted turn completed.
+    a.assert_gate_resolved_before_its_turn_completed(&orch, g1.request_id(), true)
+        .await;
 
     // Cancelled by the sender (the session is idle now: the gate is not tied to a turn).
     let t2 = a.delegate1(&orch, &worker, "second").await;

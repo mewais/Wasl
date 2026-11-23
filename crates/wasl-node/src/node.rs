@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tokio::sync::{watch, Notify};
 use wasit_control::{codes as ctl_codes, ControlServer, RpcError, Uplink};
-use wasit_core::GateRequest;
+use wasit_core::{GateRequest, TurnBinding};
 use wasit_diag::{Code, ErrorInfo, Ident};
 use wasit_runtime::wire::{Phase, SessionId};
 use wasit_runtime::SessionManager;
@@ -22,6 +22,7 @@ use wasl_proto::{
 };
 
 use crate::diag::{command_error, session, transport_error};
+use crate::gate::handoff_binding;
 use crate::journal::{durable, Ack, Journal, Rec};
 use crate::state::{GateInfo, InRec, OutPersist, OutRec, State};
 use crate::transport::{PeerTransport, UplinkTransport};
@@ -882,7 +883,7 @@ impl Node {
 
     /// Raise the handoff gate of a pending task on its sending session.
     pub(crate) async fn raise_handoff(&self, id: TaskId) {
-        let (sid, gate, cursor, turn) = {
+        let (sid, gate, cursor) = {
             let st = self.lock();
             let Some(r) = st.out.get(&id) else { return };
             if !matches!(r.p.state, TaskState::PendingApproval { .. }) {
@@ -918,22 +919,24 @@ impl Node {
             let Some(sid) = SessionId::parse(&t.from.session) else {
                 return;
             };
-            let (cursor, turn) = self
+            let cursor = self
                 .inner
                 .sessions
                 .snapshot(&sid)
-                .map(|s| (s.cursor, s.turn.is_some()))
-                .unwrap_or((0, false));
-            (sid, gate, cursor, turn)
+                .map(|s| s.cursor)
+                .unwrap_or(0);
+            (sid, gate, cursor)
         };
         let request_id = gate.request_id().to_string();
-        match self.raise_or_adopt(&sid, gate, cursor).await {
+        match self
+            .raise_or_adopt(&sid, gate, Some(handoff_binding()), cursor)
+            .await
+        {
             Ok(cursor) => {
                 let info = GateInfo {
                     request_id,
                     raised: true,
                     cursor,
-                    turn,
                 };
                 let ack = {
                     let mut st = self.lock();
@@ -963,13 +966,15 @@ impl Node {
         }
     }
 
-    /// Raise `gate` on `sid` and return the cursor to watch it from (`cursor`, taken right
-    /// before). A gate with its request id already pending was raised by an earlier run of
-    /// this node that ended before recording it: it is adopted, watched from just before it.
+    /// Raise `gate` on `sid`, bound to the turn that asks (`binding`: the session takes it down
+    /// with that turn), and return the cursor to watch it from (`cursor`, taken right before).
+    /// A gate with its request id already pending was raised by an earlier run of this node
+    /// that ended before recording it: it is adopted, watched from just before it.
     pub(crate) async fn raise_or_adopt(
         &self,
         sid: &SessionId,
         gate: GateRequest,
+        binding: Option<TurnBinding>,
         cursor: u64,
     ) -> Result<u64, wasit_runtime::wire::CommandError> {
         let rid = gate.request_id().to_string();
@@ -984,7 +989,16 @@ impl Node {
         if let Some(c) = pending() {
             return Ok(c);
         }
-        match self.inner.sessions.raise_gate(sid, gate).await {
+        let raised = match binding {
+            Some(binding) => {
+                self.inner
+                    .sessions
+                    .raise_gate_for_turn(sid, gate, binding)
+                    .await
+            }
+            None => self.inner.sessions.raise_gate(sid, gate).await,
+        };
+        match raised {
             Ok(()) => Ok(cursor),
             // Refused as a duplicate: the session (still loading when we looked) has it.
             Err(e @ wasit_runtime::wire::CommandError::Rejected { .. }) => pending().ok_or(e),

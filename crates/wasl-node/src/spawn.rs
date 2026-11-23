@@ -26,7 +26,7 @@ use wasl_proto::{
 };
 
 use crate::diag::rpc_error;
-use crate::gate::Answer;
+use crate::gate::{spawn_binding, spawn_turn_text, Answer};
 use crate::journal::{durable, Rec};
 use crate::node::{err, now_ms, Node};
 use crate::state::{GateInfo, SpawnPersist, SpawnPhase, SpawnRec};
@@ -253,7 +253,6 @@ impl Node {
                     request_id: spawn_request_id(&req.request_id),
                     raised: false,
                     cursor: 0,
-                    turn: false,
                 },
             },
         };
@@ -607,7 +606,7 @@ impl Node {
     }
 
     async fn raise_spawn_gate(self, id: String) {
-        let (sid, gate, cursor, turn) = {
+        let (sid, gate, cursor) = {
             let st = self.lock();
             let Some(r) = st.spawns.get(&id) else { return };
             let Some(sid) = SessionId::parse(&r.p.from.session) else {
@@ -615,21 +614,23 @@ impl Node {
             };
             let Some(plan) = &r.p.plan else { return };
             let gate = spawn_gate(&id, plan, r.p.spec.instruction.clone());
-            let (cursor, turn) = self
+            let cursor = self
                 .sessions()
                 .snapshot(&sid)
-                .map(|s| (s.cursor, s.turn.is_some()))
-                .unwrap_or((0, false));
-            (sid, gate, cursor, turn)
+                .map(|s| s.cursor)
+                .unwrap_or(0);
+            (sid, gate, cursor)
         };
         let request_id = gate.request_id().to_string();
-        match self.raise_or_adopt(&sid, gate, cursor).await {
+        match self
+            .raise_or_adopt(&sid, gate, Some(spawn_binding()), cursor)
+            .await
+        {
             Ok(cursor) => {
                 let info = GateInfo {
                     request_id,
                     raised: true,
                     cursor,
-                    turn,
                 };
                 let asking = |p: &SpawnPhase| matches!(p, SpawnPhase::Asking { .. });
                 if !self
@@ -675,9 +676,8 @@ impl Node {
             )
         };
         let Some(sid) = sid else { return };
-        // The blocked `spawn_agent` call cannot receive a result once its turn is over.
         let deadline = self.lock().spawns.get(&id).and_then(|r| r.p.deadline_ms);
-        let answer = self.await_answer(&sid, &gate, || self.still_asking(&id), |_| true);
+        let answer = self.await_answer(&sid, &gate, || self.still_asking(&id));
         let answer = match deadline {
             None => answer.await,
             Some(d) => {
@@ -715,18 +715,21 @@ impl Node {
                 .await;
                 return;
             }
-            Answer::TurnEnded { interrupted } => {
-                let (code, how) = if interrupted {
-                    (EndCode::TurnInterrupted, "was interrupted")
+            Answer::TurnEnded {
+                interrupted,
+                detail,
+            } => {
+                // The blocked `spawn_agent` call cannot receive a result once its turn is
+                // over, and the session already took the gate down with the turn.
+                let code = if interrupted {
+                    EndCode::TurnInterrupted
                 } else {
-                    (EndCode::TurnEnded, "ended")
+                    EndCode::TurnEnded
                 };
-                self.withdraw_spawn(
+                self.fail_asking(
                     &id,
                     End::new(code),
-                    format!(
-                        "the spawn request was withdrawn: the asking turn {how} before anyone answered"
-                    ),
+                    detail.unwrap_or_else(|| spawn_turn_text(interrupted)),
                 )
                 .await;
                 return;

@@ -20,11 +20,6 @@ pub struct GateInfo {
     pub raised: bool,
     /// The session's event cursor right before the raise (the watcher replays from it).
     pub cursor: u64,
-    /// Raised while the asking session's turn was running (from a tool call): the gate's
-    /// request ends with that turn — a handoff gate when the turn is interrupted, a spawn gate
-    /// when the turn ends at all (the blocked tool call can no longer receive its result).
-    #[serde(default)]
-    pub turn: bool,
 }
 
 /// A task this node's session delegated.
@@ -307,7 +302,6 @@ mod tests {
                 request_id: "g".into(),
                 raised: false,
                 cursor: 0,
-                turn: false,
             },
         };
         assert_eq!(persist(asking).ended(), None);

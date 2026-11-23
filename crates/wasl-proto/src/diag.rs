@@ -38,8 +38,6 @@ wasit_diag::diag_enum! {
 wasit_diag::diag_enum! {
     /// Why an outbound task was being withdrawn when that failed.
     pub enum WithdrawCause {
-        /// The turn that delegated was interrupted before the handoff was approved.
-        TurnInterrupted,
         /// The task's deadline passed.
         Deadline,
     }
