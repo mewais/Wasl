@@ -121,11 +121,7 @@ impl UplinkSpawnAuthority {
                 )
             })?;
         let params = serde_json::to_value(p).map_err(|e| RpcError::internal(e.to_string()))?;
-        let opts = RequestOpts {
-            host: None,
-            hops: 0,
-            deadline: self.timeout,
-        };
+        let opts = RequestOpts::new(self.timeout);
         let v = conn
             .call(method, params, opts)
             .await
