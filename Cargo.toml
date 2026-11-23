@@ -15,12 +15,12 @@ wasl-mcp = { path = "crates/wasl-mcp" }
 
 # Wasit: one pinned git source; local development overrides it with a `[patch]` in an
 # untracked `.cargo/config.toml` (see README.md).
-wasit-core = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
-wasit-control = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
-wasit-runtime = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
-wasit-shim = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
-wasit-fake-cli = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
-wasit-process = { git = "https://github.com/mewais/Wasit", branch = "claude/awesome-euler-r7x45r" }
+wasit-core = { git = "https://github.com/mewais/Wasit", branch = "session-flows" }
+wasit-control = { git = "https://github.com/mewais/Wasit", branch = "session-flows" }
+wasit-runtime = { git = "https://github.com/mewais/Wasit", branch = "session-flows" }
+wasit-shim = { git = "https://github.com/mewais/Wasit", branch = "session-flows" }
+wasit-fake-cli = { git = "https://github.com/mewais/Wasit", branch = "session-flows" }
+wasit-process = { git = "https://github.com/mewais/Wasit", branch = "session-flows" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = "0.7"
