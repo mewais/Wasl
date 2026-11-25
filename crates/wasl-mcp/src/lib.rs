@@ -710,21 +710,27 @@ impl WaslMcp {
         let outcome = tokio::select! {
             r = call => r,
             _ = cancelled.cancelled() => {
-                // The client cancelled the call (e.g. its turn was interrupted): withdraw the
-                // request so a later answer to its gate starts nothing. (If this process ends
-                // instead, the node sees the call's connection close and withdraws it too.)
-                let cancel = SpawnCancel {
-                    from: req.from.clone(),
-                    request_id: req.request_id.clone(),
-                };
-                if let Err(e) = self
-                    .call::<wasl_proto::Ack>(methods::SPAWN_CANCEL, json!(cancel), DEADLINE, true)
-                    .await
-                {
-                    emit(WaslEvent::McpSpawnCancelFailed {
-                        request: Ident::new(&req.request_id),
-                        error: foreign("call", &e),
-                    });
+                // WHY the transport check: when the MCP client disconnects, rmcp cancels this
+                // token too. Sending `wasl.spawn.cancel` then races the node's caller-gone path
+                // (the connection close), and the node may record `cancelled` instead of
+                // `caller_gone`. A closed transport means the node will withdraw the request
+                // itself via that connection close, so we send nothing. An explicit client
+                // cancel leaves the transport open, so we withdraw the request ourselves: a
+                // later answer to its gate must start nothing.
+                if !peer.is_transport_closed() {
+                    let cancel = SpawnCancel {
+                        from: req.from.clone(),
+                        request_id: req.request_id.clone(),
+                    };
+                    if let Err(e) = self
+                        .call::<wasl_proto::Ack>(methods::SPAWN_CANCEL, json!(cancel), DEADLINE, true)
+                        .await
+                    {
+                        emit(WaslEvent::McpSpawnCancelFailed {
+                            request: Ident::new(&req.request_id),
+                            error: foreign("call", &e),
+                        });
+                    }
                 }
                 return Ok(tool_error("cancelled"));
             }
