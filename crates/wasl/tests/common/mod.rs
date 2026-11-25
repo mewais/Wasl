@@ -399,7 +399,8 @@ impl Daemon {
             late,
             Err(wasit_runtime::ClientError::Command(
                 wasit_runtime::wire::CommandError::GateWithdrawn {
-                    request_id: request_id.into()
+                    request_id: request_id.into(),
+                    reason: Some(reason.clone()),
                 }
             ))
         );

@@ -757,6 +757,9 @@ async fn spawn_gate_is_withdrawn_when_the_mcp_call_is_cancelled_or_its_client_di
     assert_eq!(ended.end, End::new(EndCode::Cancelled));
 
     // Disconnected (the MCP server process goes away with its stdio).
+    // Keep the rmcp request handle alive while closing the transport: dropping it earlier
+    // would send `notifications/cancelled` and race the connection-close path, sometimes
+    // producing `cancelled` instead of the `caller_gone` we are testing.
     let handle = client
         .peer()
         .send_cancellable_request(spawn_req("w2"), PeerRequestOptions::no_options())
@@ -768,8 +771,8 @@ async fn spawn_gate_is_withdrawn_when_the_mcp_call_is_cancelled_or_its_client_di
         })
         .await;
     let rid = first_gate(&snap).unwrap();
-    drop(handle);
     within("mcp client closes", client.cancel()).await.unwrap();
+    drop(handle);
     x.a.assert_withdrawn(&x.orch, &rid, "allow_once", "caller_gone")
         .await;
     let ended = ended_spawn(&x.a, &rid["wasl-spawn-".len()..]).await;
