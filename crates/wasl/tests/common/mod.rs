@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -676,6 +676,8 @@ pub fn topology(
 /// An in-test hub linked to each daemon through `wasl bridge --no-start`.
 pub struct TestHub {
     pub hub: Hub,
+    /// The command each link's `CommandConnector` runs, keyed by host id.
+    argvs: Arc<Mutex<BTreeMap<String, Vec<String>>>>,
 }
 
 impl TestHub {
@@ -688,10 +690,20 @@ impl TestHub {
         let mut cfg = HubConfig::new(Hello::new("test-hub", "hub", "hub"));
         cfg.supervise.backoff.initial = Duration::from_millis(50);
         cfg.supervise.backoff.max = Duration::from_millis(400);
-        cfg.forward_timeout = Duration::from_secs(60);
-        let hub = Hub::new(cfg, Arc::new(CommandConnector), None);
+        // Forwarded calls carry the caller's deadline now (no hub-side cap), so none is set here.
+        let argvs: Arc<Mutex<BTreeMap<String, Vec<String>>>> = Arc::default();
+        let lookup = argvs.clone();
+        let connector = CommandConnector::new(move |spec: &HostSpec| {
+            lookup
+                .lock()
+                .unwrap()
+                .get(&spec.id.0)
+                .cloned()
+                .unwrap_or_default()
+        });
+        let hub = Hub::new(cfg, Arc::new(connector), None);
         hub.set_inbound_service(Arc::new(RoutingService::new(hub.clone(), local)));
-        let h = TestHub { hub };
+        let h = TestHub { hub, argvs };
         for d in daemons {
             h.link(d);
         }
@@ -709,9 +721,8 @@ impl TestHub {
             d.host.clone(),
             "--no-start".into(),
         ];
-        self.hub
-            .add_link(HostSpec::new(d.host.clone(), argv))
-            .unwrap();
+        self.argvs.lock().unwrap().insert(d.host.clone(), argv);
+        self.hub.add_link(HostSpec::new(d.host.clone())).unwrap();
     }
 
     /// Wait until every daemon's link is connected.
