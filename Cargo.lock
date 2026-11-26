@@ -315,6 +315,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "getrandom"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -532,6 +543,12 @@ checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "r-efi"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "redox_syscall"
@@ -1015,6 +1032,7 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 [[package]]
 name = "wasit-claude"
 version = "0.1.0"
+source = "git+https://github.com/mewais/Wasit?branch=session-flows#ea629714aa6f21233b06d4dfb70ba144ac0599f5"
 dependencies = [
  "serde_json",
  "wasit-core",
@@ -1023,6 +1041,7 @@ dependencies = [
 [[package]]
 name = "wasit-codex"
 version = "0.1.0"
+source = "git+https://github.com/mewais/Wasit?branch=session-flows#ea629714aa6f21233b06d4dfb70ba144ac0599f5"
 dependencies = [
  "serde_json",
  "wasit-core",
@@ -1031,6 +1050,7 @@ dependencies = [
 [[package]]
 name = "wasit-control"
 version = "0.1.0"
+source = "git+https://github.com/mewais/Wasit?branch=session-flows#ea629714aa6f21233b06d4dfb70ba144ac0599f5"
 dependencies = [
  "async-trait",
  "fastrand",
@@ -1041,12 +1061,15 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "wasit-diag",
  "wasit-process",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "wasit-core"
 version = "0.1.0"
+source = "git+https://github.com/mewais/Wasit?branch=session-flows#ea629714aa6f21233b06d4dfb70ba144ac0599f5"
 dependencies = [
  "base64",
  "serde",
@@ -1056,28 +1079,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasit-diag"
+version = "0.1.0"
+source = "git+https://github.com/mewais/Wasit?branch=session-flows#ea629714aa6f21233b06d4dfb70ba144ac0599f5"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "wasit-fake-cli"
 version = "0.1.0"
+source = "git+https://github.com/mewais/Wasit?branch=session-flows#ea629714aa6f21233b06d4dfb70ba144ac0599f5"
 dependencies = [
  "base64",
+ "libc",
  "regex",
  "serde",
  "serde_json",
+ "tokio",
+ "wasit-control",
  "wasit-process",
+ "wasit-shim",
 ]
 
 [[package]]
 name = "wasit-opencode"
 version = "0.1.0"
+source = "git+https://github.com/mewais/Wasit?branch=session-flows#ea629714aa6f21233b06d4dfb70ba144ac0599f5"
 dependencies = [
+ "getrandom",
  "serde_json",
  "wasit-core",
+ "wasit-process",
 ]
 
 [[package]]
 name = "wasit-process"
 version = "0.1.0"
+source = "git+https://github.com/mewais/Wasit?branch=session-flows#ea629714aa6f21233b06d4dfb70ba144ac0599f5"
 dependencies = [
+ "libc",
  "tokio",
  "windows-sys 0.59.0",
 ]
@@ -1085,8 +1131,10 @@ dependencies = [
 [[package]]
 name = "wasit-runtime"
 version = "0.1.0"
+source = "git+https://github.com/mewais/Wasit?branch=session-flows#ea629714aa6f21233b06d4dfb70ba144ac0599f5"
 dependencies = [
  "async-trait",
+ "base64",
  "fastrand",
  "futures",
  "serde",
@@ -1100,6 +1148,7 @@ dependencies = [
  "wasit-codex",
  "wasit-control",
  "wasit-core",
+ "wasit-diag",
  "wasit-opencode",
  "wasit-process",
  "wasit-shim",
@@ -1108,6 +1157,7 @@ dependencies = [
 [[package]]
 name = "wasit-shim"
 version = "0.1.0"
+source = "git+https://github.com/mewais/Wasit?branch=session-flows#ea629714aa6f21233b06d4dfb70ba144ac0599f5"
 dependencies = [
  "futures-core",
  "libc",
@@ -1115,6 +1165,7 @@ dependencies = [
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+ "wasit-diag",
  "wasit-process",
  "windows-sys 0.59.0",
 ]
@@ -1131,14 +1182,15 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tracing",
  "tracing-subscriber",
  "wasit-control",
  "wasit-core",
+ "wasit-diag",
  "wasit-fake-cli",
  "wasit-process",
  "wasit-runtime",
  "wasit-shim",
+ "wasl",
  "wasl-mcp",
  "wasl-node",
  "wasl-proto",
@@ -1152,7 +1204,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tracing",
+ "wasit-diag",
  "wasl-proto",
 ]
 
@@ -1172,9 +1224,9 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
- "tracing",
  "wasit-control",
  "wasit-core",
+ "wasit-diag",
  "wasl-proto",
 ]
 
@@ -1187,9 +1239,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tracing",
  "wasit-control",
  "wasit-core",
+ "wasit-diag",
  "wasit-runtime",
  "wasl-audit",
  "wasl-proto",
@@ -1204,6 +1256,7 @@ dependencies = [
  "serde_json",
  "ts-rs",
  "wasit-core",
+ "wasit-diag",
 ]
 
 [[package]]
